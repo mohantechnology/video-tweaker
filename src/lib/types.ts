@@ -10,6 +10,9 @@ export type ColorSettings = {
   opacity: number
 }
 
+export const PLAYBACK_RATE_MIN = 0.1
+export const PLAYBACK_RATE_MAX = 4
+
 export type EffectSettings = ColorSettings & {
   enabled: boolean
   flipH: boolean
@@ -23,6 +26,7 @@ export type EffectSettings = ColorSettings & {
   loop: boolean
   playbackTouched: boolean
   presetId: string
+  rememberProgress: boolean
 }
 
 export const COLOR_KEYS: (keyof ColorSettings)[] = [
@@ -65,7 +69,8 @@ export function defaultSettings(): EffectSettings {
     muted: false,
     loop: false,
     playbackTouched: false,
-    presetId: "default"
+    presetId: "default",
+    rememberProgress: true
   }
 }
 

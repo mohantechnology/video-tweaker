@@ -1,5 +1,6 @@
 import { applyPlayback, applyVisual, clearVisual, visualWritesLocked } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
+import { createProgressTracker } from "./progress"
 import type { EffectSettings } from "./types"
 
 export const HOST_ID = "vee-csui"
@@ -50,19 +51,9 @@ function placeDock(video: HTMLVideoElement | null): void {
     return
   }
 
-  const rect = video.getBoundingClientRect()
-  const lift = rect.height > 240 ? 56 : 14
-  const bottom = Math.max(8, window.innerHeight - rect.bottom + lift)
-  const right = Math.max(8, window.innerWidth - rect.right + 12)
   dock.style.display = "flex"
-  dock.style.right = `${right}px`
-  dock.style.bottom = `${bottom}px`
-
-  const panel = dock.querySelector(".vee-panel") as HTMLElement | null
-  if (panel) {
-    const available = window.innerHeight - bottom - 72
-    panel.style.maxHeight = `${Math.max(180, Math.min(available, 560))}px`
-  }
+  dock.style.right = "auto"
+  dock.style.top = "auto"
 }
 
 export function startVideoBridge(options: {
@@ -81,6 +72,7 @@ export function startVideoBridge(options: {
   let rootObserver: MutationObserver | null = null
   let styleObserver: MutationObserver | null = null
   let interval = 0
+  const progress = createProgressTracker(options.getSettings)
 
   const schedule = () => {
     if (stopped) return
@@ -153,6 +145,7 @@ export function startVideoBridge(options: {
     }
 
     placeDock(next)
+    progress.follow(next)
     if (!next) return
 
     const settings = options.getSettings()
@@ -192,6 +185,7 @@ export function startVideoBridge(options: {
       window.removeEventListener("resize", schedule)
       window.removeEventListener("yt-navigate-finish", schedule)
       document.removeEventListener("visibilitychange", schedule)
+      progress.stop()
       if (current) clearVisual(current)
       current = null
       activeVideo = null

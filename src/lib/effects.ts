@@ -1,4 +1,6 @@
 import {
+  PLAYBACK_RATE_MAX,
+  PLAYBACK_RATE_MIN,
   type ColorSettings,
   type EffectSettings,
   defaultColor,
@@ -143,7 +145,7 @@ export function applyPlayback(
   if (!settings.enabled || !settings.playbackTouched) return
 
   try {
-    const rate = clamp(settings.playbackRate, 0.25, 4)
+    const rate = clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
     if (video.playbackRate !== rate) video.playbackRate = rate
 
     const pitched = video as PitchVideo
