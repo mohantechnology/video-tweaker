@@ -1,0 +1,327 @@
+#plasmo-shadow-container,
+.plasmo-csui-container {
+  pointer-events: none !important;
+  position: static !important;
+  display: block !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: visible !important;
+  top: auto !important;
+  left: auto !important;
+  z-index: auto !important;
+  background: none !important;
+  border: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.vee-dock,
+.vee-dock * {
+  box-sizing: border-box;
+}
+
+.vee-dock {
+  all: initial;
+  position: fixed;
+  z-index: 2147483646;
+  display: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100vw - 20px);
+  color: #f6f3ff;
+  font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  pointer-events: auto;
+  -webkit-font-smoothing: antialiased;
+}
+
+.vee-dock button,
+.vee-dock input {
+  font: inherit;
+  color: inherit;
+}
+
+.vee-launcher {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: white;
+  background: linear-gradient(145deg, #b9a0ff 0%, #7c5cff 42%, #5340e6 100%);
+  box-shadow:
+    0 10px 28px rgba(78, 56, 210, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.vee-launcher:hover {
+  transform: translateY(-1px);
+}
+
+.vee-launcher:focus-visible,
+.vee-panel button:focus-visible,
+.vee-panel input:focus-visible {
+  outline: 2px solid #d8ccff;
+  outline-offset: 2px;
+}
+
+.vee-launcher-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #3dffb0;
+  box-shadow: 0 0 0 2px rgba(20, 16, 32, 0.85);
+}
+
+.vee-panel {
+  width: 312px;
+  max-height: 560px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 22px;
+  color: #f6f3ff;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    rgba(16, 14, 26, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(22px) saturate(1.35);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+}
+
+.vee-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.vee-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.vee-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vee-title strong {
+  font-size: 14px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+}
+
+.vee-title span {
+  color: rgba(246, 243, 255, 0.58);
+  font-size: 11px;
+}
+
+.vee-switch {
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.12);
+  padding: 0;
+  position: relative;
+  cursor: pointer;
+  flex: none;
+}
+
+.vee-switch[data-on="true"] {
+  background: linear-gradient(145deg, #8d73ff, #6246ea);
+  border-color: transparent;
+}
+
+.vee-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: white;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+  transition: transform 160ms ease;
+  display: block;
+}
+
+.vee-switch[data-on="true"] i {
+  transform: translateX(18px);
+}
+
+.vee-presets {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  margin-bottom: 8px;
+  scrollbar-width: none;
+}
+
+.vee-presets::-webkit-scrollbar {
+  display: none;
+}
+
+.vee-chip,
+.vee-speed,
+.vee-text-btn,
+.vee-action {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(246, 243, 255, 0.86);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.vee-chip {
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.vee-chip[data-on="true"],
+.vee-speed[data-on="true"],
+.vee-action[data-on="true"] {
+  background: linear-gradient(145deg, #8d73ff, #5d46e8);
+  border-color: transparent;
+  color: white;
+}
+
+.vee-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.vee-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.vee-section h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 680;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(246, 243, 255, 0.46);
+}
+
+.vee-text-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.vee-row {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.vee-row-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(246, 243, 255, 0.86);
+  font-size: 12px;
+}
+
+.vee-row-label b {
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  color: white;
+}
+
+.vee-dock input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.vee-dock input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #8d73ff var(--p, 0%),
+    rgba(255, 255, 255, 0.16) var(--p, 0%)
+  );
+}
+
+.vee-dock input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 999px;
+  border: 0;
+  background: white;
+  box-shadow: 0 0 0 4px rgba(141, 115, 255, 0.32);
+}
+
+.vee-dock input[type="range"]::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.vee-dock input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: #8d73ff;
+}
+
+.vee-dock input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: white;
+  box-shadow: 0 0 0 4px rgba(141, 115, 255, 0.32);
+}
+
+.vee-toggles,
+.vee-speeds,
+.vee-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vee-action,
+.vee-speed {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.vee-panel.is-off .vee-body {
+  opacity: 0.5;
+}

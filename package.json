@@ -1,0 +1,33 @@
+{
+  "name": "video-effects",
+  "displayName": "Video Effects",
+  "version": "0.1.0",
+  "description": "Live color, geometry, and playback controls for HTML5 videos.",
+  "private": true,
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "build:firefox": "plasmo build --target=firefox-mv3",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "plasmo": "^0.90.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.304",
+    "@types/node": "^22.15.3",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.8.2"
+  },
+  "manifest": {
+    "permissions": ["storage"],
+    "browser_specific_settings": {
+      "gecko": {
+        "id": "video-effects@localhost"
+      }
+    }
+  }
+}
