@@ -169,7 +169,7 @@ export function defaultDockLayout(): DockLayout {
   return {
     mode: "max",
     max: { x: 0, y: DOCK_MARGIN, width: 332, height: 480, pinned: true },
-    min: { x: 0, y: DOCK_MARGIN, width: 260, height: 48, pinned: true },
+    min: { x: 0, y: DOCK_MARGIN, width: 300, height: 48, pinned: true },
     closed: { x: 0, y: DOCK_MARGIN, width: 48, height: 48, pinned: true }
   }
 }
@@ -203,7 +203,7 @@ function fitStoredBox(box: DockBox, slot: DockMode): DockBox {
   if (slot === "min") {
     return {
       ...box,
-      width: Math.max(248, box.width),
+      width: Math.max(292, box.width),
       height: Math.max(44, box.height)
     }
   }
@@ -293,7 +293,7 @@ export function resizeDockBox(
   if (slot !== "min" && edge.includes("s")) height = start.height + dy
 
   if (slot === "min") {
-    width = clampNumber(width, Math.min(248, maxWidth), maxWidth)
+    width = clampNumber(width, Math.min(292, maxWidth), maxWidth)
     height = start.height
   } else if (slot === "closed") {
     const diameter = clampNumber(width, Math.min(40, maxWidth), Math.min(96, maxWidth))

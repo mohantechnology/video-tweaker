@@ -1,4 +1,5 @@
 import cssText from "data-text:./overlay.css"
+import siteCssText from "data-text:../components/site-policy.css"
 import {
   AudioLines,
   ChevronDown,
@@ -11,6 +12,7 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
+  Globe,
   Layers,
   Link2,
   Maximize2,
@@ -37,6 +39,7 @@ import {
   type Ref
 } from "react"
 
+import { SitePolicyPanel } from "~components/site-policy-panel"
 import {
   HOST_ID,
   getActiveVideo,
@@ -44,6 +47,7 @@ import {
   startVideoBridge,
   type VideoBridge
 } from "~lib/bridge"
+import { readPageTitle } from "~lib/domains"
 import {
   BLUR_MAX,
   OPACITY_MIN,
@@ -75,6 +79,16 @@ import {
   type SavedProgress
 } from "~lib/progress"
 import { PRESETS, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
+import {
+  SITE_POLICY_KEY,
+  defaultSitePolicy,
+  loadSitePolicy,
+  policiesEqual,
+  sanitizeSitePolicy,
+  saveSitePolicy,
+  siteAllowed,
+  type SitePolicy
+} from "~lib/sites"
 import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
 import {
   MAX_USER_PRESETS,
@@ -117,7 +131,7 @@ export const getShadowHostId = () => HOST_ID
 
 export const getStyle: PlasmoGetStyle = () => {
   const style = document.createElement("style")
-  style.textContent = cssText
+  style.textContent = `${cssText}\n${siteCssText}`
   return style
 }
 
@@ -318,6 +332,9 @@ function sectionIsVisual(flag: SectionFlag): boolean {
 function Overlay() {
   const hostname = location.hostname
   const [settings, setSettings] = useState<EffectSettings>(defaultSettings)
+  const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
+  const [policyReady, setPolicyReady] = useState(false)
+  const [sitesOpen, setSitesOpen] = useState(false)
   const [ready, setReady] = useState(false)
   const [hasVideo, setHasVideo] = useState(false)
   const [pipOn, setPipOn] = useState(false)
@@ -336,6 +353,7 @@ function Overlay() {
     height: window.innerHeight
   }))
   const settingsRef = useRef(settings)
+  const policyRef = useRef(policy)
   const appliedRef = useRef(settings)
   const readyRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -376,6 +394,7 @@ function Overlay() {
   }>(null)
 
   settingsRef.current = settings
+  policyRef.current = policy
   readyRef.current = ready
   layoutRef.current = layout
   presetOpenRef.current = presetOpen
@@ -383,6 +402,17 @@ function Overlay() {
 
   useEffect(() => {
     let alive = true
+    void loadSitePolicy()
+      .then((loaded) => {
+        if (!alive) return
+        policyRef.current = loaded
+        setPolicy(loaded)
+        setPolicyReady(true)
+      })
+      .catch(() => {
+        if (!alive) return
+        setPolicyReady(true)
+      })
     void loadSiteSettings(hostname).then((loaded) => {
       if (!alive) return
       settingsRef.current = loaded
@@ -441,9 +471,10 @@ function Overlay() {
   }, [hostname])
 
   useEffect(() => {
-    if (!ready) return
+    if (!ready || !policyReady) return
     const bridge = startVideoBridge({
       getSettings: () => effectiveSettings(appliedRef.current),
+      isAllowed: () => siteAllowed(hostname, policyRef.current),
       onPresence: setHasVideo,
       onVideo: (video) => {
         if (!video || settingsRef.current.playbackTouched) return
@@ -465,7 +496,12 @@ function Overlay() {
       bridge.stop()
       bridgeRef.current = null
     }
-  }, [ready])
+  }, [ready, policyReady, hostname])
+
+  useEffect(() => {
+    if (!policyReady) return
+    bridgeRef.current?.applyNow()
+  }, [policy, policyReady])
 
   useEffect(() => {
     repositionDock()
@@ -520,6 +556,10 @@ function Overlay() {
           setSettings(incoming)
           bridgeRef.current?.applyNow()
         }
+      }
+      if (changes[SITE_POLICY_KEY]) {
+        const incoming = sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue)
+        setPolicy((current) => (policiesEqual(current, incoming) ? current : incoming))
       }
       if (changes[USER_PRESETS_KEY]) {
         setUserPresets(sanitizeUserPresets(changes[USER_PRESETS_KEY].newValue))
@@ -623,6 +663,12 @@ function Overlay() {
       window.removeEventListener("pointermove", onPointerMove)
     }
   }, [layout?.mode, presetOpen, dragging])
+
+  const updatePolicy = (next: SitePolicy) => {
+    policyRef.current = next
+    setPolicy(next)
+    void saveSitePolicy(next)
+  }
 
   const patch = (next: Partial<EffectSettings>, touchPlayback = false, timing: ApplyTiming = "now") => {
     dirtyRef.current = true
@@ -852,6 +898,8 @@ function Overlay() {
     onPointerCancel: onPointerUp
   }
 
+  const allowed = siteAllowed(hostname, policy)
+  const showSites = sitesOpen || !allowed
   const painted = effectiveSettings(settings)
   const live =
     settings.enabled &&
@@ -860,6 +908,7 @@ function Overlay() {
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
 
   if (!hasVideo || !layout || layout.mode === "closed") return null
+  if (!allowed && window.top !== window) return null
 
   const box = clampDockBox(layout[layout.mode], viewport)
   const tabOn = settings[tabFlag(tab)]
@@ -897,9 +946,21 @@ function Overlay() {
           </button>
           <div className="vee-mini-copy">
             <strong>Video Effects</strong>
-            <span>{settings.enabled ? "Effects on" : "Effects off"}</span>
+            <span>{!allowed ? "Off for this site" : settings.enabled ? "Effects on" : "Effects off"}</span>
           </div>
-          {live ? <span className="vee-mini-dot" /> : null}
+          {live && allowed ? <span className="vee-mini-dot" /> : null}
+          <button
+            type="button"
+            className="vee-icon-btn"
+            aria-label="Sites"
+            title="Sites"
+            data-on={String(showSites)}
+            onClick={() => {
+              setSitesOpen(true)
+              setMode("max")
+            }}>
+            <Globe size={15} strokeWidth={1.75} />
+          </button>
           <button
             ref={presetButtonRef}
             type="button"
@@ -978,9 +1039,27 @@ function Overlay() {
             </button>
             <div className="vee-title">
               <strong>Video Effects</strong>
-              <span>{settings.enabled ? "On this video" : "Effects are off"}</span>
+              <span>
+                {!allowed ? "Off for this site" : showSites ? "Where effects run" : settings.enabled ? "On this video" : "Effects are off"}
+              </span>
             </div>
             <div className="vee-header-actions">
+              <button
+                type="button"
+                className="vee-icon-btn"
+                aria-label="Sites"
+                aria-pressed={showSites}
+                title="Sites"
+                data-on={String(showSites)}
+                onClick={() => {
+                  if (!allowed) {
+                    setSitesOpen(true)
+                    return
+                  }
+                  setSitesOpen((open) => !open)
+                }}>
+                <Globe size={15} strokeWidth={1.75} />
+              </button>
               <button
                 ref={presetButtonRef}
                 type="button"
@@ -1028,6 +1107,12 @@ function Overlay() {
             ) : null}
           </header>
 
+          {showSites ? (
+            <div className="vee-body vee-sites-body">
+              <SitePolicyPanel hostname={hostname} policy={policy} onChange={updatePolicy} />
+            </div>
+          ) : (
+            <>
           <div className="vee-tabs" role="tablist" aria-label="Effect groups">
             {TABS.map((item) => {
               const Icon = item.icon
@@ -1574,6 +1659,8 @@ function Overlay() {
               {actions.reset}
             </button>
           </div>
+            </>
+          )}
         </section>
       ) : null}
 
@@ -1630,7 +1717,7 @@ function progressMatchesPage(row: SavedProgress): boolean {
 
 function progressDisplayTitle(row: SavedProgress): string {
   if (progressMatchesPage(row)) {
-    const live = document.title.replace(/\s+/g, " ").trim()
+    const live = readPageTitle()
     if (live) return live
   }
   return row.title || row.label

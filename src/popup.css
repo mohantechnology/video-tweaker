@@ -6,6 +6,8 @@ html,
 body {
   margin: 0;
   width: 320px;
+  max-height: 560px;
+  overflow: auto;
   background: #14121c;
   color: #f6f3ff;
   font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
@@ -25,7 +27,42 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
+}
+
+.popup-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.popup-tab {
+  position: relative;
+  margin: 0 0 -1px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
+  background: transparent;
+  color: rgba(246, 243, 255, 0.5);
+  padding: 8px 18px 10px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+}
+
+.popup-tab[aria-selected="true"] {
+  color: #f6f3ff;
+  background: #14121c;
+  border-color: rgba(141, 115, 255, 0.7);
+  border-bottom: 1px solid #14121c;
+}
+
+.popup-tab:focus-visible {
+  outline: 2px solid #d8ccff;
+  outline-offset: 2px;
 }
 
 .mark {

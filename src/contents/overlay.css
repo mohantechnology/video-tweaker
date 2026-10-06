@@ -1041,7 +1041,7 @@ a.vee-progress-link:hover {
   cursor: nesw-resize;
 }
 
-.vee-panel.is-off .vee-body {
+.vee-panel.is-off .vee-body:not(.vee-sites-body) {
   opacity: 0.55;
 }
 

@@ -1,5 +1,9 @@
 import { PROGRESS_SAVE_INTERVAL_MS } from "../settings"
+import { readPageTitle, siteSkipsResume } from "./domains"
+import { registrableDomain } from "./host"
 import type { EffectSettings } from "./types"
+
+export { registrableDomain }
 
 export const PROGRESS_KEY = "veeProgress"
 const MAX_ENTRIES = 240
@@ -118,7 +122,7 @@ function loadEntry(key: string): Promise<ProgressEntry | null> {
 }
 
 function pageTitle(): string {
-  return document.title.replace(/\s+/g, " ").trim().slice(0, 160)
+  return readPageTitle()
 }
 
 function pageUrl(): string {
@@ -160,40 +164,6 @@ function clearEntry(key: string): void {
     cache = map
     await chrome.storage.local.set({ [PROGRESS_KEY]: map })
   })
-}
-
-const COMPOUND_SUFFIXES = new Set([
-  "co.uk",
-  "org.uk",
-  "ac.uk",
-  "gov.uk",
-  "co.jp",
-  "co.kr",
-  "co.in",
-  "co.id",
-  "com.au",
-  "net.au",
-  "org.au",
-  "com.br",
-  "com.mx",
-  "co.nz",
-  "co.za",
-  "com.tr",
-  "com.sg",
-  "com.hk",
-  "com.tw",
-  "com.ar",
-  "com.my"
-])
-
-export function registrableDomain(hostname: string): string {
-  const host = hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "")
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host
-  const parts = host.split(".").filter(Boolean)
-  if (parts.length <= 2) return parts.join(".")
-  const lastTwo = parts.slice(-2).join(".")
-  if (COMPOUND_SUFFIXES.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join(".")
-  return lastTwo
 }
 
 export type SavedProgress = {
@@ -391,6 +361,7 @@ function startRestore(video: HTMLVideoElement, time: number, onDone: () => void)
 
 export function createProgressTracker(getSettings: () => EffectSettings): {
   follow: (video: HTMLVideoElement | null) => void
+  setTracking: (on: boolean) => void
   stop: () => void
 } {
   let video: HTMLVideoElement | null = null
@@ -404,6 +375,7 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
   let retryAfter = 0
   let ticketId = 0
   let stopped = false
+  let tracking = true
   let cancelRestore: (() => void) | null = null
   let unbind: (() => void) | null = null
 
@@ -416,9 +388,11 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
     pendingKey = ""
   }
 
+  const resumeBlocked = () => !getSettings().rememberProgress || siteSkipsResume()
+
   const persist = (force = false) => {
-    if (stopped || !video || !key) return
-    if (!getSettings().rememberProgress || holdSaves || isLikelyAd(video)) return
+    if (stopped || !tracking || !video || !key) return
+    if (resumeBlocked() || holdSaves || isLikelyAd(video)) return
     const time = video.currentTime
     const duration = video.duration
     if (!Number.isFinite(time) || time < MIN_TIME || duration === Infinity) return
@@ -467,7 +441,7 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
   }
 
   const maybeRestore = (next: HTMLVideoElement, nextKey: string) => {
-    if (!getSettings().rememberProgress) {
+    if (!tracking || resumeBlocked()) {
       clearRestore()
       appliedKey = ""
       return
@@ -483,7 +457,7 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
 
     void loadEntry(nextKey).then((saved) => {
       if (stopped || ticket !== ticketId || video !== next || key !== nextKey) return
-      if (!getSettings().rememberProgress || isLikelyAd(next)) {
+      if (!tracking || resumeBlocked() || isLikelyAd(next)) {
         holdSaves = false
         pendingKey = ""
         return
@@ -537,6 +511,10 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
   const timer = window.setInterval(() => persist(false), PROGRESS_SAVE_INTERVAL_MS)
 
   return {
+    setTracking(on: boolean) {
+      tracking = on
+      if (!on) clearRestore()
+    },
     follow(next) {
       if (stopped) return
       const nextKey = next ? progressStorageKey(next) : ""
@@ -556,7 +534,7 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
       }
 
       if (!next) return
-      const blocked = isLikelyAd(next) || !getSettings().rememberProgress
+      const blocked = isLikelyAd(next) || !tracking || resumeBlocked()
       if (blocked) {
         if (appliedKey || pendingKey || cancelRestore) {
           clearRestore()

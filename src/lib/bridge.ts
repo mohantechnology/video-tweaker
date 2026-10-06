@@ -4,6 +4,7 @@ import {
   applyVisual,
   clearNativeControls,
   clearVisual,
+  releasePlayback,
   visualWritesLocked
 } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
@@ -69,6 +70,7 @@ function placeDock(video: HTMLVideoElement | null): void {
 
 export function startVideoBridge(options: {
   getSettings: () => EffectSettings
+  isAllowed?: () => boolean
   onPresence: (present: boolean) => void
   onVideo?: (video: HTMLVideoElement | null) => void
 }): VideoBridge {
@@ -140,18 +142,30 @@ export function startVideoBridge(options: {
     for (const video of videos) bindVideo(video)
 
     const next = document.hidden ? current : findMainVideo(videos)
+    const allowed = options.isAllowed?.() !== false
     if (current && current !== next) {
       clearVisual(current)
       clearNativeControls(current)
+    }
+    if (current && !allowed) {
+      clearVisual(current)
+      clearNativeControls(current)
+      releasePlayback(current)
     }
 
     if (next !== current) {
       current = next
       activeVideo = next
       stamp = ""
-      if (next) watchStyle(next)
-      else styleObserver?.disconnect()
-      options.onVideo?.(next)
+      styleObserver?.disconnect()
+      styleObserver = null
+      if (next && allowed) watchStyle(next)
+      if (allowed) options.onVideo?.(next)
+    } else if (!allowed) {
+      styleObserver?.disconnect()
+      styleObserver = null
+    } else if (next && !styleObserver) {
+      watchStyle(next)
     }
 
     const now = !!next
@@ -161,6 +175,11 @@ export function startVideoBridge(options: {
     }
 
     placeDock(next)
+    progress.setTracking(allowed)
+    if (!allowed) {
+      progress.follow(null)
+      return
+    }
     progress.follow(next)
     if (!next) return
 

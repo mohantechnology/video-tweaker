@@ -1,7 +1,18 @@
 import { ChevronDown } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
+import { SitePolicyPanel } from "~components/site-policy-panel"
 import { defaultSnapshot, presetLabel, type UserPreset } from "~lib/presets"
+import {
+  SITE_POLICY_KEY,
+  defaultSitePolicy,
+  hostFromUrl,
+  normalizeHost,
+  loadSitePolicy,
+  sanitizeSitePolicy,
+  saveSitePolicy,
+  type SitePolicy
+} from "~lib/sites"
 import {
   OPEN_MESSAGE,
   USER_PRESETS_KEY,
@@ -14,6 +25,7 @@ import {
 } from "~lib/storage"
 import { settingsEqual, type EffectSettings } from "~lib/types"
 
+import "./components/site-policy.css"
 import "./popup.css"
 
 type ReadyState = {
@@ -46,24 +58,31 @@ async function readPage(
 
 function Popup() {
   const [state, setState] = useState<PopupState>({ kind: "loading" })
+  const [pageHost, setPageHost] = useState("")
+  const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [savedPresets, setSavedPresets] = useState<UserPreset[]>([])
   const [presetMenu, setPresetMenu] = useState(false)
+  const [pane, setPane] = useState<"general" | "sites">("general")
   const presetRowRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let alive = true
 
     const load = async () => {
-      const tab = await readActiveTab()
+      const [tab, storedPolicy] = await Promise.all([readActiveTab(), loadSitePolicy()])
       if (!alive) return
+      setPolicy(storedPolicy)
       if (!tab?.id) {
+        setPageHost("")
         setState({ kind: "unsupported" })
         return
       }
 
+      const tabHost = tab.url ? hostFromUrl(tab.url) : ""
       const page = await readPage(tab.id)
       if (!alive) return
       if (!page?.hostname) {
+        setPageHost(tabHost)
         const url = tab.url ?? ""
         if (url.startsWith("http://") || url.startsWith("https://")) {
           setState({ kind: "missing" })
@@ -72,6 +91,7 @@ function Popup() {
         }
         return
       }
+      setPageHost(page.hostname)
 
       const [stored, saved] = await Promise.all([
         loadSiteSettings(page.hostname),
@@ -96,6 +116,7 @@ function Popup() {
       area: string
     ) => {
       if (area !== "local") return
+      if (changes[SITE_POLICY_KEY]) setPolicy(sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue))
       if (changes[USER_PRESETS_KEY]) void loadUserPresets().then(setSavedPresets)
       setState((current) => {
         if (current.kind !== "ready") return current
@@ -158,6 +179,16 @@ function Popup() {
 
   const applyDefault = () => applySnapshot("default", defaultSnapshot())
 
+  const updatePolicy = (next: SitePolicy) => {
+    setPolicy(next)
+    void saveSitePolicy(next)
+  }
+
+  const showPane = (next: "general" | "sites") => {
+    setPresetMenu(false)
+    setPane(next)
+  }
+
   const openControls = async () => {
     if (state.kind !== "ready") return
     await requestOpenPanel(state.hostname)
@@ -176,21 +207,50 @@ function Popup() {
         </div>
         <div>
           <h1>Video Effects</h1>
-          <p>{state.kind === "ready" ? state.hostname : "Color, shape, and playback"}</p>
+          <p>
+            {state.kind === "ready"
+              ? normalizeHost(state.hostname) ?? state.hostname
+              : "Color, shape, and playback"}
+          </p>
         </div>
       </div>
 
-      {state.kind === "loading" ? <p className="note">Looking at this page…</p> : null}
+      <div className="popup-tabs" role="tablist" aria-label="Popup sections">
+        <button
+          type="button"
+          className="popup-tab"
+          role="tab"
+          aria-selected={pane === "general"}
+          onClick={() => showPane("general")}>
+          General
+        </button>
+        <button
+          type="button"
+          className="popup-tab"
+          role="tab"
+          aria-selected={pane === "sites"}
+          onClick={() => showPane("sites")}>
+          Site list
+        </button>
+      </div>
 
-      {state.kind === "unsupported" ? (
+      {pane === "sites" ? (
+        <SitePolicyPanel hostname={pageHost} policy={policy} onChange={updatePolicy} />
+      ) : null}
+
+      {pane === "general" && state.kind === "loading" ? (
+        <p className="note">Looking at this page…</p>
+      ) : null}
+
+      {pane === "general" && state.kind === "unsupported" ? (
         <p className="note">Open a normal web page with a video, then use the controls there.</p>
       ) : null}
 
-      {state.kind === "missing" ? (
+      {pane === "general" && state.kind === "missing" ? (
         <p className="note">Refresh this page once so Video Effects can attach to the player.</p>
       ) : null}
 
-      {state.kind === "ready" ? (
+      {pane === "general" && state.kind === "ready" ? (
         <>
           <section className="card">
             <div className="row">
