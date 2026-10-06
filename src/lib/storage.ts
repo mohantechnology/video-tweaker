@@ -1,3 +1,14 @@
+import {
+  BLUR_MAX,
+  CROP_MAX,
+  OPACITY_MAX,
+  OPACITY_MIN,
+  STRETCH_MAX,
+  STRETCH_MIN,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  clamp
+} from "./effects"
 import { PRESET_SNAPSHOT_KEYS, defaultSnapshot, type PresetSnapshot, type UserPreset } from "./presets"
 import { defaultSettings, type EffectSettings } from "./types"
 
@@ -31,6 +42,15 @@ export function normalizeSettings(value: unknown): EffectSettings {
   if (typeof raw.cropRight !== "number" && finiteNumber(raw.cropX)) next.cropRight = raw.cropX
   if (typeof raw.cropTop !== "number" && finiteNumber(raw.cropY)) next.cropTop = raw.cropY
   if (typeof raw.cropBottom !== "number" && finiteNumber(raw.cropY)) next.cropBottom = raw.cropY
+  next.stretchX = clamp(next.stretchX, STRETCH_MIN, STRETCH_MAX)
+  next.stretchY = clamp(next.stretchY, STRETCH_MIN, STRETCH_MAX)
+  next.zoom = clamp(Math.round(next.zoom * 100) / 100, ZOOM_MIN, ZOOM_MAX)
+  next.cropLeft = clamp(next.cropLeft, 0, CROP_MAX)
+  next.cropRight = clamp(next.cropRight, 0, CROP_MAX)
+  next.cropTop = clamp(next.cropTop, 0, CROP_MAX)
+  next.cropBottom = clamp(next.cropBottom, 0, CROP_MAX)
+  next.blur = Math.round(clamp(next.blur, 0, BLUR_MAX) * 10) / 10
+  next.opacity = clamp(next.opacity, OPACITY_MIN, OPACITY_MAX)
   return next
 }
 
@@ -179,7 +199,7 @@ function fitStoredBox(box: DockBox, slot: DockMode): DockBox {
   if (slot === "min") {
     return {
       ...box,
-      width: Math.max(200, box.width),
+      width: Math.max(248, box.width),
       height: Math.max(44, box.height)
     }
   }
@@ -269,7 +289,7 @@ export function resizeDockBox(
   if (slot !== "min" && edge.includes("s")) height = start.height + dy
 
   if (slot === "min") {
-    width = clampNumber(width, Math.min(200, maxWidth), maxWidth)
+    width = clampNumber(width, Math.min(248, maxWidth), maxWidth)
     height = start.height
   } else if (slot === "closed") {
     const diameter = clampNumber(width, Math.min(40, maxWidth), Math.min(96, maxWidth))

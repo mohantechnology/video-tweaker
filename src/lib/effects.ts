@@ -10,9 +10,18 @@ import {
 const colorDefaults = defaultColor()
 const visualDefaults = defaultSettings()
 
-export const CROP_MAX = 400
-export const STRETCH_MIN = 0.01
+/** CSS inset percent. The crop sliders show this 0–50 range as 0–100%. */
+export const CROP_MAX = 50
+export const CROP_CONTROL_MAX = 100
+/** Below this the picture collapses, and the player used to flicker as it was lost and found. */
+export const STRETCH_MIN = 0.25
 export const STRETCH_MAX = 4
+/** 10%–400%. CSS scale supports this; the player may clip the picture above 100%. */
+export const ZOOM_MIN = 0.1
+export const ZOOM_MAX = 4
+export const BLUR_MAX = 20
+export const OPACITY_MIN = 0.02
+export const OPACITY_MAX = 1
 
 export const SECTION_FIELDS = {
   basicVideoOn: ["brightness", "contrast", "saturate"],
@@ -30,9 +39,7 @@ export const SECTION_FIELDS = {
   ],
   advancedVideoOn: ["hueRotate", "grayscale", "sepia", "invert", "blur", "opacity"],
   basicAudioOn: ["volume", "muted"],
-  advancedAudioOn: ["preservePitch"],
-  basicPlaybackOn: ["playbackRate", "loop"],
-  advancedPlaybackOn: ["rememberProgress", "showNativeControls"]
+  basicPlaybackOn: ["playbackRate", "preservePitch", "loop"]
 } as const satisfies Record<string, readonly (keyof EffectSettings)[]>
 
 export type SectionFlag = keyof typeof SECTION_FIELDS
@@ -50,14 +57,18 @@ export function effectiveSettings(settings: EffectSettings): EffectSettings {
   const next = { ...settings }
   const flags = Object.keys(SECTION_FIELDS) as SectionFlag[]
   for (const flag of flags) {
-    if (settings[flag] || flag === "advancedPlaybackOn") continue
+    if (settings[flag]) continue
     for (const key of SECTION_FIELDS[flag]) assign(next, key, defaults[key])
   }
-  if (!settings.advancedPlaybackOn) {
-    next.rememberProgress = false
-    next.showNativeControls = false
-  }
   return next
+}
+
+export function cropControlToCss(control: number): number {
+  return round((clamp(control, 0, CROP_CONTROL_MAX) / CROP_CONTROL_MAX) * CROP_MAX, 2)
+}
+
+export function cropCssToControl(css: number): number {
+  return Math.round((clamp(css, 0, CROP_MAX) / CROP_MAX) * CROP_CONTROL_MAX)
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -123,9 +134,11 @@ export function buildFilter(settings: EffectSettings): string {
 }
 
 export function buildTransform(settings: EffectSettings): string {
-  const zoom = settings.zoom
-  const x = (settings.flipH ? -1 : 1) * zoom * settings.stretchX
-  const y = (settings.flipV ? -1 : 1) * zoom * settings.stretchY
+  const zoom = clamp(settings.zoom, ZOOM_MIN, ZOOM_MAX)
+  const stretchX = clamp(settings.stretchX, STRETCH_MIN, STRETCH_MAX)
+  const stretchY = clamp(settings.stretchY, STRETCH_MIN, STRETCH_MAX)
+  const x = (settings.flipH ? -1 : 1) * zoom * stretchX
+  const y = (settings.flipV ? -1 : 1) * zoom * stretchY
   return `rotate(${round(settings.rotate, 2)}deg) scale(${round(x)}, ${round(y)})`
 }
 
@@ -272,13 +285,7 @@ function writeTransport(video: HTMLVideoElement, rate: number, loop: boolean): v
   if (video.loop !== loop) video.loop = loop
 }
 
-function writeAudio(
-  video: HTMLVideoElement,
-  preservePitch: boolean,
-  volume: number,
-  muted: boolean
-): void {
-  writePitch(video, preservePitch)
+function writeAudio(video: HTMLVideoElement, volume: number, muted: boolean): void {
   const nextVolume = clamp(volume, 0, 1)
   if (Math.abs(video.volume - nextVolume) > 0.005) video.volume = nextVolume
   if (video.muted !== muted) video.muted = muted
@@ -296,11 +303,14 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
       if (!state.playback) {
         state.playbackRate = video.playbackRate || 1
         state.loop = video.loop
+        state.preservesPitch = readPitch(video)
       }
       writeTransport(video, settings.playbackRate, settings.loop)
+      writePitch(video, settings.preservePitch)
       state.playback = true
     } else if (state.playback) {
       writeTransport(video, state.playbackRate, state.loop)
+      writePitch(video, state.preservesPitch)
       state.playback = false
     }
 
@@ -308,12 +318,11 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
       if (!state.audio) {
         state.volume = video.volume
         state.muted = video.muted
-        state.preservesPitch = readPitch(video)
       }
-      writeAudio(video, settings.preservePitch, settings.volume, settings.muted)
+      writeAudio(video, settings.volume, settings.muted)
       state.audio = true
     } else if (state.audio) {
-      writeAudio(video, state.preservesPitch, state.volume, state.muted)
+      writeAudio(video, state.volume, state.muted)
       state.audio = false
     }
   } catch {
@@ -325,8 +334,11 @@ export function releasePlayback(video: HTMLVideoElement): void {
   const state = ownedMedia.get(video)
   if (!state) return
   try {
-    if (state.playback) writeTransport(video, state.playbackRate, state.loop)
-    if (state.audio) writeAudio(video, state.preservesPitch, state.volume, state.muted)
+    if (state.playback) {
+      writeTransport(video, state.playbackRate, state.loop)
+      writePitch(video, state.preservesPitch)
+    }
+    if (state.audio) writeAudio(video, state.volume, state.muted)
   } catch {
     /* The element can already be detached from the player. */
   }
@@ -358,6 +370,14 @@ export function seekBy(video: HTMLVideoElement, delta: number): void {
   const duration = Number.isFinite(video.duration) ? video.duration : Infinity
   const next = Math.min(Math.max(0, video.currentTime + delta), duration)
   video.currentTime = next
+}
+
+export function restartVideo(video: HTMLVideoElement): void {
+  try {
+    video.currentTime = 0
+  } catch {
+    /* Some players lock the timeline during an ad. */
+  }
 }
 
 export async function togglePictureInPicture(

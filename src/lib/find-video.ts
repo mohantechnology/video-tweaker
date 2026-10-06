@@ -30,11 +30,23 @@ export function scanPage(): PageScan {
   return { videos, roots }
 }
 
+function laidOutSize(video: HTMLVideoElement): { width: number; height: number } {
+  const width = video.offsetWidth || video.clientWidth
+  const height = video.offsetHeight || video.clientHeight
+  if (width > 0 && height > 0) return { width, height }
+  const rect = video.getBoundingClientRect()
+  return { width: rect.width, height: rect.height }
+}
+
 function scoreVideo(video: HTMLVideoElement): number {
   if (video.videoWidth === 0 && video.readyState < 2) return 0
 
+  // Stretch and zoom change the painted box, not the layout box. Scoring the
+  // painted box made a small aspect ratio look like the video had disappeared.
+  const size = laidOutSize(video)
+  if (size.width < MIN_WIDTH || size.height < MIN_HEIGHT) return 0
+
   const rect = video.getBoundingClientRect()
-  if (rect.width < MIN_WIDTH || rect.height < MIN_HEIGHT) return 0
   if (rect.bottom < 0 || rect.top > window.innerHeight) return 0
   if (rect.right < 0 || rect.left > window.innerWidth) return 0
 
@@ -47,7 +59,7 @@ function scoreVideo(video: HTMLVideoElement): number {
     return 0
   }
 
-  let score = rect.width * rect.height
+  let score = size.width * size.height
   if (!video.paused && !video.ended && video.readyState >= 2) score *= 2.4
 
   const fullscreen = document.fullscreenElement

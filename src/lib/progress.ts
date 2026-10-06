@@ -10,6 +10,8 @@ type ProgressEntry = {
   time: number
   duration: number
   updated: number
+  title?: string
+  url?: string
 }
 
 type ProgressMap = Record<string, ProgressEntry>
@@ -115,13 +117,26 @@ function loadEntry(key: string): Promise<ProgressEntry | null> {
   })
 }
 
+function pageTitle(): string {
+  return document.title.replace(/\s+/g, " ").trim().slice(0, 160)
+}
+
+function pageUrl(): string {
+  return location.href.slice(0, 2000)
+}
+
 function saveEntry(key: string, time: number, duration: number): void {
+  const title = pageTitle()
+  const url = pageUrl()
   remember(async () => {
     const map = { ...(await readMap()) }
+    const previous = map[key]
     map[key] = {
       time: Math.round(time * 10) / 10,
       duration: Number.isFinite(duration) ? duration : 0,
-      updated: Date.now()
+      updated: Date.now(),
+      title: title || previous?.title || "",
+      url: url || previous?.url || ""
     }
     const keys = Object.keys(map)
     if (keys.length > MAX_ENTRIES) {
@@ -147,20 +162,77 @@ function clearEntry(key: string): void {
   })
 }
 
+const COMPOUND_SUFFIXES = new Set([
+  "co.uk",
+  "org.uk",
+  "ac.uk",
+  "gov.uk",
+  "co.jp",
+  "co.kr",
+  "co.in",
+  "co.id",
+  "com.au",
+  "net.au",
+  "org.au",
+  "com.br",
+  "com.mx",
+  "co.nz",
+  "co.za",
+  "com.tr",
+  "com.sg",
+  "com.hk",
+  "com.tw",
+  "com.ar",
+  "com.my"
+])
+
+export function registrableDomain(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "")
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host
+  const parts = host.split(".").filter(Boolean)
+  if (parts.length <= 2) return parts.join(".")
+  const lastTwo = parts.slice(-2).join(".")
+  if (COMPOUND_SUFFIXES.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join(".")
+  return lastTwo
+}
+
 export type SavedProgress = {
   key: string
+  domain: string
   label: string
+  title: string
+  url: string
   time: number
   duration: number
   updated: number
 }
 
-export function progressLabel(key: string): string {
+export type ProgressGroup = {
+  domain: string
+  updated: number
+  rows: SavedProgress[]
+}
+
+export function progressDomain(key: string): string {
+  if (key.startsWith("youtube:")) return "youtube.com"
+  const page = (key.split("|")[0] || key).trim()
+  const host = page.split(/[/?#]/)[0] || page
+  return registrableDomain(host)
+}
+
+export function progressItemLabel(key: string): string {
   if (key.startsWith("youtube:")) {
-    const id = key.slice("youtube:".length)
-    return id ? `YouTube · ${id}` : "YouTube"
+    const id = key.slice("youtube:".length).split("|")[0]
+    return id || "Video"
   }
-  return key.split("|")[0] || key
+  const page = key.split("|")[0] || key
+  const slash = page.indexOf("/")
+  const path = (slash >= 0 ? page.slice(slash) : "").split("?")[0].replace(/\/$/, "")
+  if (path && path !== "/") return path
+  const extra = key.split("|").slice(1).join(" | ")
+  if (!extra) return "Home"
+  const file = extra.split("/").filter(Boolean).pop() || extra
+  return file.split("?")[0] || "Video"
 }
 
 export function formatClock(seconds: number): string {
@@ -175,12 +247,47 @@ export function formatClock(seconds: number): string {
 
 function rowsFrom(map: ProgressMap): SavedProgress[] {
   return Object.entries(map)
-    .map(([key, entry]) => ({
-      key,
-      label: progressLabel(key),
-      time: entry.time,
-      duration: entry.duration,
-      updated: entry.updated
+    .map(([key, entry]) => {
+      const label = progressItemLabel(key)
+      return {
+        key,
+        domain: progressDomain(key),
+        label,
+        title: entry.title?.trim() || label,
+        url: entry.url?.trim() || "",
+        time: entry.time,
+        duration: entry.duration,
+        updated: entry.updated
+      }
+    })
+    .sort((a, b) => b.updated - a.updated)
+}
+
+export function progressHref(row: Pick<SavedProgress, "key" | "url">): string {
+  const stored = row.url.trim()
+  if (/^https?:\/\//i.test(stored)) return stored
+  if (row.key.startsWith("youtube:")) {
+    const id = row.key.slice("youtube:".length).split("|")[0]
+    return id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : ""
+  }
+  const page = (row.key.split("|")[0] || "").trim()
+  if (!page) return ""
+  if (/^https?:\/\//i.test(page)) return page
+  return `https://${page}`
+}
+
+export function groupProgress(rows: SavedProgress[]): ProgressGroup[] {
+  const groups = new Map<string, SavedProgress[]>()
+  for (const row of rows) {
+    const list = groups.get(row.domain)
+    if (list) list.push(row)
+    else groups.set(row.domain, [row])
+  }
+  return [...groups.entries()]
+    .map(([domain, items]) => ({
+      domain,
+      updated: items.reduce((latest, item) => Math.max(latest, item.updated), 0),
+      rows: [...items].sort((a, b) => b.updated - a.updated)
     }))
     .sort((a, b) => b.updated - a.updated)
 }
@@ -199,6 +306,21 @@ export function listProgress(): Promise<SavedProgress[]> {
 
 export function deleteProgress(key: string): void {
   clearEntry(key)
+}
+
+export function deleteProgressForDomain(domain: string): void {
+  remember(async () => {
+    const map = { ...(await readMap()) }
+    let changed = false
+    for (const key of Object.keys(map)) {
+      if (progressDomain(key) !== domain) continue
+      delete map[key]
+      changed = true
+    }
+    if (!changed) return
+    cache = map
+    await chrome.storage.local.set({ [PROGRESS_KEY]: map })
+  })
 }
 
 export function clearProgress(): void {

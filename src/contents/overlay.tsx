@@ -11,7 +11,6 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
-  GripHorizontal,
   Layers,
   Link2,
   Maximize2,
@@ -20,7 +19,6 @@ import {
   Power,
   Repeat,
   RotateCcw,
-  Settings2,
   SkipBack,
   SkipForward,
   SlidersHorizontal,
@@ -33,7 +31,13 @@ import {
   X
 } from "lucide-react"
 import type { PlasmoCSConfig, PlasmoGetStyle } from "plasmo"
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type Ref
+} from "react"
 
 import {
   HOST_ID,
@@ -43,13 +47,17 @@ import {
   type VideoBridge
 } from "~lib/bridge"
 import {
-  CROP_MAX,
+  BLUR_MAX,
+  OPACITY_MIN,
   SECTION_FIELDS,
   STRETCH_MAX,
   STRETCH_MIN,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  cropControlToCss,
+  cropCssToControl,
   effectiveSettings,
   isVisualIdentity,
-  releasePlayback,
   seekBy,
   togglePictureInPicture,
   type SectionFlag
@@ -58,8 +66,12 @@ import {
   PROGRESS_KEY,
   clearProgress,
   deleteProgress,
+  deleteProgressForDomain,
   formatClock,
+  groupProgress,
   listProgress,
+  progressHref,
+  type ProgressGroup,
   type SavedProgress
 } from "~lib/progress"
 import { PRESETS, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
@@ -86,6 +98,7 @@ import {
   siteStorageKey
 } from "~lib/storage"
 import {
+  COLOR_KEYS,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   defaultSettings,
@@ -131,13 +144,22 @@ const COLOR_CONTROLS: {
     key: "blur",
     label: "Blur",
     min: 0,
-    max: 12,
+    max: BLUR_MAX,
     step: 0.1,
     digits: 1,
-    format: (value) => `${value.toFixed(1)} px`,
+    format: (value) => `${(Math.round(value * 10) / 10).toFixed(1)} px`,
     advanced: true
   },
-  { key: "opacity", label: "Opacity", min: 0.15, max: 1, step: 0.01, digits: 2, format: percent, advanced: true }
+  {
+    key: "opacity",
+    label: "Opacity",
+    min: OPACITY_MIN,
+    max: 1,
+    step: 0.01,
+    digits: 2,
+    format: percent,
+    advanced: true
+  }
 ]
 
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 4]
@@ -196,30 +218,95 @@ function viewportNow(): Viewport {
   return { width: window.innerWidth, height: window.innerHeight }
 }
 
-function pointerOnCircleRim(
-  event: { clientX: number; clientY: number },
-  element: HTMLElement
-): boolean {
-  const rect = element.getBoundingClientRect()
-  const radius = rect.width / 2
-  const dist = Math.hypot(event.clientX - (rect.left + radius), event.clientY - (rect.top + radius))
-  return radius - dist <= 8
-}
-
 function tabFlag(tab: PanelTab): "videoEnabled" | "audioEnabled" | "playbackEnabled" {
   if (tab === "video") return "videoEnabled"
   if (tab === "audio") return "audioEnabled"
   return "playbackEnabled"
 }
 
-function tabNoun(tab: PanelTab): string {
-  if (tab === "video") return "video"
-  if (tab === "audio") return "audio"
-  return "playback"
+function sectionTouchesMedia(flag: SectionFlag): boolean {
+  return flag === "basicAudioOn" || flag === "basicPlaybackOn"
 }
 
-function sectionTouchesMedia(flag: SectionFlag): boolean {
-  return flag === "basicAudioOn" || flag === "advancedAudioOn" || flag === "basicPlaybackOn"
+const VIDEO_RESET_KEYS = [
+  ...COLOR_KEYS,
+  "flipH",
+  "flipV",
+  "rotate",
+  "zoom",
+  "stretchX",
+  "stretchY",
+  "cropLeft",
+  "cropRight",
+  "cropTop",
+  "cropBottom",
+  "linkCropX",
+  "linkCropY",
+  "basicVideoOn",
+  "frameOn",
+  "advancedVideoOn",
+  "presetId",
+  "videoEnabled"
+] as const satisfies readonly (keyof EffectSettings)[]
+
+const AUDIO_RESET_KEYS = [
+  "volume",
+  "muted",
+  "basicAudioOn",
+  "advancedAudioOn",
+  "audioEnabled"
+] as const satisfies readonly (keyof EffectSettings)[]
+
+const PLAYBACK_RESET_KEYS = [
+  "playbackRate",
+  "preservePitch",
+  "loop",
+  "basicPlaybackOn",
+  "advancedPlaybackOn",
+  "rememberProgress",
+  "showNativeControls",
+  "playbackEnabled"
+] as const satisfies readonly (keyof EffectSettings)[]
+
+function resetKeys(tab: PanelTab): readonly (keyof EffectSettings)[] {
+  if (tab === "video") return VIDEO_RESET_KEYS
+  if (tab === "audio") return AUDIO_RESET_KEYS
+  return PLAYBACK_RESET_KEYS
+}
+
+function tabActions(
+  tab: PanelTab,
+  enabled: boolean
+): { toggle: string; toggleTitle: string; reset: string; resetTitle: string } {
+  if (tab === "video") {
+    return {
+      toggle: enabled ? "Disable video effects" : "Enable video effects",
+      toggleTitle: enabled
+        ? "Turn off color, frame, and filter changes on the Video tab. Audio and playback stay as they are."
+        : "Turn color, frame, and filter changes back on for the Video tab.",
+      reset: "Reset video settings",
+      resetTitle: "Restore the Video tab to its defaults. Audio and playback stay as they are."
+    }
+  }
+  if (tab === "audio") {
+    return {
+      toggle: enabled ? "Disable audio effects" : "Enable audio effects",
+      toggleTitle: enabled
+        ? "Turn off volume and mute changes on the Audio tab. Video and playback stay as they are."
+        : "Turn volume and mute changes back on for the Audio tab.",
+      reset: "Reset audio settings",
+      resetTitle: "Restore volume and mute on the Audio tab to their defaults."
+    }
+  }
+  return {
+    toggle: enabled ? "Disable playback effects" : "Enable playback effects",
+    toggleTitle: enabled
+      ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
+      : "Turn speed, loop, and pitch changes back on for the Playback tab.",
+    reset: "Reset playback settings",
+    resetTitle:
+      "Restore speed, loop, pitch, resume, and the browser progress bar on the Playback tab. Saved resume points stay."
+  }
 }
 
 function sectionIsVisual(flag: SectionFlag): boolean {
@@ -238,8 +325,10 @@ function Overlay() {
   const [presetOpen, setPresetOpen] = useState(false)
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({})
   const [progressRows, setProgressRows] = useState<SavedProgress[]>([])
+  const [openDomains, setOpenDomains] = useState<Record<string, boolean>>({})
   const [layout, setLayout] = useState<DockLayout | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [barIdle, setBarIdle] = useState(false)
   const [viewport, setViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight
@@ -255,6 +344,9 @@ function Overlay() {
   const dockRef = useRef<HTMLDivElement>(null)
   const presetMenuRef = useRef<HTMLDivElement>(null)
   const presetButtonRef = useRef<HTMLButtonElement>(null)
+  const presetOpenRef = useRef(false)
+  const draggingRef = useRef(false)
+  const barIdleRef = useRef(false)
   const layoutRef = useRef<DockLayout | null>(null)
   const pendingOpen = useRef(false)
   const swallowClick = useRef(false)
@@ -266,7 +358,6 @@ function Overlay() {
     startY: number
     slot: DockMode
     box: DockBox
-    fromLauncher: boolean
     moved: boolean
     latest?: DockBox
   }>(null)
@@ -284,6 +375,8 @@ function Overlay() {
   settingsRef.current = settings
   readyRef.current = ready
   layoutRef.current = layout
+  presetOpenRef.current = presetOpen
+  draggingRef.current = dragging
 
   useEffect(() => {
     let alive = true
@@ -489,6 +582,33 @@ function Overlay() {
     }
   }, [presetOpen])
 
+  useEffect(() => {
+    if (layout?.mode !== "min") {
+      barIdleRef.current = false
+      setBarIdle(false)
+      return
+    }
+    let timer = 0
+    const arm = () => {
+      window.clearTimeout(timer)
+      if (barIdleRef.current) {
+        barIdleRef.current = false
+        setBarIdle(false)
+      }
+      timer = window.setTimeout(() => {
+        if (presetOpenRef.current || draggingRef.current) return
+        barIdleRef.current = true
+        setBarIdle(true)
+      }, 1800)
+    }
+    arm()
+    window.addEventListener("pointermove", arm, { passive: true })
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener("pointermove", arm)
+    }
+  }, [layout?.mode, presetOpen, dragging])
+
   const patch = (next: Partial<EffectSettings>, touchPlayback = false, timing: ApplyTiming = "now") => {
     dirtyRef.current = true
     const merged: EffectSettings = {
@@ -521,22 +641,11 @@ function Overlay() {
     }, wait)
   }
 
-  const resetEffects = () => {
-    const video = getActiveVideo()
-    dirtyRef.current = true
-    const next = {
-      ...defaultSettings(),
-      rememberProgress: settingsRef.current.rememberProgress,
-      showNativeControls: settingsRef.current.showNativeControls
-    }
-    window.clearTimeout(applyTimer.current)
-    applyTimer.current = 0
-    applyDelayRef.current = 0
-    settingsRef.current = next
-    appliedRef.current = next
-    setSettings(next)
-    if (video) releasePlayback(video)
-    bridgeRef.current?.applyNow()
+  const resetCurrentTab = () => {
+    const defaults = defaultSettings()
+    const next: Partial<EffectSettings> = {}
+    for (const key of resetKeys(tab)) next[key] = defaults[key] as never
+    patch(next, tab !== "video", tab === "video" ? "heavy" : "light")
   }
 
   const sectionOpen = (id: string) => openSections[id] !== false
@@ -641,15 +750,8 @@ function Overlay() {
     if (event.button !== 0) return
     const current = layoutRef.current
     if (!current) return
-    const fromLauncher = event.currentTarget.classList.contains("vee-launcher")
-    if (fromLauncher && pointerOnCircleRim(event, event.currentTarget)) {
-      beginResize(event, "circle")
-      return
-    }
     const target = event.target instanceof Element ? event.target : null
-    if (!fromLauncher && target?.closest("button, input, textarea, a, label")) {
-      return
-    }
+    if (target?.closest("button, input, textarea, a, label")) return
     const slot = current.mode
     const resolved = clampDockBox(current[slot], viewportNow())
     dragRef.current = {
@@ -660,7 +762,6 @@ function Overlay() {
       startY: event.clientY,
       slot,
       box: { ...resolved, pinned: false },
-      fromLauncher,
       moved: false
     }
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -726,12 +827,6 @@ function Overlay() {
     dragRef.current = null
     setDragging(false)
     if (!drag.moved || !drag.latest) return
-    if (drag.fromLauncher) {
-      swallowClick.current = true
-      window.setTimeout(() => {
-        swallowClick.current = false
-      }, 0)
-    }
     rememberLayout(drag.slot, drag.latest)
   }
 
@@ -749,17 +844,20 @@ function Overlay() {
       (settings.playbackTouched && (settings.audioEnabled || settings.playbackEnabled)))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
 
-  if (!hasVideo || !layout) return null
+  if (!hasVideo || !layout || layout.mode === "closed") return null
 
   const box = clampDockBox(layout[layout.mode], viewport)
   const tabOn = settings[tabFlag(tab)]
-  const noun = tabNoun(tab)
+  const actions = tabActions(tab, tabOn)
+  const miniIdle = layout.mode === "min" && barIdle
 
   return (
     <div
       ref={dockRef}
       className="vee-dock"
       data-dragging={dragging ? "true" : "false"}
+      data-idle={miniIdle ? "true" : "false"}
+      aria-hidden={miniIdle ? true : undefined}
       style={{
         left: `${box.x}px`,
         bottom: `${box.y}px`,
@@ -769,32 +867,35 @@ function Overlay() {
       onPointerDown={stopEvent}
       onKeyDown={stopEvent}
       onWheel={stopEvent}>
-      {layout.mode === "closed" ? (
-        <button
-          type="button"
-          className="vee-launcher"
-          aria-label="Open video effects"
-          {...dragHandlers}
-          onClick={() => {
-            if (swallowClick.current) {
-              swallowClick.current = false
-              return
-            }
-            setMode("max")
-          }}>
-          <SlidersHorizontal size={20} strokeWidth={1.75} />
-          {live ? <span className="vee-launcher-dot" /> : null}
-        </button>
-      ) : null}
-
       {layout.mode === "min" ? (
         <div className="vee-minibar" aria-label="Video effects minimized" {...dragHandlers}>
-          <GripHorizontal className="vee-grip" size={16} strokeWidth={1.75} />
+          <button
+            type="button"
+            className="vee-icon-btn vee-power"
+            role="switch"
+            aria-checked={settings.enabled}
+            aria-label={settings.enabled ? "Turn effects off" : "Turn effects on"}
+            title={settings.enabled ? "Effects on" : "Effects off"}
+            data-on={String(settings.enabled)}
+            onClick={() => patch({ enabled: !settings.enabled })}>
+            <Power size={15} strokeWidth={1.75} />
+          </button>
           <div className="vee-mini-copy">
             <strong>Video Effects</strong>
             <span>{settings.enabled ? "Effects on" : "Effects off"}</span>
           </div>
           {live ? <span className="vee-mini-dot" /> : null}
+          <button
+            ref={presetButtonRef}
+            type="button"
+            className="vee-icon-btn"
+            aria-label="Presets"
+            aria-expanded={presetOpen}
+            title="Presets"
+            data-on={String(presetOpen)}
+            onClick={() => setPresetOpen((open) => !open)}>
+            <Layers size={15} strokeWidth={1.75} />
+          </button>
           <button
             type="button"
             className="vee-icon-btn"
@@ -807,11 +908,28 @@ function Overlay() {
             type="button"
             className="vee-icon-btn"
             data-kind="close"
-            aria-label="Close"
-            title="Close"
-            onClick={() => setMode("closed")}>
+            aria-label="Hide video effects"
+            title="Hide"
+            onClick={() => {
+              setPresetOpen(false)
+              setMode("closed")
+            }}>
             <X size={15} strokeWidth={1.75} />
           </button>
+          {presetOpen ? (
+            <PresetMenu
+              menuRef={presetMenuRef}
+              drop={box.y < 220 ? "up" : "down"}
+              presets={userPresets}
+              activeId={settings.presetId}
+              name={presetName}
+              onName={setPresetName}
+              onClose={() => setPresetOpen(false)}
+              onApply={applyUserPreset}
+              onDelete={removePreset}
+              onSave={savePreset}
+            />
+          ) : null}
         </div>
       ) : null}
 
@@ -832,7 +950,6 @@ function Overlay() {
       {layout.mode === "max" ? (
         <section className={`vee-panel${settings.enabled ? "" : " is-off"}`} aria-label="Video effects">
           <header className="vee-header" {...dragHandlers}>
-            <GripHorizontal className="vee-grip" size={16} strokeWidth={1.75} />
             <button
               type="button"
               className="vee-icon-btn vee-power"
@@ -872,71 +989,27 @@ function Overlay() {
                 type="button"
                 className="vee-icon-btn"
                 data-kind="close"
-                aria-label="Close"
-                title="Close"
-                onClick={() => setMode("closed")}>
+                aria-label="Hide video effects"
+                title="Hide"
+                onClick={() => {
+                  setPresetOpen(false)
+                  setMode("closed")
+                }}>
                 <X size={15} strokeWidth={1.75} />
               </button>
             </div>
             {presetOpen ? (
-              <div className="vee-preset-menu" ref={presetMenuRef} onPointerDown={stopEvent}>
-                <div className="vee-preset-menu-head">
-                  <strong>Presets</strong>
-                  <button
-                    type="button"
-                    className="vee-icon-btn vee-section-btn"
-                    aria-label="Close presets"
-                    title="Close"
-                    onClick={() => setPresetOpen(false)}>
-                    <X size={13} strokeWidth={1.75} />
-                  </button>
-                </div>
-                {userPresets.length === 0 ? (
-                  <p className="vee-preset-empty">No saved presets yet.</p>
-                ) : (
-                  <div className="vee-preset-list" role="listbox" aria-label="Saved presets">
-                    {userPresets.map((preset) => (
-                      <div
-                        key={preset.id}
-                        className="vee-preset-item"
-                        data-on={String(settings.presetId === preset.id)}>
-                        <button
-                          type="button"
-                          className="vee-preset-apply"
-                          role="option"
-                          aria-selected={settings.presetId === preset.id}
-                          onClick={() => applyUserPreset(preset)}>
-                          {preset.label}
-                        </button>
-                        <button
-                          type="button"
-                          className="vee-icon-btn vee-preset-delete"
-                          aria-label={`Delete ${preset.label}`}
-                          title="Delete preset"
-                          onClick={() => removePreset(preset.id)}>
-                          <Trash2 size={14} strokeWidth={1.75} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="vee-preset-save">
-                  <input
-                    type="text"
-                    maxLength={24}
-                    placeholder="Save current as preset"
-                    aria-label="Preset name"
-                    value={presetName}
-                    onChange={(event) => setPresetName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") savePreset()
-                    }}
-                  />
-                  <button type="button" disabled={!presetName.trim()} onClick={savePreset}>
-                    Save
-                  </button>
-                </div>
-              </div>
+              <PresetMenu
+                menuRef={presetMenuRef}
+                presets={userPresets}
+                activeId={settings.presetId}
+                name={presetName}
+                onName={setPresetName}
+                onClose={() => setPresetOpen(false)}
+                onApply={applyUserPreset}
+                onDelete={removePreset}
+                onSave={savePreset}
+              />
             ) : null}
           </header>
 
@@ -1120,8 +1193,8 @@ function Overlay() {
                   </div>
                   <Slider
                     label="Zoom"
-                    min={0.5}
-                    max={2.5}
+                    min={ZOOM_MIN}
+                    max={ZOOM_MAX}
                     step={0.01}
                     value={settings.zoom}
                     display={percent(settings.zoom)}
@@ -1245,26 +1318,6 @@ function Overlay() {
                     </button>
                   </div>
                 </Group>
-                <Group
-                  id="audio-advanced"
-                  title="Advanced"
-                  icon={AudioLines}
-                  open={sectionOpen("audio-advanced")}
-                  onToggle={() => toggleSection("audio-advanced")}
-                  applied={settings.advancedAudioOn}
-                  onApply={() => toggleSectionApply("advancedAudioOn")}
-                  onReset={() => resetSection("advancedAudioOn")}>
-                  <button
-                    type="button"
-                    className="vee-action"
-                    data-on={String(settings.preservePitch)}
-                    aria-pressed={settings.preservePitch}
-                    onClick={() => patch({ preservePitch: !settings.preservePitch }, true)}>
-                    <AudioLines size={14} strokeWidth={1.75} />
-                    Preserve pitch
-                  </button>
-                  <p className="vee-hint">Keeps voices natural when the speed is not 1×.</p>
-                </Group>
               </>
             ) : null}
 
@@ -1283,7 +1336,7 @@ function Overlay() {
                     label="Speed"
                     min={PLAYBACK_RATE_MIN}
                     max={PLAYBACK_RATE_MAX}
-                    step={0.05}
+                    step={0.01}
                     value={rate}
                     display={formatRate(rate)}
                     onChange={(value) =>
@@ -1315,16 +1368,33 @@ function Overlay() {
                       </button>
                     ))}
                   </div>
-                  <div className="vee-actions">
+                  <div className="vee-tools" aria-label="Playback controls">
                     <button
                       type="button"
-                      className="vee-action"
+                      className="vee-tool"
                       data-on={String(settings.loop)}
                       aria-pressed={settings.loop}
+                      title="Loop"
+                      aria-label="Loop"
                       onClick={() => patch({ loop: !settings.loop }, true)}>
-                      <Repeat size={14} strokeWidth={1.75} />
-                      Loop
+                      <Repeat size={15} strokeWidth={1.75} />
                     </button>
+                    {document.pictureInPictureEnabled ? (
+                      <button
+                        type="button"
+                        className="vee-tool"
+                        data-on={String(pipOn)}
+                        aria-pressed={pipOn}
+                        title="Picture in picture"
+                        aria-label="Picture in picture"
+                        onClick={() => {
+                          const video = getActiveVideo()
+                          if (!video) return
+                          void togglePictureInPicture(video).catch(() => undefined)
+                        }}>
+                        <PictureInPicture2 size={15} strokeWidth={1.75} />
+                      </button>
+                    ) : null}
                   </div>
                 </Group>
                 <Group
@@ -1353,97 +1423,87 @@ function Overlay() {
                     })}
                   </div>
                 </Group>
+                <div className="vee-switch-row vee-switch-solo">
+                  <div>
+                    <span>Preserve speech</span>
+                    <small>Keeps voices natural when speed is not 1×.</small>
+                  </div>
+                  <button
+                    className="vee-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.preservePitch}
+                    aria-label="Preserve speech"
+                    title="Keeps voices natural when speed is not 1×"
+                    data-on={String(settings.preservePitch)}
+                    onClick={() => patch({ preservePitch: !settings.preservePitch }, true)}>
+                    <i />
+                  </button>
+                </div>
                 <Group
-                  id="playback-advanced"
-                  title="Advanced"
-                  icon={Settings2}
-                  open={sectionOpen("playback-advanced")}
-                  onToggle={() => toggleSection("playback-advanced")}
-                  applied={settings.advancedPlaybackOn}
-                  onApply={() => toggleSectionApply("advancedPlaybackOn")}
-                  onReset={() => resetSection("advancedPlaybackOn")}>
-                  <div className="vee-switch-row">
-                    <div>
-                      <span>
-                        <Clock size={14} strokeWidth={1.75} />
-                        Resume where you left off
-                      </span>
-                      <small>
-                        Saves this video every few seconds and continues from that moment after you
-                        close the browser or restart.
-                      </small>
-                    </div>
-                    <button
-                      className="vee-switch"
-                      type="button"
-                      role="switch"
-                      aria-checked={settings.rememberProgress}
-                      aria-label="Resume where you left off"
-                      data-on={String(settings.rememberProgress)}
-                      onClick={() => patch({ rememberProgress: !settings.rememberProgress })}>
-                      <i />
-                    </button>
-                  </div>
-                  <div className="vee-progress-list">
-                    {progressRows.length === 0 ? (
-                      <p className="vee-hint">No saved videos yet.</p>
-                    ) : (
-                      progressRows.map((row) => (
-                        <div key={row.key} className="vee-progress-row">
-                          <div>
-                            <span title={row.label}>{row.label}</span>
-                            <small>{formatClock(row.time)}</small>
-                          </div>
-                          <button
-                            type="button"
-                            className="vee-chip-x"
-                            aria-label={`Clear ${row.label}`}
-                            title="Clear"
-                            onClick={() => deleteProgress(row.key)}>
-                            <X size={11} strokeWidth={2} />
-                          </button>
-                        </div>
-                      ))
-                    )}
-                    {progressRows.length > 0 ? (
-                      <button type="button" className="vee-action vee-progress-clear" onClick={() => clearProgress()}>
-                        Clear all
+                  id="playback-resume"
+                  title="Resume where you left off"
+                  icon={Clock}
+                  open={sectionOpen("playback-resume")}
+                  onToggle={() => toggleSection("playback-resume")}
+                  tools={
+                    <>
+                      {progressRows.length > 0 ? (
+                        <button
+                          type="button"
+                          className="vee-icon-btn vee-section-btn vee-trash"
+                          aria-label="Clear all saved positions"
+                          title="Clear all saved positions"
+                          onClick={() => clearProgress()}>
+                          <Trash2 size={13} strokeWidth={1.75} />
+                        </button>
+                      ) : null}
+                      <button
+                        className="vee-switch"
+                        type="button"
+                        role="switch"
+                        aria-checked={settings.rememberProgress}
+                        aria-label="Resume where you left off"
+                        title="Save this video every few seconds and continue from that moment later"
+                        data-on={String(settings.rememberProgress)}
+                        onClick={() => patch({ rememberProgress: !settings.rememberProgress })}>
+                        <i />
                       </button>
-                    ) : null}
-                  </div>
-                  <div className="vee-switch-row">
-                    <div>
-                      <span>Browser progress bar</span>
-                      <small>
-                        Shows the browser's own timeline on sites that hide it, such as Instagram.
-                      </small>
-                    </div>
-                    <button
-                      className="vee-switch"
-                      type="button"
-                      role="switch"
-                      aria-checked={settings.showNativeControls}
-                      aria-label="Browser progress bar"
-                      data-on={String(settings.showNativeControls)}
-                      onClick={() => patch({ showNativeControls: !settings.showNativeControls })}>
-                      <i />
-                    </button>
-                  </div>
-                  {document.pictureInPictureEnabled ? (
-                    <button
-                      type="button"
-                      className="vee-action"
-                      data-on={String(pipOn)}
-                      onClick={() => {
-                        const video = getActiveVideo()
-                        if (!video) return
-                        void togglePictureInPicture(video).catch(() => undefined)
-                      }}>
-                      <PictureInPicture2 size={14} strokeWidth={1.75} />
-                      Picture in picture
-                    </button>
-                  ) : null}
+                    </>
+                  }>
+                  <p className="vee-hint">
+                    Saves each video and continues from that moment after you close the browser.
+                    Newest sites are listed first.
+                  </p>
+                  <ProgressList
+                    groups={groupProgress(progressRows)}
+                    openDomains={openDomains}
+                    onToggle={(domain, open) =>
+                      setOpenDomains((current) => ({ ...current, [domain]: !open }))
+                    }
+                    onDelete={deleteProgress}
+                    onDeleteDomain={deleteProgressForDomain}
+                  />
                 </Group>
+                <div className="vee-switch-row vee-switch-solo">
+                  <div>
+                    <span>Browser progress bar</span>
+                    <small>
+                      Shows the browser's own timeline on sites that hide it, such as Instagram.
+                    </small>
+                  </div>
+                  <button
+                    className="vee-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.showNativeControls}
+                    aria-label="Browser progress bar"
+                    title="Show the browser's own timeline on sites that hide it, such as Instagram"
+                    data-on={String(settings.showNativeControls)}
+                    onClick={() => patch({ showNativeControls: !settings.showNativeControls })}>
+                    <i />
+                  </button>
+                </div>
               </>
             ) : null}
 
@@ -1454,11 +1514,16 @@ function Overlay() {
               className="vee-reset"
               data-on={String(!tabOn)}
               aria-pressed={!tabOn}
+              title={actions.toggleTitle}
               onClick={() => patch({ [tabFlag(tab)]: !tabOn })}>
-              {tabOn ? `Disable ${noun}` : `Enable ${noun}`}
+              {actions.toggle}
             </button>
-            <button type="button" className="vee-reset" onClick={resetEffects}>
-              Reset all
+            <button
+              type="button"
+              className="vee-reset"
+              title={actions.resetTitle}
+              onClick={resetCurrentTab}>
+              {actions.reset}
             </button>
           </div>
         </section>
@@ -1481,6 +1546,135 @@ function Overlay() {
   )
 }
 
+function progressRowTitle(domain: string, label: string): string {
+  if (domain === "youtube.com" && !label.startsWith("/")) return `youtube.com/watch?v=${label}`
+  if (label.startsWith("/")) return `${domain}${label}`
+  return `${domain} · ${label}`
+}
+
+function progressMatchesPage(row: SavedProgress): boolean {
+  const href = progressHref(row)
+  if (!href) return false
+  try {
+    const current = new URL(location.href)
+    const target = new URL(href)
+    const host = (value: string) => value.toLowerCase().replace(/^www\./, "")
+    if (host(current.hostname) !== host(target.hostname)) return false
+    const id = (url: URL) => {
+      const watch = url.searchParams.get("v")
+      if (watch) return watch
+      const parts = url.pathname.split("/").filter(Boolean)
+      const marker = parts.findIndex(
+        (part) => part === "shorts" || part === "embed" || part === "live" || part === "v"
+      )
+      if (marker >= 0 && parts[marker + 1]) return parts[marker + 1]
+      if (host(url.hostname) === "youtu.be") return parts[0] || ""
+      return ""
+    }
+    const currentId = id(current)
+    const targetId = id(target)
+    if (currentId && targetId) return currentId === targetId
+    return current.pathname === target.pathname
+  } catch {
+    return false
+  }
+}
+
+function progressDisplayTitle(row: SavedProgress): string {
+  if (progressMatchesPage(row)) {
+    const live = document.title.replace(/\s+/g, " ").trim()
+    if (live) return live
+  }
+  return row.title || row.label
+}
+
+function ProgressList({
+  groups,
+  openDomains,
+  onToggle,
+  onDelete,
+  onDeleteDomain
+}: {
+  groups: ProgressGroup[]
+  openDomains: Record<string, boolean>
+  onToggle: (domain: string, open: boolean) => void
+  onDelete: (key: string) => void
+  onDeleteDomain: (domain: string) => void
+}) {
+  if (groups.length === 0) return <p className="vee-hint">No saved videos yet.</p>
+  const latest = groups[0]?.domain
+  return (
+    <div className="vee-progress-list">
+      {groups.map((group) => {
+        const open = openDomains[group.domain] ?? group.domain === latest
+        return (
+          <section key={group.domain} className={`vee-domain${open ? "" : " is-collapsed"}`}>
+            <div className="vee-domain-head">
+              <button
+                type="button"
+                className="vee-domain-toggle"
+                aria-expanded={open}
+                onClick={() => onToggle(group.domain, open)}>
+                <ChevronDown className="vee-chevron" size={14} strokeWidth={1.75} />
+                <strong>{group.domain}</strong>
+                <small>{group.rows.length}</small>
+              </button>
+              <button
+                type="button"
+                className="vee-icon-btn vee-section-btn vee-trash"
+                aria-label={`Delete saved positions for ${group.domain}`}
+                title={`Delete ${group.domain}`}
+                onClick={() => onDeleteDomain(group.domain)}>
+                <Trash2 size={13} strokeWidth={1.75} />
+              </button>
+            </div>
+            {open ? (
+              <div className="vee-domain-body">
+                {group.rows.map((row) => {
+                  const href = progressHref(row)
+                  const title = progressDisplayTitle(row)
+                  return (
+                    <div key={row.key} className="vee-progress-row">
+                      {href ? (
+                        <a
+                          className="vee-progress-link"
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={href}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            window.open(href, "_blank", "noopener,noreferrer")
+                          }}>
+                          {title}
+                        </a>
+                      ) : (
+                        <span className="vee-progress-link" title={progressRowTitle(group.domain, row.label)}>
+                          {title}
+                        </span>
+                      )}
+                      <small className="vee-progress-time">{formatClock(row.time)}</small>
+                      <button
+                        type="button"
+                        className="vee-icon-btn vee-trash vee-icon-quiet"
+                        aria-label={`Delete ${title}`}
+                        title="Delete"
+                        onClick={() => onDelete(row.key)}>
+                        <Trash2 size={13} strokeWidth={1.75} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
+          </section>
+        )
+      })}
+    </div>
+  )
+}
+
 function Group({
   id,
   title,
@@ -1490,6 +1684,7 @@ function Group({
   applied,
   onApply,
   onReset,
+  tools,
   children
 }: {
   id: string
@@ -1500,6 +1695,7 @@ function Group({
   applied?: boolean
   onApply?: () => void
   onReset?: () => void
+  tools?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
@@ -1516,8 +1712,9 @@ function Group({
           <h3>{title}</h3>
           <ChevronDown className="vee-chevron" size={14} strokeWidth={1.75} />
         </button>
-        {onReset || onApply ? (
+        {tools || onReset || onApply ? (
           <div className="vee-group-tools">
+            {tools}
             {onReset ? (
               <button
                 type="button"
@@ -1573,13 +1770,15 @@ function CropAxis({
   onStart: (value: number) => void
   onEnd: (value: number) => void
 }) {
-  const read = (value: number) => readRange(String(value), 0)
+  const read = (value: number) => cropControlToCss(readRange(String(value), 0))
+  const controlStart = cropCssToControl(start)
+  const controlEnd = cropCssToControl(end)
   return (
     <div className="vee-crop">
       <div className="vee-crop-head">
         <span>{title}</span>
         <span className="vee-crop-tools">
-          {linked ? <b>{Math.round(start)}%</b> : null}
+          {linked ? <b>{cropCssToControl(start)}%</b> : null}
         <button
           type="button"
           className="vee-icon-btn vee-link"
@@ -1597,10 +1796,10 @@ function CropAxis({
           label={pairLabel}
           showLabel={false}
           min={0}
-          max={CROP_MAX}
+          max={100}
           step={1}
-          value={start}
-          display={`${Math.round(start)}%`}
+          value={controlStart}
+          display={`${controlStart}%`}
           onChange={(value) => onPair(read(value))}
         />
       ) : (
@@ -1608,23 +1807,105 @@ function CropAxis({
           <Slider
             label={startLabel}
             min={0}
-            max={CROP_MAX}
+            max={100}
             step={1}
-            value={start}
-            display={`${Math.round(start)}%`}
+            value={controlStart}
+            display={`${controlStart}%`}
             onChange={(value) => onStart(read(value))}
           />
           <Slider
             label={endLabel}
             min={0}
-            max={CROP_MAX}
+            max={100}
             step={1}
-            value={end}
-            display={`${Math.round(end)}%`}
+            value={controlEnd}
+            display={`${controlEnd}%`}
             onChange={(value) => onEnd(read(value))}
           />
         </>
       )}
+    </div>
+  )
+}
+
+function PresetMenu({
+  menuRef,
+  drop,
+  presets,
+  activeId,
+  name,
+  onName,
+  onClose,
+  onApply,
+  onDelete,
+  onSave
+}: {
+  menuRef: Ref<HTMLDivElement>
+  drop?: "up" | "down"
+  presets: UserPreset[]
+  activeId: string
+  name: string
+  onName: (value: string) => void
+  onClose: () => void
+  onApply: (preset: UserPreset) => void
+  onDelete: (id: string) => void
+  onSave: () => void
+}) {
+  return (
+    <div className="vee-preset-menu" data-drop={drop} ref={menuRef} onPointerDown={stopEvent}>
+      <div className="vee-preset-menu-head">
+        <strong>Presets</strong>
+        <button
+          type="button"
+          className="vee-icon-btn vee-section-btn"
+          aria-label="Close presets"
+          title="Close"
+          onClick={onClose}>
+          <X size={13} strokeWidth={1.75} />
+        </button>
+      </div>
+      {presets.length === 0 ? (
+        <p className="vee-preset-empty">No saved presets yet.</p>
+      ) : (
+        <div className="vee-preset-list" role="listbox" aria-label="Saved presets">
+          {presets.map((preset) => (
+            <div key={preset.id} className="vee-preset-item" data-on={String(activeId === preset.id)}>
+              <button
+                type="button"
+                className="vee-preset-apply"
+                role="option"
+                aria-selected={activeId === preset.id}
+                onClick={() => onApply(preset)}>
+                {preset.label}
+              </button>
+              <button
+                type="button"
+                className="vee-icon-btn vee-preset-delete"
+                aria-label={`Delete ${preset.label}`}
+                title="Delete preset"
+                onClick={() => onDelete(preset.id)}>
+                <Trash2 size={14} strokeWidth={1.75} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="vee-preset-save">
+        <input
+          type="text"
+          maxLength={24}
+          placeholder="Save current as preset"
+          aria-label="Preset name"
+          value={name}
+          onChange={(event) => onName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onSave()
+          }}
+        />
+        <button type="button" disabled={!name.trim()} onClick={onSave}>
+          Save
+        </button>
+      </div>
     </div>
   )
 }
@@ -1652,7 +1933,7 @@ function Slider({
     <label className="vee-row">
       {showLabel ? (
         <span className="vee-row-label">
-          {label ? <span>{label}</span> : null}
+          <span>{label}</span>
           <b>{display}</b>
         </span>
       ) : null}
