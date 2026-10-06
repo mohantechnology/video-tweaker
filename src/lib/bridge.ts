@@ -1,4 +1,11 @@
-import { applyPlayback, applyVisual, clearVisual, visualWritesLocked } from "./effects"
+import {
+  applyNativeControls,
+  applyPlayback,
+  applyVisual,
+  clearNativeControls,
+  clearVisual,
+  visualWritesLocked
+} from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
 import { createProgressTracker } from "./progress"
 import type { EffectSettings } from "./types"
@@ -13,6 +20,7 @@ export function getActiveVideo(): HTMLVideoElement | null {
 
 export type VideoBridge = {
   poke: () => void
+  applyNow: () => void
   stop: () => void
 }
 
@@ -24,7 +32,10 @@ function playbackStamp(settings: EffectSettings): string {
     settings.preservePitch,
     settings.volume,
     settings.muted,
-    settings.loop
+    settings.loop,
+    settings.audioEnabled,
+    settings.playbackEnabled,
+    settings.showNativeControls
   ].join("|")
 }
 
@@ -105,8 +116,10 @@ export function startVideoBridge(options: {
   const watchStyle = (video: HTMLVideoElement) => {
     styleObserver?.disconnect()
     styleObserver = new MutationObserver(() => {
-      if (stopped || current !== video || visualWritesLocked()) return
-      applyVisual(video, options.getSettings())
+      if (stopped || current !== video) return
+      const settings = options.getSettings()
+      if (!visualWritesLocked()) applyVisual(video, settings)
+      applyNativeControls(video, settings)
     })
     styleObserver.observe(video, {
       attributes: true,
@@ -127,7 +140,10 @@ export function startVideoBridge(options: {
     for (const video of videos) bindVideo(video)
 
     const next = document.hidden ? current : findMainVideo(videos)
-    if (current && current !== next) clearVisual(current)
+    if (current && current !== next) {
+      clearVisual(current)
+      clearNativeControls(current)
+    }
 
     if (next !== current) {
       current = next
@@ -150,11 +166,18 @@ export function startVideoBridge(options: {
 
     const settings = options.getSettings()
     applyVisual(next, settings)
+    applyNativeControls(next, settings)
     const nextStamp = playbackStamp(settings)
     if (nextStamp !== stamp) {
       applyPlayback(next, settings)
       stamp = nextStamp
     }
+  }
+
+  const applyNow = () => {
+    if (stopped) return
+    stamp = ""
+    sync()
   }
 
   rootObserver = new MutationObserver(() => schedule())
@@ -174,6 +197,7 @@ export function startVideoBridge(options: {
 
   return {
     poke: forcePlayback,
+    applyNow,
     stop() {
       stopped = true
       window.clearTimeout(queued)
@@ -186,7 +210,10 @@ export function startVideoBridge(options: {
       window.removeEventListener("yt-navigate-finish", schedule)
       document.removeEventListener("visibilitychange", schedule)
       progress.stop()
-      if (current) clearVisual(current)
+      if (current) {
+        clearVisual(current)
+        clearNativeControls(current)
+      }
       current = null
       activeVideo = null
       present = false

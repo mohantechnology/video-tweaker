@@ -26,7 +26,7 @@
   z-index: 2147483646;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   width: max-content;
   max-width: calc(100vw - 32px);
   color: #f6f3ff;
@@ -51,8 +51,11 @@
 
 .vee-launcher {
   position: relative;
-  width: 48px;
-  height: 48px;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   border: 1px solid rgba(255, 255, 255, 0.38);
   border-radius: 999px;
   padding: 0;
@@ -101,7 +104,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  width: min(260px, calc(100vw - 48px));
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 8px 8px 8px 10px;
   border-radius: 18px;
   cursor: grab;
@@ -144,8 +151,11 @@
 }
 
 .vee-panel {
-  width: min(332px, calc(100vw - 48px));
-  max-height: min(560px, calc(100vh - 96px));
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -163,6 +173,7 @@
 }
 
 .vee-header {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -212,6 +223,7 @@
 }
 
 .vee-icon-btn {
+  flex: none;
   width: 28px;
   height: 28px;
   border-radius: 9px;
@@ -231,6 +243,113 @@
 .vee-icon-btn[data-kind="close"]:hover {
   background: rgba(255, 92, 122, 0.2);
   color: #ffd5de;
+}
+
+.vee-icon-btn[data-on="true"],
+.vee-link[data-on="true"],
+.vee-section-btn[data-on="true"] {
+  background: linear-gradient(145deg, #8d73ff, #5d46e8);
+  border-color: transparent;
+  color: white;
+}
+
+.vee-section-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+}
+
+.vee-preset-menu {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% - 4px);
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(260px, calc(100% - 24px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(20, 18, 30, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  cursor: default;
+  user-select: text;
+  touch-action: auto;
+}
+
+.vee-preset-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vee-preset-menu-head strong {
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+}
+
+.vee-preset-empty {
+  margin: 0;
+  color: rgba(246, 243, 255, 0.5);
+  font-size: 12px;
+}
+
+.vee-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vee-preset-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.vee-preset-item[data-on="true"] {
+  background: linear-gradient(145deg, rgba(141, 115, 255, 0.42), rgba(93, 70, 232, 0.32));
+  border-color: transparent;
+}
+
+.vee-preset-apply {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vee-preset-delete {
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.vee-preset-delete:hover {
+  background: rgba(255, 92, 122, 0.2);
+  color: #ffd5de;
+}
+
+.vee-preset-menu .vee-preset-save {
+  margin: 0;
 }
 
 .vee-switch {
@@ -307,15 +426,46 @@
 
 .vee-body {
   overflow: auto;
+  flex: 1;
   min-height: 0;
-  padding: 2px 12px 12px;
+  padding: 2px 12px 8px;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
 
-.vee-group h3 {
+.vee-group + .vee-group {
+  margin-top: 14px;
+}
+
+.vee-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0 0 8px;
+}
+
+.vee-group.is-collapsed .vee-group-head {
+  margin-bottom: 0;
+}
+
+.vee-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: rgba(246, 243, 255, 0.72);
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.vee-group-toggle h3 {
+  margin: 0;
+  flex: 1;
   font-size: 10px;
   font-weight: 720;
   letter-spacing: 0.12em;
@@ -323,16 +473,112 @@
   color: rgba(246, 243, 255, 0.42);
 }
 
-.vee-group.is-advanced {
-  margin-top: 14px;
-  padding: 10px 10px 4px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+.vee-chevron {
+  flex: none;
+  color: rgba(246, 243, 255, 0.42);
+  transition: transform 160ms ease;
 }
 
-.vee-group.is-advanced h3 {
-  color: rgba(196, 181, 253, 0.8);
+.vee-group.is-collapsed .vee-chevron {
+  transform: rotate(-90deg);
+}
+
+.vee-group-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.vee-group.is-bypassed .vee-group-body {
+  opacity: 0.55;
+}
+
+.vee-subhead {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: rgba(246, 243, 255, 0.88);
+}
+
+.vee-frame-block {
+  margin-bottom: 6px;
+}
+
+.vee-crop + .vee-crop {
+  margin-top: 4px;
+}
+
+.vee-crop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: rgba(246, 243, 255, 0.86);
+  font-size: 12px;
+}
+
+.vee-crop-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vee-crop-tools b {
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  color: white;
+}
+
+.vee-rotate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vee-rotate-label .vee-icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+}
+
+.vee-progress-list {
+  margin: 0 0 10px;
+}
+
+.vee-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.vee-progress-row div {
+  min-width: 0;
+  flex: 1;
+}
+
+.vee-progress-row span,
+.vee-progress-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vee-progress-row span {
+  font-size: 12px;
+}
+
+.vee-progress-row small {
+  color: rgba(246, 243, 255, 0.5);
+  font-size: 11px;
+}
+
+.vee-progress-clear {
+  width: 100%;
+  margin-top: 4px;
 }
 
 .vee-presets {
@@ -348,8 +594,77 @@
   display: none;
 }
 
+.vee-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+}
+
+.vee-chip-x {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(246, 243, 255, 0.72);
+  cursor: pointer;
+}
+
+.vee-chip-x:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: white;
+}
+
+.vee-preset-save {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.vee-preset-save input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.vee-preset-save input::placeholder {
+  color: rgba(246, 243, 255, 0.38);
+}
+
+.vee-preset-save button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(246, 243, 255, 0.88);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vee-preset-save button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.vee-preset-save button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .vee-chip,
 .vee-speed,
+.vee-jump,
 .vee-action,
 .vee-reset {
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -461,10 +776,29 @@
 }
 
 .vee-speeds,
+.vee-jumps,
 .vee-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.vee-jumps {
+  flex-wrap: nowrap;
+}
+
+.vee-jump {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  padding: 8px 0;
+  border-radius: 999px;
+}
+
+.vee-jump:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
 }
 
 .vee-speeds {
@@ -487,8 +821,10 @@
 }
 
 .vee-action svg,
+.vee-jump svg,
 .vee-tab svg,
 .vee-icon-btn svg,
+.vee-group-toggle svg,
 .vee-switch-row svg {
   display: block;
   flex: none;
@@ -523,6 +859,10 @@
   font-weight: 450;
 }
 
+.vee-group h3 + .vee-hint {
+  margin-top: 0;
+}
+
 .vee-hint {
   margin: 8px 2px 8px;
   color: rgba(246, 243, 255, 0.5);
@@ -530,13 +870,25 @@
   line-height: 1.4;
 }
 
+.vee-footer {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+  flex: none;
+}
+
 .vee-reset {
   width: 100%;
-  margin-top: 12px;
   border-radius: 12px;
   padding: 8px 10px;
   color: rgba(246, 243, 255, 0.72);
   background: transparent;
+  white-space: nowrap;
+}
+
+.vee-footer .vee-reset {
+  flex: 1;
+  width: auto;
 }
 
 .vee-reset:hover {
@@ -544,10 +896,98 @@
   color: white;
 }
 
+.vee-footer .vee-reset[data-on="true"] {
+  background: linear-gradient(145deg, #8d73ff, #5d46e8);
+  border-color: transparent;
+  color: white;
+}
+
+.vee-body.is-bypassed {
+  opacity: 0.55;
+}
+
+.vee-resize {
+  position: absolute;
+  z-index: 3;
+  touch-action: none;
+}
+
+.vee-resize[data-edge="n"],
+.vee-resize[data-edge="s"] {
+  left: 12px;
+  right: 12px;
+  height: 8px;
+}
+
+.vee-resize[data-edge="n"] {
+  top: -4px;
+  cursor: ns-resize;
+}
+
+.vee-resize[data-edge="s"] {
+  bottom: -4px;
+  cursor: ns-resize;
+}
+
+.vee-resize[data-edge="e"],
+.vee-resize[data-edge="w"] {
+  top: 12px;
+  bottom: 12px;
+  width: 8px;
+}
+
+.vee-resize.is-bar[data-edge="e"],
+.vee-resize.is-bar[data-edge="w"] {
+  top: 0;
+  bottom: 0;
+}
+
+.vee-resize[data-edge="e"] {
+  right: -4px;
+  cursor: ew-resize;
+}
+
+.vee-resize[data-edge="w"] {
+  left: -4px;
+  cursor: ew-resize;
+}
+
+.vee-resize[data-edge="nw"],
+.vee-resize[data-edge="ne"],
+.vee-resize[data-edge="sw"],
+.vee-resize[data-edge="se"] {
+  width: 12px;
+  height: 12px;
+}
+
+.vee-resize[data-edge="nw"] {
+  top: -4px;
+  left: -4px;
+  cursor: nwse-resize;
+}
+
+.vee-resize[data-edge="se"] {
+  right: -4px;
+  bottom: -4px;
+  cursor: nwse-resize;
+}
+
+.vee-resize[data-edge="ne"] {
+  top: -4px;
+  right: -4px;
+  cursor: nesw-resize;
+}
+
+.vee-resize[data-edge="sw"] {
+  bottom: -4px;
+  left: -4px;
+  cursor: nesw-resize;
+}
+
 .vee-panel.is-off .vee-body {
   opacity: 0.55;
 }
 
-.vee-group.is-advanced .vee-actions {
+.vee-actions {
   margin-bottom: 8px;
 }

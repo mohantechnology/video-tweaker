@@ -1,14 +1,18 @@
-import { useEffect, useState } from "react"
+import { ChevronDown } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 
-import { presetLabel } from "~lib/presets"
+import { defaultSnapshot, presetLabel, type UserPreset } from "~lib/presets"
 import {
   OPEN_MESSAGE,
+  USER_PRESETS_KEY,
   loadSiteSettings,
+  loadUserPresets,
+  normalizeSettings,
   requestOpenPanel,
   saveSiteSettings,
   siteStorageKey
 } from "~lib/storage"
-import { defaultSettings, settingsEqual, type EffectSettings } from "~lib/types"
+import { settingsEqual, type EffectSettings } from "~lib/types"
 
 import "./popup.css"
 
@@ -42,6 +46,9 @@ async function readPage(
 
 function Popup() {
   const [state, setState] = useState<PopupState>({ kind: "loading" })
+  const [savedPresets, setSavedPresets] = useState<UserPreset[]>([])
+  const [presetMenu, setPresetMenu] = useState(false)
+  const presetRowRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let alive = true
@@ -66,8 +73,13 @@ function Popup() {
         return
       }
 
-      const stored = await loadSiteSettings(page.hostname)
-      const settings = page.settings ? { ...stored, ...page.settings } : stored
+      const [stored, saved] = await Promise.all([
+        loadSiteSettings(page.hostname),
+        loadUserPresets()
+      ])
+      if (!alive) return
+      setSavedPresets(saved)
+      const settings = page.settings ? normalizeSettings({ ...stored, ...page.settings }) : stored
       if (!alive) return
       setState({
         kind: "ready",
@@ -84,13 +96,14 @@ function Popup() {
       area: string
     ) => {
       if (area !== "local") return
+      if (changes[USER_PRESETS_KEY]) void loadUserPresets().then(setSavedPresets)
       setState((current) => {
         if (current.kind !== "ready") return current
         const stored = changes[siteStorageKey(current.hostname)]?.newValue as
           | Partial<EffectSettings>
           | undefined
         if (!stored) return current
-        const settings = { ...defaultSettings(), ...stored }
+        const settings = normalizeSettings(stored)
         if (settingsEqual(current.settings, settings)) return current
         return { ...current, settings }
       })
@@ -103,12 +116,47 @@ function Popup() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!presetMenu) return
+    const onPointerDown = (event: PointerEvent) => {
+      const path = event.composedPath()
+      if (presetRowRef.current && path.includes(presetRowRef.current)) return
+      setPresetMenu(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPresetMenu(false)
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [presetMenu])
+
   const toggle = async () => {
     if (state.kind !== "ready") return
     const settings = { ...state.settings, enabled: !state.settings.enabled }
     setState({ ...state, settings })
     await saveSiteSettings(state.hostname, settings)
   }
+
+  const applySnapshot = async (presetId: string, snapshot: UserPreset["snapshot"]) => {
+    if (state.kind !== "ready") return
+    const settings = normalizeSettings({
+      ...state.settings,
+      ...snapshot,
+      presetId,
+      playbackTouched: true
+    })
+    setState({ ...state, settings })
+    setPresetMenu(false)
+    await saveSiteSettings(state.hostname, settings)
+  }
+
+  const applyPreset = (preset: UserPreset) => applySnapshot(preset.id, preset.snapshot)
+
+  const applyDefault = () => applySnapshot("default", defaultSnapshot())
 
   const openControls = async () => {
     if (state.kind !== "ready") return
@@ -161,11 +209,45 @@ function Popup() {
                 <i />
               </button>
             </div>
-            <div className="row">
+            <div className="row preset-row" ref={presetRowRef}>
               <div>
-                <span>Look</span>
-                <strong>{presetLabel(state.settings.presetId)}</strong>
+                <span>All Presets</span>
+                <strong>{presetLabel(state.settings.presetId, savedPresets)}</strong>
               </div>
+              <button
+                type="button"
+                className="preset-toggle"
+                aria-label="All presets"
+                aria-expanded={presetMenu}
+                aria-haspopup="listbox"
+                onClick={() => setPresetMenu((open) => !open)}>
+                <ChevronDown size={16} strokeWidth={1.75} />
+              </button>
+              {presetMenu ? (
+                <div className="preset-menu" role="listbox" aria-label="All presets">
+                  <button
+                    type="button"
+                    role="option"
+                    className="preset-option"
+                    aria-selected={state.settings.presetId === "default"}
+                    data-on={String(state.settings.presetId === "default")}
+                    onClick={() => void applyDefault()}>
+                    Default
+                  </button>
+                  {savedPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="option"
+                      className="preset-option"
+                      aria-selected={state.settings.presetId === preset.id}
+                      data-on={String(state.settings.presetId === preset.id)}
+                      onClick={() => void applyPreset(preset)}>
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </section>
           <button className="primary" type="button" onClick={() => void openControls()}>

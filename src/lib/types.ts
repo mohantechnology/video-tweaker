@@ -19,6 +19,21 @@ export type EffectSettings = ColorSettings & {
   flipV: boolean
   rotate: number
   zoom: number
+  stretchX: number
+  stretchY: number
+  cropLeft: number
+  cropRight: number
+  cropTop: number
+  cropBottom: number
+  linkCropX: boolean
+  linkCropY: boolean
+  basicVideoOn: boolean
+  frameOn: boolean
+  advancedVideoOn: boolean
+  basicAudioOn: boolean
+  advancedAudioOn: boolean
+  basicPlaybackOn: boolean
+  advancedPlaybackOn: boolean
   playbackRate: number
   preservePitch: boolean
   volume: number
@@ -27,6 +42,10 @@ export type EffectSettings = ColorSettings & {
   playbackTouched: boolean
   presetId: string
   rememberProgress: boolean
+  videoEnabled: boolean
+  audioEnabled: boolean
+  playbackEnabled: boolean
+  showNativeControls: boolean
 }
 
 export const COLOR_KEYS: (keyof ColorSettings)[] = [
@@ -63,6 +82,21 @@ export function defaultSettings(): EffectSettings {
     flipV: false,
     rotate: 0,
     zoom: 1,
+    stretchX: 1,
+    stretchY: 1,
+    cropLeft: 0,
+    cropRight: 0,
+    cropTop: 0,
+    cropBottom: 0,
+    linkCropX: true,
+    linkCropY: true,
+    basicVideoOn: true,
+    frameOn: true,
+    advancedVideoOn: true,
+    basicAudioOn: true,
+    advancedAudioOn: true,
+    basicPlaybackOn: true,
+    advancedPlaybackOn: true,
     playbackRate: 1,
     preservePitch: true,
     volume: 1,
@@ -70,7 +104,11 @@ export function defaultSettings(): EffectSettings {
     loop: false,
     playbackTouched: false,
     presetId: "default",
-    rememberProgress: true
+    rememberProgress: true,
+    videoEnabled: true,
+    audioEnabled: true,
+    playbackEnabled: true,
+    showNativeControls: false
   }
 }
 

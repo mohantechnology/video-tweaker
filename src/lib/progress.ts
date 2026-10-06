@@ -1,8 +1,8 @@
+import { PROGRESS_SAVE_INTERVAL_MS } from "../settings"
 import type { EffectSettings } from "./types"
 
-const PROGRESS_KEY = "veeProgress"
+export const PROGRESS_KEY = "veeProgress"
 const MAX_ENTRIES = 240
-const SAVE_EVERY_MS = 3000
 const MIN_TIME = 3
 const END_MARGIN = 12
 
@@ -144,6 +144,67 @@ function clearEntry(key: string): void {
     delete map[key]
     cache = map
     await chrome.storage.local.set({ [PROGRESS_KEY]: map })
+  })
+}
+
+export type SavedProgress = {
+  key: string
+  label: string
+  time: number
+  duration: number
+  updated: number
+}
+
+export function progressLabel(key: string): string {
+  if (key.startsWith("youtube:")) {
+    const id = key.slice("youtube:".length)
+    return id ? `YouTube · ${id}` : "YouTube"
+  }
+  return key.split("|")[0] || key
+}
+
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  const mm = String(minutes).padStart(2, "0")
+  const ss = String(secs).padStart(2, "0")
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${minutes}:${ss}`
+}
+
+function rowsFrom(map: ProgressMap): SavedProgress[] {
+  return Object.entries(map)
+    .map(([key, entry]) => ({
+      key,
+      label: progressLabel(key),
+      time: entry.time,
+      duration: entry.duration,
+      updated: entry.updated
+    }))
+    .sort((a, b) => b.updated - a.updated)
+}
+
+export function listProgress(): Promise<SavedProgress[]> {
+  return new Promise((resolve) => {
+    remember(async () => {
+      try {
+        resolve(rowsFrom(await readMap()))
+      } catch {
+        resolve([])
+      }
+    })
+  })
+}
+
+export function deleteProgress(key: string): void {
+  clearEntry(key)
+}
+
+export function clearProgress(): void {
+  remember(async () => {
+    cache = {}
+    await chrome.storage.local.set({ [PROGRESS_KEY]: {} })
   })
 }
 
@@ -351,7 +412,7 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
     })
   }
 
-  const timer = window.setInterval(() => persist(false), SAVE_EVERY_MS)
+  const timer = window.setInterval(() => persist(false), PROGRESS_SAVE_INTERVAL_MS)
 
   return {
     follow(next) {

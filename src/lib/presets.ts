@@ -1,4 +1,65 @@
-import type { ColorSettings } from "./types"
+import { defaultSettings, type ColorSettings, type EffectSettings } from "./types"
+
+export const PRESET_SNAPSHOT_KEYS = [
+  "brightness",
+  "contrast",
+  "saturate",
+  "hueRotate",
+  "grayscale",
+  "sepia",
+  "invert",
+  "blur",
+  "opacity",
+  "flipH",
+  "flipV",
+  "rotate",
+  "zoom",
+  "stretchX",
+  "stretchY",
+  "cropLeft",
+  "cropRight",
+  "cropTop",
+  "cropBottom",
+  "basicVideoOn",
+  "frameOn",
+  "advancedVideoOn",
+  "basicAudioOn",
+  "advancedAudioOn",
+  "basicPlaybackOn",
+  "advancedPlaybackOn",
+  "playbackRate",
+  "preservePitch",
+  "volume",
+  "muted",
+  "loop"
+] as const satisfies readonly (keyof EffectSettings)[]
+
+export type PresetSnapshot = Pick<EffectSettings, (typeof PRESET_SNAPSHOT_KEYS)[number]>
+
+export type UserPreset = {
+  id: string
+  label: string
+  snapshot: PresetSnapshot
+}
+
+function writeSnapshot<K extends keyof PresetSnapshot>(
+  snapshot: PresetSnapshot,
+  key: K,
+  value: PresetSnapshot[K]
+): PresetSnapshot {
+  return { ...snapshot, [key]: value }
+}
+
+export function snapshotFrom(settings: EffectSettings): PresetSnapshot {
+  return PRESET_SNAPSHOT_KEYS.reduce(
+    (snapshot, key) => writeSnapshot(snapshot, key, settings[key]),
+    {} as PresetSnapshot
+  )
+}
+
+export function defaultSnapshot(): PresetSnapshot {
+  return snapshotFrom(defaultSettings())
+}
 
 export type Preset = {
   id: string
@@ -114,8 +175,12 @@ export const PRESETS: Preset[] = [
   }
 ]
 
-export function presetLabel(id: string): string {
-  return PRESETS.find((preset) => preset.id === id)?.label ?? "Custom"
+export function presetLabel(id: string, saved: UserPreset[] = []): string {
+  return (
+    PRESETS.find((preset) => preset.id === id)?.label ??
+    saved.find((preset) => preset.id === id)?.label ??
+    "Custom"
+  )
 }
 
 export function presetById(id: string): Preset | undefined {
