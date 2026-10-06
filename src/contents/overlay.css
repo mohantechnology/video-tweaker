@@ -607,12 +607,6 @@ a.vee-progress-link:hover {
   text-transform: none;
 }
 
-.vee-domain-toggle small {
-  flex: none;
-  color: rgba(246, 243, 255, 0.45);
-  font-size: 11px;
-}
-
 .vee-domain.is-collapsed .vee-chevron {
   transform: rotate(-90deg);
 }
@@ -638,37 +632,6 @@ a.vee-progress-link:hover {
   height: 22px;
   border-color: transparent;
   background: transparent;
-}
-
-.vee-tools {
-  display: flex;
-  gap: 6px;
-  margin: 2px 0 10px;
-}
-
-.vee-tool {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  place-items: center;
-  height: 34px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(246, 243, 255, 0.88);
-  cursor: pointer;
-}
-
-.vee-tool:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
-}
-
-.vee-tool[data-on="true"] {
-  background: linear-gradient(145deg, #8d73ff, #5d46e8);
-  border-color: transparent;
-  color: white;
 }
 
 .vee-presets {
@@ -856,15 +819,6 @@ a.vee-progress-link:hover {
   box-shadow: 0 0 0 4px rgba(141, 115, 255, 0.32);
 }
 
-.vee-scale {
-  display: flex;
-  justify-content: space-between;
-  margin: -4px 0 8px;
-  color: rgba(246, 243, 255, 0.38);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
 .vee-speeds,
 .vee-jumps,
 .vee-actions {
@@ -915,7 +869,6 @@ a.vee-progress-link:hover {
 
 .vee-action svg,
 .vee-jump svg,
-.vee-tool svg,
 .vee-tab svg,
 .vee-icon-btn svg,
 .vee-group-toggle svg,

@@ -5,6 +5,8 @@ import {
   OPACITY_MIN,
   STRETCH_MAX,
   STRETCH_MIN,
+  PAN_MAX,
+  PAN_MIN,
   ZOOM_MAX,
   ZOOM_MIN,
   clamp
@@ -45,6 +47,8 @@ export function normalizeSettings(value: unknown): EffectSettings {
   next.stretchX = clamp(next.stretchX, STRETCH_MIN, STRETCH_MAX)
   next.stretchY = clamp(next.stretchY, STRETCH_MIN, STRETCH_MAX)
   next.zoom = clamp(Math.round(next.zoom * 100) / 100, ZOOM_MIN, ZOOM_MAX)
+  next.panX = clamp(Math.round(next.panX), PAN_MIN, PAN_MAX)
+  next.panY = clamp(Math.round(next.panY), PAN_MIN, PAN_MAX)
   next.cropLeft = clamp(next.cropLeft, 0, CROP_MAX)
   next.cropRight = clamp(next.cropRight, 0, CROP_MAX)
   next.cropTop = clamp(next.cropTop, 0, CROP_MAX)

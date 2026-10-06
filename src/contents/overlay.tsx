@@ -15,9 +15,7 @@ import {
   Link2,
   Maximize2,
   Minus,
-  PictureInPicture2,
   Power,
-  Repeat,
   RotateCcw,
   SkipBack,
   SkipForward,
@@ -49,6 +47,8 @@ import {
 import {
   BLUR_MAX,
   OPACITY_MIN,
+  PAN_MAX,
+  PAN_MIN,
   SECTION_FIELDS,
   STRETCH_MAX,
   STRETCH_MIN,
@@ -75,7 +75,7 @@ import {
   type SavedProgress
 } from "~lib/progress"
 import { PRESETS, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
-import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS } from "~settings"
+import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
 import {
   MAX_USER_PRESETS,
   OPEN_MESSAGE,
@@ -234,6 +234,8 @@ const VIDEO_RESET_KEYS = [
   "flipV",
   "rotate",
   "zoom",
+  "panX",
+  "panY",
   "stretchX",
   "stretchY",
   "cropLeft",
@@ -347,6 +349,7 @@ function Overlay() {
   const presetOpenRef = useRef(false)
   const draggingRef = useRef(false)
   const barIdleRef = useRef(false)
+  const pointerRef = useRef({ x: -1, y: -1 })
   const layoutRef = useRef<DockLayout | null>(null)
   const pendingOpen = useRef(false)
   const swallowClick = useRef(false)
@@ -589,6 +592,14 @@ function Overlay() {
       return
     }
     let timer = 0
+    const pointerOverDock = () => {
+      const dock = dockRef.current
+      if (!dock) return false
+      if (dock.matches(":hover")) return true
+      const box = dock.getBoundingClientRect()
+      const { x, y } = pointerRef.current
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom
+    }
     const arm = () => {
       window.clearTimeout(timer)
       if (barIdleRef.current) {
@@ -596,16 +607,20 @@ function Overlay() {
         setBarIdle(false)
       }
       timer = window.setTimeout(() => {
-        if (presetOpenRef.current || draggingRef.current) return
+        if (presetOpenRef.current || draggingRef.current || pointerOverDock()) return
         barIdleRef.current = true
         setBarIdle(true)
-      }, 1800)
+      }, MINIBAR_HIDE_DELAY_MS)
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY }
+      arm()
     }
     arm()
-    window.addEventListener("pointermove", arm, { passive: true })
+    window.addEventListener("pointermove", onPointerMove, { passive: true })
     return () => {
       window.clearTimeout(timer)
-      window.removeEventListener("pointermove", arm)
+      window.removeEventListener("pointermove", onPointerMove)
     }
   }, [layout?.mode, presetOpen, dragging])
 
@@ -1202,6 +1217,31 @@ function Overlay() {
                       patch({ zoom: readRange(String(value), 2), presetId: "custom" }, false, "heavy")
                     }
                   />
+                  <div className="vee-frame-block">
+                    <h4 className="vee-subhead">Position</h4>
+                    <Slider
+                      label="X-axis"
+                      min={PAN_MIN}
+                      max={PAN_MAX}
+                      step={1}
+                      value={settings.panX}
+                      display={percent(settings.panX / 100)}
+                      onChange={(value) =>
+                        patch({ panX: readRange(String(value), 0), presetId: "custom" }, false, "heavy")
+                      }
+                    />
+                    <Slider
+                      label="Y-axis"
+                      min={PAN_MIN}
+                      max={PAN_MAX}
+                      step={1}
+                      value={settings.panY}
+                      display={percent(settings.panY / 100)}
+                      onChange={(value) =>
+                        patch({ panY: readRange(String(value), 0), presetId: "custom" }, false, "heavy")
+                      }
+                    />
+                  </div>
                   <div className="vee-row">
                     <span className="vee-row-label">
                       <span className="vee-rotate-label">
@@ -1352,10 +1392,6 @@ function Overlay() {
                       )
                     }
                   />
-                  <div className="vee-scale" aria-hidden="true">
-                    <span>{formatRate(PLAYBACK_RATE_MIN)}</span>
-                    <span>{formatRate(PLAYBACK_RATE_MAX)}</span>
-                  </div>
                   <div className="vee-speeds" aria-label="Playback speed">
                     {SPEEDS.map((speed) => (
                       <button
@@ -1367,34 +1403,6 @@ function Overlay() {
                         {formatRate(speed)}
                       </button>
                     ))}
-                  </div>
-                  <div className="vee-tools" aria-label="Playback controls">
-                    <button
-                      type="button"
-                      className="vee-tool"
-                      data-on={String(settings.loop)}
-                      aria-pressed={settings.loop}
-                      title="Loop"
-                      aria-label="Loop"
-                      onClick={() => patch({ loop: !settings.loop }, true)}>
-                      <Repeat size={15} strokeWidth={1.75} />
-                    </button>
-                    {document.pictureInPictureEnabled ? (
-                      <button
-                        type="button"
-                        className="vee-tool"
-                        data-on={String(pipOn)}
-                        aria-pressed={pipOn}
-                        title="Picture in picture"
-                        aria-label="Picture in picture"
-                        onClick={() => {
-                          const video = getActiveVideo()
-                          if (!video) return
-                          void togglePictureInPicture(video).catch(() => undefined)
-                        }}>
-                        <PictureInPicture2 size={15} strokeWidth={1.75} />
-                      </button>
-                    ) : null}
                   </div>
                 </Group>
                 <Group
@@ -1440,6 +1448,46 @@ function Overlay() {
                     <i />
                   </button>
                 </div>
+                <div className="vee-switch-row vee-switch-solo">
+                  <div>
+                    <span>Loop</span>
+                    <small>Plays this video again when it ends.</small>
+                  </div>
+                  <button
+                    className="vee-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.loop}
+                    aria-label="Loop"
+                    title="Plays this video again when it ends"
+                    data-on={String(settings.loop)}
+                    onClick={() => patch({ loop: !settings.loop }, true)}>
+                    <i />
+                  </button>
+                </div>
+                {document.pictureInPictureEnabled ? (
+                  <div className="vee-switch-row vee-switch-solo">
+                    <div>
+                      <span>Picture in picture</span>
+                      <small>Opens the video in a floating window.</small>
+                    </div>
+                    <button
+                      className="vee-switch"
+                      type="button"
+                      role="switch"
+                      aria-checked={pipOn}
+                      aria-label="Picture in picture"
+                      title="Opens the video in a floating window"
+                      data-on={String(pipOn)}
+                      onClick={() => {
+                        const video = getActiveVideo()
+                        if (!video) return
+                        void togglePictureInPicture(video).catch(() => undefined)
+                      }}>
+                      <i />
+                    </button>
+                  </div>
+                ) : null}
                 <Group
                   id="playback-resume"
                   title="Resume where you left off"
@@ -1616,8 +1664,9 @@ function ProgressList({
                 aria-expanded={open}
                 onClick={() => onToggle(group.domain, open)}>
                 <ChevronDown className="vee-chevron" size={14} strokeWidth={1.75} />
-                <strong>{group.domain}</strong>
-                <small>{group.rows.length}</small>
+                <strong>
+                  {group.domain} ({group.rows.length})
+                </strong>
               </button>
               <button
                 type="button"

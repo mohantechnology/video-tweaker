@@ -19,6 +19,9 @@ export const STRETCH_MAX = 4
 /** 10%–400%. CSS scale supports this; the player may clip the picture above 100%. */
 export const ZOOM_MIN = 0.1
 export const ZOOM_MAX = 4
+/** Shift as a percent of the video box. ±200% reaches the edge of a 4× zoom. */
+export const PAN_MIN = -200
+export const PAN_MAX = 200
 export const BLUR_MAX = 20
 export const OPACITY_MIN = 0.02
 export const OPACITY_MAX = 1
@@ -33,6 +36,8 @@ export const SECTION_FIELDS = {
     "cropTop",
     "cropBottom",
     "zoom",
+    "panX",
+    "panY",
     "rotate",
     "flipH",
     "flipV"
@@ -97,6 +102,8 @@ export function isTransformIdentity(settings: EffectSettings): boolean {
     !settings.flipV &&
     near(settings.rotate, visualDefaults.rotate) &&
     near(settings.zoom, visualDefaults.zoom) &&
+    near(settings.panX, visualDefaults.panX) &&
+    near(settings.panY, visualDefaults.panY) &&
     near(settings.stretchX, visualDefaults.stretchX) &&
     near(settings.stretchY, visualDefaults.stretchY)
   )
@@ -139,7 +146,9 @@ export function buildTransform(settings: EffectSettings): string {
   const stretchY = clamp(settings.stretchY, STRETCH_MIN, STRETCH_MAX)
   const x = (settings.flipH ? -1 : 1) * zoom * stretchX
   const y = (settings.flipV ? -1 : 1) * zoom * stretchY
-  return `rotate(${round(settings.rotate, 2)}deg) scale(${round(x)}, ${round(y)})`
+  const panX = clamp(settings.panX, PAN_MIN, PAN_MAX)
+  const panY = clamp(settings.panY, PAN_MIN, PAN_MAX)
+  return `translate(${round(panX, 2)}%, ${round(panY, 2)}%) rotate(${round(settings.rotate, 2)}deg) scale(${round(x)}, ${round(y)})`
 }
 
 export function buildClip(settings: EffectSettings): string {

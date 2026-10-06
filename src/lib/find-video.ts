@@ -38,19 +38,80 @@ function laidOutSize(video: HTMLVideoElement): { width: number; height: number }
   return { width: rect.width, height: rect.height }
 }
 
+function originAxis(token: string | undefined, size: number): number {
+  if (!token || token === "center") return size / 2
+  if (token === "left" || token === "top") return 0
+  if (token === "right" || token === "bottom") return size
+  if (token.endsWith("%")) return (Number.parseFloat(token) / 100) * size
+  const value = Number.parseFloat(token)
+  return Number.isFinite(value) ? value : size / 2
+}
+
+/**
+ * Viewport box of the video's layout, ignoring its own CSS transform.
+ * Pan, zoom, and rotate move getBoundingClientRect(). Once that painted box
+ * leaves the viewport the finder used to drop the video, clear the transform,
+ * and apply it again on the next pass.
+ */
+function layoutViewportBox(
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+  style: CSSStyleDeclaration
+): {
+  left: number
+  top: number
+  right: number
+  bottom: number
+} {
+  const painted = video.getBoundingClientRect()
+  const transform = style.transform
+  if (!transform || transform === "none") {
+    return {
+      left: painted.left,
+      top: painted.top,
+      right: painted.left + width,
+      bottom: painted.top + height
+    }
+  }
+
+  const [originX, originY] = style.transformOrigin.split(/\s+/)
+  const origin = {
+    x: originAxis(originX, width),
+    y: originAxis(originY, height)
+  }
+  const matrix = new DOMMatrix(transform)
+  const corners = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height }
+  ]
+  let minX = Infinity
+  let minY = Infinity
+  for (const corner of corners) {
+    const point = matrix.transformPoint(new DOMPoint(corner.x - origin.x, corner.y - origin.y))
+    minX = Math.min(minX, origin.x + point.x)
+    minY = Math.min(minY, origin.y + point.y)
+  }
+
+  const left = painted.left - minX
+  const top = painted.top - minY
+  return { left, top, right: left + width, bottom: top + height }
+}
+
 function scoreVideo(video: HTMLVideoElement): number {
   if (video.videoWidth === 0 && video.readyState < 2) return 0
 
-  // Stretch and zoom change the painted box, not the layout box. Scoring the
-  // painted box made a small aspect ratio look like the video had disappeared.
+  // Stretch, zoom, and pan change the painted box, not the layout box.
   const size = laidOutSize(video)
   if (size.width < MIN_WIDTH || size.height < MIN_HEIGHT) return 0
 
-  const rect = video.getBoundingClientRect()
+  const style = getComputedStyle(video)
+  const rect = layoutViewportBox(video, size.width, size.height, style)
   if (rect.bottom < 0 || rect.top > window.innerHeight) return 0
   if (rect.right < 0 || rect.left > window.innerWidth) return 0
 
-  const style = getComputedStyle(video)
   if (
     style.display === "none" ||
     style.visibility === "hidden" ||

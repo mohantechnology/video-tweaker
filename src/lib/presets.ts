@@ -14,6 +14,8 @@ export const PRESET_SNAPSHOT_KEYS = [
   "flipV",
   "rotate",
   "zoom",
+  "panX",
+  "panY",
   "stretchX",
   "stretchY",
   "cropLeft",

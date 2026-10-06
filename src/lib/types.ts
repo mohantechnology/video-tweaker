@@ -19,6 +19,8 @@ export type EffectSettings = ColorSettings & {
   flipV: boolean
   rotate: number
   zoom: number
+  panX: number
+  panY: number
   stretchX: number
   stretchY: number
   cropLeft: number
@@ -82,6 +84,8 @@ export function defaultSettings(): EffectSettings {
     flipV: false,
     rotate: 0,
     zoom: 1,
+    panX: 0,
+    panY: 0,
     stretchX: 1,
     stretchY: 1,
     cropLeft: 0,
