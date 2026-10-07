@@ -24,8 +24,18 @@ const YOUTUBE_SKIP_SELECTOR = [
   ".ytp-ad-skip-button",
   ".ytp-ad-skip-button-modern",
   ".ytp-skip-ad-button",
+  ".ytp-ad-skip-button-slot",
+  ".ytp-ad-skip-button-container button",
   ".ytp-ad-overlay-close-button"
 ].join(", ")
+
+/**
+ * Where the current player draws an ad, including layouts that omit `ad-showing`.
+ * The centered card (`ytp-video-interstitial-buttoned-centered-layout`) is a
+ * Sponsored interstitial: the movie `<video>` is slid off screen and Skip lives on the card.
+ */
+const YOUTUBE_AD_UI =
+  ".ad-showing, .ad-interrupting, .video-ads, .ytp-ad-module, .ytp-ad-player-overlay, .ytp-video-interstitial-buttoned-centered-layout"
 
 type SavedRate = {
   rate: number
@@ -189,15 +199,20 @@ function findAdRoot(video: HTMLVideoElement, roots: ParentNode[]): HTMLElement |
 
 function youtubeAdRoot(video: HTMLVideoElement, roots: ParentNode[]): HTMLElement | null {
   const closest = video.closest(".html5-video-player, #movie_player")
-  if (closest instanceof HTMLElement && closest.classList.contains("ad-showing")) return closest
+  if (closest instanceof HTMLElement && playerIsShowingAd(closest)) return closest
   for (const root of roots) {
     if (!canSearch(root)) continue
-    const players = root.querySelectorAll(".html5-video-player.ad-showing, #movie_player.ad-showing")
+    const players = root.querySelectorAll(".html5-video-player, #movie_player")
     for (const player of players) {
-      if (player instanceof HTMLElement && player.contains(video)) return player
+      if (!(player instanceof HTMLElement) || !player.contains(video) || !playerIsShowingAd(player)) continue
+      return player
     }
   }
   return null
+}
+
+function playerIsShowingAd(player: HTMLElement): boolean {
+  return player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting")
 }
 
 function nearestPlayer(video: HTMLVideoElement): HTMLElement {
@@ -258,49 +273,70 @@ function clickSkipButtons(roots: ParentNode[]): boolean {
   for (const root of roots) {
     if (!canSearch(root)) continue
     if (domain === "youtube.com") {
-      const players = root.querySelectorAll(".ad-showing")
-      for (const player of players) {
-        const buttons = player.querySelectorAll(`button, [role='button'], ${YOUTUBE_SKIP_SELECTOR}`)
-        for (const button of buttons) {
-          if (!(button instanceof HTMLElement)) continue
-          if (!isYoutubeSkipControl(button)) continue
-          found.push(button)
-        }
+      const buttons = root.querySelectorAll(`button, [role='button'], ${YOUTUBE_SKIP_SELECTOR}`)
+      for (const button of buttons) {
+        if (!(button instanceof HTMLElement)) continue
+        if (!button.closest(YOUTUBE_AD_UI)) continue
+        if (!isYoutubeSkipControl(button)) continue
+        found.push(button)
       }
     }
     const buttons = root.querySelectorAll("button, [role='button']")
     for (const button of buttons) {
       if (!(button instanceof HTMLElement)) continue
-      const name = accessibleName(button)
-      const text = normalizeLabel(button.textContent ?? "")
-      if (!isExactSkipAdLabel(name) && !isExactSkipAdLabel(text)) continue
+      const label = controlLabel(button)
+      if (!isExactSkipAdLabel(label)) continue
       found.push(button)
     }
   }
-  const ready = innermost(unique(found))
-    .filter((button) => isClickable(button) && !controlIsCountdown(button))
+  const ready = outermost(unique(found))
+    .filter((button) => isClickable(button, domain === "youtube.com") && !controlIsCountdown(button))
     .sort((a, b) => closeRank(a) - closeRank(b))
   let clicked = false
   for (const button of ready) {
     if (clickOnce(button)) clicked = true
+    if (button.isConnected && domain === "youtube.com" && closeRank(button) === 0) finishYoutubeAd(button)
   }
   return clicked
 }
 
-/** Class-matched YouTube controls, plus a visible "Skip" that only exists inside an ad. */
+/**
+ * Known YouTube skip classes, plus a visible "Skip" that only exists inside the ad UI.
+ * Hidden countdown text is ignored so a ready Skip is not rejected by a leftover "Skip in 5".
+ */
 function isYoutubeSkipControl(element: HTMLElement): boolean {
-  if (controlIsCountdown(element)) return false
-  const name = accessibleName(element)
-  const text = normalizeLabel(element.textContent ?? "")
-  if ((name && BLOCKED_NAME.test(name)) || (text && BLOCKED_NAME.test(text))) return false
-  if (element.matches(YOUTUBE_SKIP_SELECTOR)) return true
-  return isSkipControlLabel(name, true) || isSkipControlLabel(text, true)
+  const label = controlLabel(element)
+  if (label && (BLOCKED_NAME.test(label) || isCountdownLabel(label))) return false
+  if (
+    element.matches(
+      ".ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot, .ytp-ad-overlay-close-button"
+    )
+  ) {
+    return true
+  }
+  return isSkipControlLabel(label, true)
 }
 
 function controlIsCountdown(element: HTMLElement): boolean {
-  const name = accessibleName(element)
-  if (isExactSkipAdLabel(name) || isSkipControlLabel(name, true)) return false
-  return isCountdownLabel(name)
+  const label = controlLabel(element)
+  if (isExactSkipAdLabel(label) || isSkipControlLabel(label, true)) return false
+  return isCountdownLabel(label)
+}
+
+function finishYoutubeAd(button: HTMLElement): void {
+  // This card is not the ad timeline. The movie is only hidden (top offset). Seeking would jump the movie.
+  if (button.closest(".ytp-video-interstitial-buttoned-centered-layout")) return
+  const player = button.closest(".html5-video-player, #movie_player")
+  if (!(player instanceof HTMLElement) || !playerIsShowingAd(player)) return
+  const video = player.querySelector("video.html5-main-video, video")
+  if (!(video instanceof HTMLVideoElement)) return
+  const target = seekTarget(video.duration, video.currentTime)
+  if (target == null) return
+  try {
+    video.currentTime = target
+  } catch {
+    /* The player can refuse the seek. The next scan tries again while Skip is showing. */
+  }
 }
 
 function closeRank(element: HTMLElement): number {
@@ -329,35 +365,29 @@ function unique(elements: HTMLElement[]): HTMLElement[] {
   return [...new Set(elements)]
 }
 
-function innermost(elements: HTMLElement[]): HTMLElement[] {
-  return elements.filter((element) => !elements.some((other) => other !== element && element.contains(other)))
+/** Keep the outer Skip control. Clicking an inner slot does not run YouTube's handler. */
+function outermost(elements: HTMLElement[]): HTMLElement[] {
+  return elements.filter((element) => !elements.some((other) => other !== element && other.contains(element)))
 }
 
 function clickOnce(element: HTMLElement): boolean {
   const now = Date.now()
-  const key = `${normalizeLabel(accessibleName(element) || element.textContent || "")}|${adPodMarker(element)}`
+  const key = `${controlLabel(element)}|${adPodMarker(element)}`
   const previous = lastClick.get(element)
   if (previous && previous.key === key && now - previous.at < CLICK_COOLDOWN_MS) return false
   lastClick.set(element, { at: now, key })
   try {
-    press(element)
+    if (registrableDomain(location.hostname) === "youtube.com") {
+      // Isolated-world click() never reaches YouTube's handler. The page-world
+      // script sees this attribute and calls click() there.
+      element.setAttribute("data-vee-press", "1")
+    } else {
+      element.click()
+    }
     return true
   } catch {
     return false
   }
-}
-
-function press(element: HTMLElement): void {
-  const view = element.ownerDocument.defaultView ?? window
-  const init: MouseEventInit = { bubbles: true, cancelable: true, view, button: 0 }
-  if (typeof PointerEvent !== "undefined") {
-    const pointer = { ...init, pointerId: 1, pointerType: "mouse" }
-    element.dispatchEvent(new PointerEvent("pointerdown", pointer))
-    element.dispatchEvent(new MouseEvent("mousedown", init))
-    element.dispatchEvent(new PointerEvent("pointerup", pointer))
-    element.dispatchEvent(new MouseEvent("mouseup", init))
-  }
-  element.click()
 }
 
 function canSearch(root: ParentNode): boolean {
@@ -368,6 +398,11 @@ function canSearch(root: ParentNode): boolean {
 }
 
 function accessibleName(element: HTMLElement): string {
+  return controlLabel(element)
+}
+
+/** Label from aria, or from text the viewer can see. Hidden countdown nodes are left out. */
+function controlLabel(element: HTMLElement): string {
   const aria = element.getAttribute("aria-label")?.trim()
   if (aria) return normalizeLabel(aria)
   const labelledBy = element.getAttribute("aria-labelledby")
@@ -379,7 +414,22 @@ function accessibleName(element: HTMLElement): string {
     const label = normalizeLabel(text)
     if (label) return label
   }
-  return normalizeLabel(element.textContent ?? "")
+  return normalizeLabel(shownText(element))
+}
+
+function shownText(element: HTMLElement): string {
+  if (element.getAttribute("aria-hidden") === "true") return ""
+  const style = getComputedStyle(element)
+  if (style.display === "none" || style.visibility === "hidden") return ""
+  let text = ""
+  for (const node of element.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.textContent ?? ""
+      continue
+    }
+    if (node instanceof HTMLElement) text += ` ${shownText(node)}`
+  }
+  return text
 }
 
 function isShown(element: HTMLElement): boolean {
@@ -389,12 +439,20 @@ function isShown(element: HTMLElement): boolean {
   return rect.width > 0 && rect.height > 0
 }
 
-function isClickable(element: HTMLElement): boolean {
+function isClickable(element: HTMLElement, youtube = false): boolean {
   if (element.getAttribute("aria-disabled") === "true") return false
   if ("disabled" in element && (element as HTMLButtonElement).disabled) return false
   const style = getComputedStyle(element)
-  if (style.pointerEvents === "none") return false
-  if (!isShown(element)) return false
+  if (!youtube && style.pointerEvents === "none") return false
+  if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false
+  return hasBox(element)
+}
+
+function hasBox(element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect()
-  return rect.width >= 8 && rect.height >= 8
+  if (rect.width >= 8 && rect.height >= 8) return true
+  for (const child of element.children) {
+    if (child instanceof HTMLElement && hasBox(child)) return true
+  }
+  return false
 }

@@ -28,3 +28,21 @@ if (!current[patchedFlag]) {
   patched[patchedFlag] = true
   Element.prototype.attachShadow = patched
 }
+
+const YOUTUBE_SKIP =
+  ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button"
+const PRESS = "data-vee-press"
+
+new MutationObserver((records) => {
+  for (const record of records) {
+    if (record.attributeName !== PRESS) continue
+    const node = record.target
+    if (!(node instanceof HTMLElement) || node.getAttribute(PRESS) !== "1") continue
+    if (!node.matches(YOUTUBE_SKIP)) {
+      node.removeAttribute(PRESS)
+      continue
+    }
+    node.removeAttribute(PRESS)
+    node.click()
+  }
+}).observe(document, { subtree: true, attributes: true, attributeFilter: [PRESS] })
