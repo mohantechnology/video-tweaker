@@ -532,6 +532,11 @@
 
 .vee-progress-list {
   margin: 0 0 10px;
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
 
 .vee-progress-row {

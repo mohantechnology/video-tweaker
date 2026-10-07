@@ -752,6 +752,15 @@ function Overlay() {
     patch(next, tab !== "video", tab === "video" ? "heavy" : "light")
   }
 
+  const resetAllTabs = () => {
+    const defaults = defaultSettings()
+    const next: Partial<EffectSettings> = {}
+    for (const key of [...VIDEO_RESET_KEYS, ...AUDIO_RESET_KEYS, ...PLAYBACK_RESET_KEYS]) {
+      next[key] = defaults[key] as never
+    }
+    patch(next, true, "heavy")
+  }
+
   const sectionOpen = (id: string) => openSections[id] !== false
 
   const toggleSection = (id: string) => {
@@ -1004,6 +1013,14 @@ function Overlay() {
           <button
             type="button"
             className="vee-icon-btn"
+            aria-label="Reset all settings"
+            title="Reset video, audio, and playback to their defaults. Saved resume points stay."
+            onClick={resetAllTabs}>
+            <RotateCcw size={15} strokeWidth={1.75} />
+          </button>
+          <button
+            type="button"
+            className="vee-icon-btn"
             aria-label="Maximize"
             title="Maximize"
             onClick={() => setMode("max")}>
@@ -1081,6 +1098,14 @@ function Overlay() {
                 data-on={String(presetOpen)}
                 onClick={() => setPresetOpen((open) => !open)}>
                 <Layers size={15} strokeWidth={1.75} />
+              </button>
+              <button
+                type="button"
+                className="vee-icon-btn"
+                aria-label="Reset all settings"
+                title="Reset video, audio, and playback to their defaults. Saved resume points stay."
+                onClick={resetAllTabs}>
+                <RotateCcw size={15} strokeWidth={1.75} />
               </button>
               <button
                 type="button"

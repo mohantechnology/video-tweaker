@@ -219,6 +219,7 @@ function Popup() {
     } catch {
       /* The storage signal still opens the panel in every frame. */
     }
+    window.close()
   }
 
   return (
