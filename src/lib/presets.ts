@@ -194,6 +194,30 @@ function sameSnapshot(a: PresetSnapshot, b: PresetSnapshot): boolean {
   })
 }
 
+/** Built-in look: its colors, with every other preset field at the default. */
+export function builtinSnapshot(preset: Preset): PresetSnapshot {
+  return { ...defaultSnapshot(), ...preset.color }
+}
+
+/**
+ * True when `presetId` names a real preset and the effect snapshot still
+ * matches it. Empty and "custom" mean the preset is not applied.
+ */
+export function presetIsExact(settings: EffectSettings, saved: UserPreset[] = []): boolean {
+  const id = settings.presetId
+  if (!id || id === "custom") return false
+  const snap = snapshotFrom(settings)
+  const builtin = presetById(id)
+  if (builtin) return sameSnapshot(snap, builtinSnapshot(builtin))
+  const user = saved.find((preset) => preset.id === id)
+  return user ? sameSnapshot(snap, user.snapshot) : false
+}
+
+/** Preset id to highlight, or "" when the current effects are not exactly that preset. */
+export function exactPresetId(settings: EffectSettings, saved: UserPreset[] = []): string {
+  return presetIsExact(settings, saved) ? settings.presetId : ""
+}
+
 /** Named preset for these settings. Custom only when nothing matches. */
 export function resolvePresetId(settings: EffectSettings, saved: UserPreset[] = []): string {
   if (

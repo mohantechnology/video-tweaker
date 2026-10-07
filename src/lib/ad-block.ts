@@ -1,10 +1,9 @@
 import { SITE_POLICY_KEY, sanitizeSitePolicy, siteAllowed } from "./sites"
 import {
   GLOBAL_ENABLED_KEY,
+  loadEffectiveSiteSettings,
   loadGlobalEnabled,
-  loadSiteSettings,
-  saveSiteSettings,
-  siteStorageKey
+  saveSiteSettings
 } from "./storage"
 import { type EffectSettings } from "./types"
 
@@ -189,7 +188,7 @@ export async function syncAdBlockRules(): Promise<void> {
 export async function persistSkipAdsBlock(hostname: string): Promise<void> {
   const domain = initiatorDomain(hostname)
   if (!domain) return
-  const current = await loadSiteSettings(domain)
+  const current = await loadEffectiveSiteSettings(domain)
   if (current.skipAdsBlock) {
     await syncAdBlockRules()
     return
@@ -200,7 +199,7 @@ export async function persistSkipAdsBlock(hostname: string): Promise<void> {
 export async function clearSkipAdsBlock(hostname: string): Promise<void> {
   const domain = initiatorDomain(hostname)
   if (!domain) return
-  const current = await loadSiteSettings(domain)
+  const current = await loadEffectiveSiteSettings(domain)
   if (!current.skipAdsBlock) {
     await syncAdBlockRules()
     return

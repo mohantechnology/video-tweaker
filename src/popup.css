@@ -197,11 +197,16 @@ button {
   flex: none;
 }
 
-.preset-toggle:hover,
-.preset-toggle[aria-expanded="true"] {
+.preset-toggle:hover:not(:disabled),
+.preset-toggle[data-on="true"] {
   background: linear-gradient(145deg, #8d73ff, #5d46e8);
   border-color: transparent;
   color: white;
+}
+
+.preset-toggle:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .preset-toggle svg {

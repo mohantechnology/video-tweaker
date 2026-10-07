@@ -11,7 +11,13 @@ import {
   ZOOM_MIN,
   clamp
 } from "./effects"
-import { PRESET_SNAPSHOT_KEYS, defaultSnapshot, type PresetSnapshot, type UserPreset } from "./presets"
+import {
+  PRESET_SNAPSHOT_KEYS,
+  defaultSnapshot,
+  snapshotFrom,
+  type PresetSnapshot,
+  type UserPreset
+} from "./presets"
 import { defaultSettings, type EffectSettings } from "./types"
 
 export const OPEN_REQUEST_KEY = "veeOpenRequest"
@@ -38,8 +44,10 @@ export type OpenRequest = {
   at: number
 }
 
+const SITE_KEY_PREFIX = "veeSite:"
+
 export function siteStorageKey(hostname: string): string {
-  return `veeSite:${hostname}`
+  return `${SITE_KEY_PREFIX}${hostname}`
 }
 
 function finiteNumber(value: unknown): value is number {
@@ -80,11 +88,92 @@ export async function loadSiteSettings(hostname: string): Promise<EffectSettings
   return normalizeSettings(bag[key])
 }
 
+/** Saved site record, or null when this domain has never been edited. */
+export async function loadStoredSiteSettings(hostname: string): Promise<EffectSettings | null> {
+  const key = siteStorageKey(hostname)
+  const bag = await chrome.storage.local.get(key)
+  if (bag[key] == null) return null
+  return normalizeSettings(bag[key])
+}
+
 export async function saveSiteSettings(
   hostname: string,
   settings: EffectSettings
 ): Promise<void> {
   await chrome.storage.local.set({ [siteStorageKey(hostname)]: settings })
+}
+
+/** Popup preset. Missing or empty `presetId` means no global preset is applied. */
+export const GLOBAL_PRESET_KEY = "veeGlobalPreset"
+
+export type GlobalPreset = {
+  presetId: string
+  snapshot: PresetSnapshot
+}
+
+export function readGlobalPreset(value: unknown): GlobalPreset | null {
+  if (!value || typeof value !== "object") return null
+  const raw = value as Partial<GlobalPreset>
+  if (typeof raw.presetId !== "string" || !raw.presetId) return null
+  const snapshot = sanitizeSnapshot(raw.snapshot)
+  if (!snapshot) return null
+  return { presetId: raw.presetId, snapshot }
+}
+
+export async function loadGlobalPreset(): Promise<GlobalPreset | null> {
+  const bag = await chrome.storage.local.get(GLOBAL_PRESET_KEY)
+  return readGlobalPreset(bag[GLOBAL_PRESET_KEY])
+}
+
+/** Defaults, with the global preset applied when one is stored. Does not write storage. */
+export function settingsFromGlobalPreset(preset: GlobalPreset | null): EffectSettings {
+  if (!preset) return normalizeSettings({ ...defaultSettings(), presetId: "" })
+  return normalizeSettings({
+    ...defaultSettings(),
+    ...preset.snapshot,
+    presetId: preset.presetId,
+    playbackTouched: true
+  })
+}
+
+/** Stored site settings, or the in-memory global preset when this domain has no record. */
+export async function loadEffectiveSiteSettings(hostname: string): Promise<EffectSettings> {
+  const stored = await loadStoredSiteSettings(hostname)
+  if (stored) return stored
+  return settingsFromGlobalPreset(await loadGlobalPreset())
+}
+
+/**
+ * Saves the popup preset and copies its snapshot onto every stored site.
+ * Skip ads, resume, and the per-site power flag stay as they were.
+ * Sites with no record keep inheriting this preset until they are edited.
+ */
+export async function saveGlobalPreset(preset: GlobalPreset): Promise<void> {
+  const snapshot = sanitizeSnapshot(preset.snapshot)
+  if (!preset.presetId || !snapshot) return
+  const normalized = normalizeSettings({
+    ...defaultSettings(),
+    ...snapshot,
+    presetId: preset.presetId,
+    playbackTouched: true
+  })
+  const stored: GlobalPreset = {
+    presetId: preset.presetId,
+    snapshot: snapshotFrom(normalized)
+  }
+  const bag = (await chrome.storage.local.get(null)) as Record<string, unknown>
+  const updates: Record<string, unknown> = { [GLOBAL_PRESET_KEY]: stored }
+  for (const [key, value] of Object.entries(bag)) {
+    if (!key.startsWith(SITE_KEY_PREFIX)) continue
+    const current = normalizeSettings(value)
+    updates[key] = normalizeSettings({
+      ...current,
+      ...stored.snapshot,
+      presetId: stored.presetId,
+      playbackTouched: true
+    })
+  }
+  await chrome.storage.local.set(updates)
 }
 
 export const USER_PRESETS_KEY = "veeUserPresets"

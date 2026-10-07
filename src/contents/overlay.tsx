@@ -80,7 +80,7 @@ import {
   type ProgressGroup,
   type SavedProgress
 } from "~lib/progress"
-import { PRESETS, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
+import { PRESETS, PRESET_SNAPSHOT_KEYS, builtinSnapshot, exactPresetId, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
 import {
   SITE_POLICY_KEY,
   defaultSitePolicy,
@@ -93,6 +93,7 @@ import {
 import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
 import {
   GLOBAL_ENABLED_KEY,
+  GLOBAL_PRESET_KEY,
   MAX_USER_PRESETS,
   OPEN_MESSAGE,
   OPEN_REQUEST_KEY,
@@ -104,15 +105,18 @@ import {
   clampDockBox,
   loadDockLayout,
   loadGlobalEnabled,
-  loadSiteSettings,
+  loadGlobalPreset,
+  loadStoredSiteSettings,
   loadUserPresets,
   normalizeSettings,
   readGlobalEnabled,
+  readGlobalPreset,
   resizeDockBox,
   sanitizeUserPresets,
   saveDockLayout,
   saveSiteSettings,
   saveUserPresets,
+  settingsFromGlobalPreset,
   siteStorageKey
 } from "~lib/storage"
 import {
@@ -344,7 +348,10 @@ function hostsMatch(messageHost: string | undefined, pageHost: string): boolean 
 
 function Overlay() {
   const hostname = location.hostname
-  const [settings, setSettings] = useState<EffectSettings>(defaultSettings)
+  const [settings, setSettings] = useState<EffectSettings>(() => ({
+    ...defaultSettings(),
+    presetId: ""
+  }))
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [policyReady, setPolicyReady] = useState(false)
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
@@ -371,6 +378,11 @@ function Overlay() {
   const appliedRef = useRef(settings)
   const readyRef = useRef(false)
   const dirtyRef = useRef(false)
+  const siteOverrideRef = useRef(false)
+  const settingsSynced = useRef(false)
+  const presetsSynced = useRef(false)
+  const saveSeq = useRef(0)
+  const adoptedSeq = useRef(0)
   const applyTimer = useRef(0)
   const applyDelayRef = useRef(0)
   const inflightSaves = useRef<EffectSettings[]>([])
@@ -415,6 +427,18 @@ function Overlay() {
   presetOpenRef.current = presetOpen
   draggingRef.current = dragging
 
+  const commitSiteSettings = (snapshot: EffectSettings) => {
+    const seq = ++saveSeq.current
+    inflightSaves.current = [...inflightSaves.current, snapshot]
+    dirtyRef.current = false
+    void saveSiteSettings(hostname, snapshot).then(() => {
+      if (seq >= adoptedSeq.current) return
+      const latest = settingsRef.current
+      inflightSaves.current = [...inflightSaves.current, latest]
+      void saveSiteSettings(hostname, latest)
+    })
+  }
+
   useEffect(() => {
     let alive = true
     void loadGlobalEnabled().then((enabled) => {
@@ -433,16 +457,25 @@ function Overlay() {
         if (!alive) return
         setPolicyReady(true)
       })
-    void loadSiteSettings(hostname).then((loaded) => {
+    void Promise.all([
+      loadStoredSiteSettings(hostname),
+      loadGlobalPreset(),
+      loadUserPresets()
+    ]).then(([stored, globalPreset, presets]) => {
       if (!alive) return
-      settingsRef.current = loaded
-      appliedRef.current = loaded
-      setSettings(loaded)
+      if (!presetsSynced.current) {
+        presetsSynced.current = true
+        setUserPresets(presets)
+      }
+      if (!settingsSynced.current) {
+        settingsSynced.current = true
+        const loaded = stored ?? settingsFromGlobalPreset(globalPreset)
+        siteOverrideRef.current = stored != null
+        settingsRef.current = loaded
+        appliedRef.current = loaded
+        setSettings(loaded)
+      }
       setReady(true)
-    })
-    void loadUserPresets().then((loaded) => {
-      if (!alive) return
-      setUserPresets(loaded)
     })
     void listProgress().then((rows) => {
       if (!alive) return
@@ -468,9 +501,7 @@ function Overlay() {
     if (!ready || !dirtyRef.current) return
     const handle = window.setTimeout(() => {
       const snapshot = settingsRef.current
-      inflightSaves.current = [...inflightSaves.current, snapshot]
-      dirtyRef.current = false
-      void saveSiteSettings(hostname, snapshot)
+      commitSiteSettings(snapshot)
     }, LIGHT_APPLY_DELAY_MS)
     return () => window.clearTimeout(handle)
   }, [settings, ready, hostname])
@@ -479,9 +510,7 @@ function Overlay() {
     const flush = () => {
       if (!dirtyRef.current) return
       const snapshot = settingsRef.current
-      inflightSaves.current = [...inflightSaves.current, snapshot]
-      dirtyRef.current = false
-      void saveSiteSettings(hostname, snapshot)
+      commitSiteSettings(snapshot)
     }
     window.addEventListener("pagehide", flush)
     return () => {
@@ -576,31 +605,45 @@ function Overlay() {
         globallyEnabledRef.current = enabled
         setGloballyEnabled(enabled)
       }
-      const stored = changes[siteStorageKey(hostname)]?.newValue as
-        | Partial<EffectSettings>
-        | undefined
-      if (stored) {
-        const incoming = normalizeSettings(stored)
+      const adoptExternal = (incoming: EffectSettings) => {
+        adoptedSeq.current = saveSeq.current + 1
+        dirtyRef.current = false
+        window.clearTimeout(applyTimer.current)
+        applyTimer.current = 0
+        applyDelayRef.current = 0
+        settingsRef.current = incoming
+        appliedRef.current = incoming
+        setSettings(incoming)
+        if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
+      }
+      const siteChange = changes[siteStorageKey(hostname)]
+      if (siteChange?.newValue != null) {
+        settingsSynced.current = true
+        siteOverrideRef.current = true
+        const incoming = normalizeSettings(siteChange.newValue)
         const pending = inflightSaves.current
         const index = pending.findIndex((item) => settingsEqual(item, incoming))
         if (index >= 0) {
           inflightSaves.current = pending.slice(index + 1)
         } else if (!settingsEqual(settingsRef.current, incoming)) {
-          dirtyRef.current = false
-          window.clearTimeout(applyTimer.current)
-          applyTimer.current = 0
-          applyDelayRef.current = 0
-          settingsRef.current = incoming
-          appliedRef.current = incoming
-          setSettings(incoming)
-          if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
+          adoptExternal(incoming)
         }
+      } else if (
+        Object.prototype.hasOwnProperty.call(changes, GLOBAL_PRESET_KEY) &&
+        !siteOverrideRef.current
+      ) {
+        settingsSynced.current = true
+        const incoming = settingsFromGlobalPreset(
+          readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue)
+        )
+        if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming)
       }
       if (changes[SITE_POLICY_KEY]) {
         const incoming = sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue)
         setPolicy((current) => (policiesEqual(current, incoming) ? current : incoming))
       }
       if (changes[USER_PRESETS_KEY]) {
+        presetsSynced.current = true
         setUserPresets(sanitizeUserPresets(changes[USER_PRESETS_KEY].newValue))
       }
       if (changes[PROGRESS_KEY]) void listProgress().then(setProgressRows)
@@ -714,10 +757,17 @@ function Overlay() {
   }, [layout?.mode, presetOpen, dragging])
 
   const patch = (next: Partial<EffectSettings>, touchPlayback = false, timing: ApplyTiming = "now") => {
+    const snapshotChanged = PRESET_SNAPSHOT_KEYS.some(
+      (key) => key in next && next[key] !== settingsRef.current[key]
+    )
+    const applyingPreset =
+      typeof next.presetId === "string" && next.presetId !== "" && next.presetId !== "custom"
+    const resolved: Partial<EffectSettings> =
+      snapshotChanged && !applyingPreset ? { ...next, presetId: "" } : next
     dirtyRef.current = true
     const merged: EffectSettings = {
       ...settingsRef.current,
-      ...next,
+      ...resolved,
       playbackTouched: touchPlayback ? true : settingsRef.current.playbackTouched
     }
     settingsRef.current = merged
@@ -729,7 +779,7 @@ function Overlay() {
     if (timing === "now") {
       appliedRef.current = {
         ...appliedRef.current,
-        ...next,
+        ...resolved,
         playbackTouched: touchPlayback ? true : appliedRef.current.playbackTouched
       }
       bridgeRef.current?.applyNow()
@@ -749,6 +799,7 @@ function Overlay() {
     const defaults = defaultSettings()
     const next: Partial<EffectSettings> = {}
     for (const key of resetKeys(tab)) next[key] = defaults[key] as never
+    next.presetId = ""
     patch(next, tab !== "video", tab === "video" ? "heavy" : "light")
   }
 
@@ -758,6 +809,7 @@ function Overlay() {
     for (const key of [...VIDEO_RESET_KEYS, ...AUDIO_RESET_KEYS, ...PLAYBACK_RESET_KEYS]) {
       next[key] = defaults[key] as never
     }
+    next.presetId = ""
     patch(next, true, "heavy")
   }
 
@@ -769,7 +821,7 @@ function Overlay() {
 
   const resetSection = (flag: SectionFlag) => {
     const defaults = defaultSettings()
-    const next: Partial<EffectSettings> = { [flag]: true, presetId: "custom" }
+    const next: Partial<EffectSettings> = { [flag]: true, presetId: "" }
     for (const key of SECTION_FIELDS[flag]) next[key] = defaults[key] as never
     const media = sectionTouchesMedia(flag)
     patch(next, media, sectionIsVisual(flag) ? "heavy" : media ? "light" : "now")
@@ -808,7 +860,7 @@ function Overlay() {
     const next = userPresets.filter((preset) => preset.id !== id)
     setUserPresets(next)
     void saveUserPresets(next)
-    if (settingsRef.current.presetId === id) patch({ presetId: "custom" })
+    if (settingsRef.current.presetId === id) patch({ presetId: "" })
   }
 
   const setMode = (mode: DockMode) => {
@@ -960,6 +1012,8 @@ function Overlay() {
 
   if (!globallyEnabled || !allowed || !hasVideo || !layout || layout.mode === "closed") return null
 
+  const activePresetId = exactPresetId(settings, userPresets)
+
   const box = clampDockBox(layout[layout.mode], viewport)
   const tabOn = settings[tabFlag(tab)]
   const actions = tabActions(tab, tabOn)
@@ -1006,7 +1060,7 @@ function Overlay() {
             aria-label="Presets"
             aria-expanded={presetOpen}
             title="Presets"
-            data-on={String(presetOpen)}
+            data-on={String(activePresetId !== "")}
             onClick={() => setPresetOpen((open) => !open)}>
             <Layers size={15} strokeWidth={1.75} />
           </button>
@@ -1043,7 +1097,7 @@ function Overlay() {
               menuRef={presetMenuRef}
               drop={box.y < 220 ? "up" : "down"}
               presets={userPresets}
-              activeId={settings.presetId}
+              activeId={activePresetId}
               name={presetName}
               onName={setPresetName}
               onClose={() => setPresetOpen(false)}
@@ -1095,7 +1149,7 @@ function Overlay() {
                 aria-label="Presets"
                 aria-expanded={presetOpen}
                 title="Presets"
-                data-on={String(presetOpen)}
+                data-on={String(activePresetId !== "")}
                 onClick={() => setPresetOpen((open) => !open)}>
                 <Layers size={15} strokeWidth={1.75} />
               </button>
@@ -1132,7 +1186,7 @@ function Overlay() {
               <PresetMenu
                 menuRef={presetMenuRef}
                 presets={userPresets}
-                activeId={settings.presetId}
+                activeId={activePresetId}
                 name={presetName}
                 onName={setPresetName}
                 onClose={() => setPresetOpen(false)}
@@ -1180,11 +1234,11 @@ function Overlay() {
                         key={preset.id}
                         type="button"
                         className="vee-chip"
-                        data-on={String(settings.presetId === preset.id)}
+                        data-on={String(activePresetId === preset.id)}
                         onClick={() => {
                           const match = presetById(preset.id)
                           if (!match) return
-                          patch({ ...match.color, presetId: preset.id })
+                          patch({ ...builtinSnapshot(match), presetId: preset.id }, true)
                         }}>
                         {preset.label}
                       </button>
@@ -1202,8 +1256,7 @@ function Overlay() {
                       onChange={(value) =>
                         patch(
                           {
-                            [control.key]: readRange(String(value), control.digits),
-                            presetId: "custom"
+                            [control.key]: readRange(String(value), control.digits)
                           },
                           false,
                           "heavy"
@@ -1231,7 +1284,7 @@ function Overlay() {
                       value={settings.stretchX}
                       display={percent(settings.stretchX)}
                       onChange={(value) =>
-                        patch({ stretchX: readRange(String(value), 2), presetId: "custom" }, false, "heavy")
+                        patch({ stretchX: readRange(String(value), 2) }, false, "heavy")
                       }
                     />
                     <Slider
@@ -1242,7 +1295,7 @@ function Overlay() {
                       value={settings.stretchY}
                       display={percent(settings.stretchY)}
                       onChange={(value) =>
-                        patch({ stretchY: readRange(String(value), 2), presetId: "custom" }, false, "heavy")
+                        patch({ stretchY: readRange(String(value), 2) }, false, "heavy")
                       }
                     />
                   </div>
@@ -1257,8 +1310,7 @@ function Overlay() {
                         patch(
                           {
                             linkCropX: true,
-                            cropRight: settings.cropLeft,
-                            presetId: "custom"
+                            cropRight: settings.cropLeft
                           },
                           false,
                           "heavy"
@@ -1272,16 +1324,16 @@ function Overlay() {
                     end={settings.cropRight}
                     onPair={(value) =>
                       patch(
-                        { cropLeft: value, cropRight: value, presetId: "custom" },
+                        { cropLeft: value, cropRight: value },
                         false,
                         "heavy"
                       )
                     }
                     onStart={(value) =>
-                      patch({ cropLeft: value, presetId: "custom" }, false, "heavy")
+                      patch({ cropLeft: value }, false, "heavy")
                     }
                     onEnd={(value) =>
-                      patch({ cropRight: value, presetId: "custom" }, false, "heavy")
+                      patch({ cropRight: value }, false, "heavy")
                     }
                   />
                   <CropAxis
@@ -1293,8 +1345,7 @@ function Overlay() {
                         patch(
                           {
                             linkCropY: true,
-                            cropBottom: settings.cropTop,
-                            presetId: "custom"
+                            cropBottom: settings.cropTop
                           },
                           false,
                           "heavy"
@@ -1308,16 +1359,16 @@ function Overlay() {
                     end={settings.cropBottom}
                     onPair={(value) =>
                       patch(
-                        { cropTop: value, cropBottom: value, presetId: "custom" },
+                        { cropTop: value, cropBottom: value },
                         false,
                         "heavy"
                       )
                     }
                     onStart={(value) =>
-                      patch({ cropTop: value, presetId: "custom" }, false, "heavy")
+                      patch({ cropTop: value }, false, "heavy")
                     }
                     onEnd={(value) =>
-                      patch({ cropBottom: value, presetId: "custom" }, false, "heavy")
+                      patch({ cropBottom: value }, false, "heavy")
                     }
                   />
                   </div>
@@ -1329,7 +1380,7 @@ function Overlay() {
                     value={settings.zoom}
                     display={percent(settings.zoom)}
                     onChange={(value) =>
-                      patch({ zoom: readRange(String(value), 2), presetId: "custom" }, false, "heavy")
+                      patch({ zoom: readRange(String(value), 2) }, false, "heavy")
                     }
                   />
                   <div className="vee-frame-block">
@@ -1342,7 +1393,7 @@ function Overlay() {
                       value={settings.panX}
                       display={percent(settings.panX / 100)}
                       onChange={(value) =>
-                        patch({ panX: readRange(String(value), 0), presetId: "custom" }, false, "heavy")
+                        patch({ panX: readRange(String(value), 0) }, false, "heavy")
                       }
                     />
                     <Slider
@@ -1353,7 +1404,7 @@ function Overlay() {
                       value={settings.panY}
                       display={percent(settings.panY / 100)}
                       onChange={(value) =>
-                        patch({ panY: readRange(String(value), 0), presetId: "custom" }, false, "heavy")
+                        patch({ panY: readRange(String(value), 0) }, false, "heavy")
                       }
                     />
                   </div>
@@ -1368,7 +1419,7 @@ function Overlay() {
                           aria-pressed={settings.flipH}
                           aria-label="Flip horizontal"
                           title="Flip horizontal"
-                          onClick={() => patch({ flipH: !settings.flipH, presetId: "custom" })}>
+                          onClick={() => patch({ flipH: !settings.flipH })}>
                           <FlipHorizontal2 size={14} strokeWidth={1.75} />
                         </button>
                         <button
@@ -1378,7 +1429,7 @@ function Overlay() {
                           aria-pressed={settings.flipV}
                           aria-label="Flip vertical"
                           title="Flip vertical"
-                          onClick={() => patch({ flipV: !settings.flipV, presetId: "custom" })}>
+                          onClick={() => patch({ flipV: !settings.flipV })}>
                           <FlipVertical2 size={14} strokeWidth={1.75} />
                         </button>
                       </span>
@@ -1393,7 +1444,7 @@ function Overlay() {
                       style={{ ["--p" as string]: percentOf(settings.rotate, -180, 180) }}
                       onChange={(event) =>
                         patch(
-                          { rotate: readRange(event.target.value, 0), presetId: "custom" },
+                          { rotate: readRange(event.target.value, 0) },
                           false,
                           "heavy"
                         )
@@ -1422,8 +1473,7 @@ function Overlay() {
                       onChange={(value) =>
                         patch(
                           {
-                            [control.key]: readRange(String(value), control.digits),
-                            presetId: "custom"
+                            [control.key]: readRange(String(value), control.digits)
                           },
                           false,
                           "heavy"

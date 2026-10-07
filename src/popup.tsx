@@ -2,7 +2,7 @@ import { ChevronDown } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 import { SitePolicyPanel } from "~components/site-policy-panel"
-import { defaultSnapshot, presetLabel, resolvePresetId, type UserPreset } from "~lib/presets"
+import { defaultSnapshot, presetLabel, type UserPreset } from "~lib/presets"
 import {
   SITE_POLICY_KEY,
   defaultSitePolicy,
@@ -15,20 +15,20 @@ import {
 } from "~lib/sites"
 import {
   GLOBAL_ENABLED_KEY,
+  GLOBAL_PRESET_KEY,
   OPEN_MESSAGE,
   USER_PRESETS_KEY,
   loadGlobalEnabled,
-  loadSiteSettings,
+  loadGlobalPreset,
   loadUserPresets,
-  normalizeSettings,
   readGlobalEnabled,
+  readGlobalPreset,
   requestOpenPanel,
   sanitizeUserPresets,
   saveGlobalEnabled,
-  saveSiteSettings,
-  siteStorageKey
+  saveGlobalPreset,
+  type GlobalPreset
 } from "~lib/storage"
-import { settingsEqual, type EffectSettings } from "~lib/types"
 
 import "./components/site-policy.css"
 import "./popup.css"
@@ -37,7 +37,6 @@ type ReadyState = {
   kind: "ready"
   tabId: number
   hostname: string
-  settings: EffectSettings
 }
 
 type PopupState =
@@ -51,9 +50,7 @@ async function readActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   return tab
 }
 
-async function readPage(
-  tabId: number
-): Promise<{ pending?: boolean; hostname?: string; settings?: EffectSettings } | null> {
+async function readPage(tabId: number): Promise<{ hostname?: string } | null> {
   try {
     return await chrome.tabs.sendMessage(tabId, { type: "VEE_STATUS" })
   } catch {
@@ -66,23 +63,34 @@ function Popup() {
   const [pageHost, setPageHost] = useState("")
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [savedPresets, setSavedPresets] = useState<UserPreset[]>([])
+  const [globalPreset, setGlobalPreset] = useState<GlobalPreset | null>(null)
+  const [presetReady, setPresetReady] = useState(false)
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
   const [presetMenu, setPresetMenu] = useState(false)
   const [pane, setPane] = useState<"general" | "sites">("general")
   const presetRowRef = useRef<HTMLDivElement>(null)
+  const presetSynced = useRef(false)
 
   useEffect(() => {
     let alive = true
 
     const load = async () => {
-      const [tab, storedPolicy, enabled] = await Promise.all([
+      const [tab, storedPolicy, enabled, saved, storedPreset] = await Promise.all([
         readActiveTab(),
         loadSitePolicy(),
-        loadGlobalEnabled()
+        loadGlobalEnabled(),
+        loadUserPresets(),
+        loadGlobalPreset()
       ])
       if (!alive) return
       setPolicy(storedPolicy)
       setGloballyEnabled(enabled)
+      setSavedPresets(saved)
+      if (!presetSynced.current) {
+        presetSynced.current = true
+        setGlobalPreset(storedPreset)
+      }
+      setPresetReady(true)
       if (!tab?.id) {
         setPageHost("")
         setState({ kind: "unsupported" })
@@ -103,23 +111,11 @@ function Popup() {
         return
       }
       setPageHost(page.hostname)
-
-      const [stored, saved] = await Promise.all([
-        loadSiteSettings(page.hostname),
-        loadUserPresets()
-      ])
-      if (!alive) return
-      setSavedPresets(saved)
-      const settings =
-        page.settings && page.pending !== true
-          ? normalizeSettings({ ...stored, ...page.settings })
-          : stored
       if (!alive) return
       setState({
         kind: "ready",
         tabId: tab.id,
-        hostname: page.hostname,
-        settings
+        hostname: page.hostname
       })
     }
 
@@ -137,16 +133,11 @@ function Popup() {
       if (changes[USER_PRESETS_KEY]) {
         setSavedPresets(sanitizeUserPresets(changes[USER_PRESETS_KEY].newValue))
       }
-      setState((current) => {
-        if (current.kind !== "ready") return current
-        const stored = changes[siteStorageKey(current.hostname)]?.newValue as
-          | Partial<EffectSettings>
-          | undefined
-        if (!stored) return current
-        const settings = normalizeSettings(stored)
-        if (settingsEqual(current.settings, settings)) return current
-        return { ...current, settings }
-      })
+      if (Object.prototype.hasOwnProperty.call(changes, GLOBAL_PRESET_KEY)) {
+        presetSynced.current = true
+        setGlobalPreset(readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue))
+        setPresetReady(true)
+      }
     }
 
     chrome.storage.onChanged.addListener(onChanged)
@@ -182,16 +173,12 @@ function Popup() {
   }
 
   const applySnapshot = async (presetId: string, snapshot: UserPreset["snapshot"]) => {
-    if (state.kind !== "ready") return
-    const settings = normalizeSettings({
-      ...state.settings,
-      ...snapshot,
-      presetId,
-      playbackTouched: true
-    })
-    setState({ ...state, settings })
+    const preset: GlobalPreset = { presetId, snapshot }
+    presetSynced.current = true
+    setGlobalPreset(preset)
+    setPresetReady(true)
     setPresetMenu(false)
-    await saveSiteSettings(state.hostname, settings)
+    await saveGlobalPreset(preset)
   }
 
   const applyPreset = (preset: UserPreset) => applySnapshot(preset.id, preset.snapshot)
@@ -208,8 +195,8 @@ function Popup() {
     setPane(next)
   }
 
-  const activePresetId =
-    state.kind === "ready" ? resolvePresetId(state.settings, savedPresets) : ""
+  const globalPresetId = globalPreset?.presetId ?? ""
+  const presetApplied = presetReady && globalPresetId !== ""
 
   const openControls = async () => {
     if (!globallyEnabled || state.kind !== "ready") return
@@ -281,48 +268,54 @@ function Popup() {
                 <i />
               </button>
             </div>
-            {state.kind === "ready" ? (
-              <div className="row preset-row" ref={presetRowRef}>
-                <div>
-                  <span>All Presets</span>
-                  <strong>{presetLabel(activePresetId, savedPresets)}</strong>
-                </div>
-                <button
-                  type="button"
-                  className="preset-toggle"
-                  aria-label="All presets"
-                  aria-expanded={presetMenu}
-                  aria-haspopup="listbox"
-                  onClick={() => setPresetMenu((open) => !open)}>
-                  <ChevronDown size={16} strokeWidth={1.75} />
-                </button>
-                {presetMenu ? (
-                  <div className="preset-menu" role="listbox" aria-label="All presets">
+            <div className="row preset-row" ref={presetRowRef}>
+              <div>
+                <span>All Presets</span>
+                <strong>
+                  {!presetReady
+                    ? "…"
+                    : presetApplied
+                      ? presetLabel(globalPresetId, savedPresets)
+                      : "None"}
+                </strong>
+              </div>
+              <button
+                type="button"
+                className="preset-toggle"
+                aria-label="All presets"
+                aria-expanded={presetMenu}
+                aria-haspopup="listbox"
+                data-on={String(presetApplied)}
+                disabled={!presetReady}
+                onClick={() => setPresetMenu((open) => !open)}>
+                <ChevronDown size={16} strokeWidth={1.75} />
+              </button>
+              {presetMenu ? (
+                <div className="preset-menu" role="listbox" aria-label="All presets">
+                  <button
+                    type="button"
+                    role="option"
+                    className="preset-option"
+                    aria-selected={globalPresetId === "default"}
+                    data-on={String(globalPresetId === "default")}
+                    onClick={() => void applyDefault()}>
+                    Default
+                  </button>
+                  {savedPresets.map((preset) => (
                     <button
+                      key={preset.id}
                       type="button"
                       role="option"
                       className="preset-option"
-                      aria-selected={activePresetId === "default"}
-                      data-on={String(activePresetId === "default")}
-                      onClick={() => void applyDefault()}>
-                      Default
+                      aria-selected={globalPresetId === preset.id}
+                      data-on={String(globalPresetId === preset.id)}
+                      onClick={() => void applyPreset(preset)}>
+                      {preset.label}
                     </button>
-                    {savedPresets.map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        role="option"
-                        className="preset-option"
-                        aria-selected={activePresetId === preset.id}
-                        data-on={String(activePresetId === preset.id)}
-                        onClick={() => void applyPreset(preset)}>
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </section>
           {state.kind === "loading" ? <p className="note">Looking at this page…</p> : null}
           {state.kind === "unsupported" ? (
