@@ -48,6 +48,19 @@ export type EffectSettings = ColorSettings & {
   audioEnabled: boolean
   playbackEnabled: boolean
   showNativeControls: boolean
+  /**
+   * Master switch for skip advertisement. Off leaves the four methods saved
+   * and unused. On runs each method whose own switch is on.
+   */
+  skipAdsEnabled: boolean
+  /** Click the site's own Skip ad or Close ad control. */
+  skipAds: boolean
+  /** Raise playback speed while an ad is showing. */
+  skipAdsSpeed: boolean
+  /** Jump the ad timeline to the end. */
+  skipAdsSeek: boolean
+  /** Block known ad request URLs on this website. */
+  skipAdsBlock: boolean
 }
 
 export const COLOR_KEYS: (keyof ColorSettings)[] = [
@@ -112,7 +125,12 @@ export function defaultSettings(): EffectSettings {
     videoEnabled: true,
     audioEnabled: true,
     playbackEnabled: true,
-    showNativeControls: false
+    showNativeControls: false,
+    skipAdsEnabled: false,
+    skipAds: false,
+    skipAdsSpeed: false,
+    skipAdsSeek: false,
+    skipAdsBlock: false
   }
 }
 

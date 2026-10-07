@@ -40,6 +40,7 @@ import {
 } from "react"
 
 import { SitePolicyPanel } from "~components/site-policy-panel"
+import { AD_BLOCK_CANCELLED, AD_BLOCK_CHECK, AD_BLOCK_DISMISS, AD_BLOCK_READY } from "~lib/ad-block"
 import {
   HOST_ID,
   getActiveVideo,
@@ -281,6 +282,11 @@ const PLAYBACK_RESET_KEYS = [
   "advancedPlaybackOn",
   "rememberProgress",
   "showNativeControls",
+  "skipAdsEnabled",
+  "skipAds",
+  "skipAdsSpeed",
+  "skipAdsSeek",
+  "skipAdsBlock",
   "playbackEnabled"
 ] as const satisfies readonly (keyof EffectSettings)[]
 
@@ -321,12 +327,16 @@ function tabActions(
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
     resetTitle:
-      "Restore speed, loop, pitch, resume, and the browser progress bar on the Playback tab. Saved resume points stay."
+      "Restore speed, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay."
   }
 }
 
 function sectionIsVisual(flag: SectionFlag): boolean {
   return flag === "basicVideoOn" || flag === "frameOn" || flag === "advancedVideoOn"
+}
+
+function hostsMatch(messageHost: string | undefined, pageHost: string): boolean {
+  return (messageHost ?? "").trim().toLowerCase() === pageHost.trim().toLowerCase()
 }
 
 function Overlay() {
@@ -570,10 +580,20 @@ function Overlay() {
     }
 
     const onMessage = (
-      message: { type?: string },
+      message: { type?: string; host?: string },
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response?: unknown) => void
     ) => {
+      if (message?.type === AD_BLOCK_READY && hostsMatch(message.host, hostname)) {
+        if (!settingsRef.current.skipAdsBlock) patch({ skipAdsBlock: true })
+        sendResponse({ ok: true })
+        return false
+      }
+      if (message?.type === AD_BLOCK_CANCELLED && hostsMatch(message.host, hostname)) {
+        if (settingsRef.current.skipAdsBlock) patch({ skipAdsBlock: false })
+        sendResponse({ ok: true })
+        return false
+      }
       if (message?.type === "VEE_STATUS") {
         sendResponse({
           pending: !readyRef.current,
@@ -1533,6 +1553,69 @@ function Overlay() {
                     <i />
                   </button>
                 </div>
+                <Group
+                  id="playback-skip"
+                  title="Skip Advertisement"
+                  icon={SkipForward}
+                  open={sectionOpen("playback-skip")}
+                  onToggle={() => toggleSection("playback-skip")}
+                  applied={settings.skipAdsEnabled}
+                  tools={
+                    <button
+                      className="vee-switch"
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.skipAdsEnabled}
+                      aria-label="Skip advertisement"
+                      title="Turns skip advertisement on or off. The four methods below keep their own settings."
+                      data-on={String(settings.skipAdsEnabled)}
+                      onClick={() => patch({ skipAdsEnabled: !settings.skipAdsEnabled })}>
+                      <i />
+                    </button>
+                  }>
+                  <p className="vee-hint">
+                    Turn this on to skip ads. Each method runs only when its own switch is on.
+                    Turning this off keeps those four settings.
+                  </p>
+                  <SwitchRow
+                    label="Click Skip ad"
+                    detail="Clicks the site's Skip ad or Close ad button when it appears."
+                    checked={settings.skipAds}
+                    onClick={() => patch({ skipAds: !settings.skipAds })}
+                  />
+                  <SwitchRow
+                    label="Speed up the ad"
+                    detail="Plays the ad at 16× until it ends. The speed slider stays where you set it."
+                    checked={settings.skipAdsSpeed}
+                    onClick={() => patch({ skipAdsSpeed: !settings.skipAdsSpeed })}
+                  />
+                  <SwitchRow
+                    label="Jump to the end of the ad"
+                    detail="Moves the ad timeline to the end while an ad is showing."
+                    checked={settings.skipAdsSeek}
+                    onClick={() => patch({ skipAdsSeek: !settings.skipAdsSeek })}
+                  />
+                  <SwitchRow
+                    label="Block ad requests"
+                    detail="Blocks known ad addresses on this site. The video stream is left alone."
+                    checked={settings.skipAdsBlock}
+                    onClick={() => {
+                      if (settings.skipAdsBlock) {
+                        patch({ skipAdsBlock: false })
+                        void chrome.runtime.sendMessage({ type: AD_BLOCK_DISMISS, host: hostname }).catch(() => undefined)
+                        return
+                      }
+                      patch({ skipAdsBlock: true })
+                      void chrome.runtime
+                        .sendMessage({ type: AD_BLOCK_CHECK, host: hostname })
+                        .then((response: { ok?: boolean; pending?: boolean } | undefined) => {
+                          if (!response || response.ok || response.pending) return
+                          if (settingsRef.current.skipAdsBlock) patch({ skipAdsBlock: false })
+                        })
+                        .catch(() => undefined)
+                    }}
+                  />
+                </Group>
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
                     <span>Loop</span>
@@ -1807,6 +1890,38 @@ function ProgressList({
           </section>
         )
       })}
+    </div>
+  )
+}
+
+function SwitchRow({
+  label,
+  detail,
+  checked,
+  onClick
+}: {
+  label: string
+  detail: string
+  checked: boolean
+  onClick: () => void
+}) {
+  return (
+    <div className="vee-switch-row">
+      <div>
+        <span>{label}</span>
+        <small>{detail}</small>
+      </div>
+      <button
+        className="vee-switch"
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        title={detail}
+        data-on={String(checked)}
+        onClick={onClick}>
+        <i />
+      </button>
     </div>
   )
 }

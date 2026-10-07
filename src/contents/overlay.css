@@ -416,6 +416,14 @@
   margin-top: 14px;
 }
 
+.vee-group + .vee-switch-row {
+  margin-top: 10px;
+}
+
+.vee-group-body .vee-switch-row:last-child {
+  margin-bottom: 0;
+}
+
 .vee-group-head {
   display: flex;
   align-items: center;

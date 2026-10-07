@@ -9,6 +9,7 @@ import {
 } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
 import { createProgressTracker } from "./progress"
+import { applySkipMethods, releaseSkipBoost } from "./skip-ads"
 import type { EffectSettings } from "./types"
 
 export const HOST_ID = "vee-csui"
@@ -146,6 +147,7 @@ export function startVideoBridge(options: {
     if (current && current !== next) {
       clearVisual(current)
       clearNativeControls(current)
+      releaseSkipBoost(current, options.getSettings())
     }
     if (current && !allowed) {
       clearVisual(current)
@@ -176,21 +178,23 @@ export function startVideoBridge(options: {
 
     placeDock(next)
     progress.setTracking(allowed)
+    const settings = options.getSettings()
     if (!allowed) {
+      releaseSkipBoost(next, settings)
       progress.follow(null)
       return
     }
     progress.follow(next)
-    if (!next) return
-
-    const settings = options.getSettings()
-    applyVisual(next, settings)
-    applyNativeControls(next, settings)
-    const nextStamp = playbackStamp(settings)
-    if (nextStamp !== stamp) {
-      applyPlayback(next, settings)
-      stamp = nextStamp
+    if (next) {
+      applyVisual(next, settings)
+      applyNativeControls(next, settings)
+      const nextStamp = playbackStamp(settings)
+      if (nextStamp !== stamp) {
+        applyPlayback(next, settings)
+        stamp = nextStamp
+      }
     }
+    applySkipMethods({ video: next, roots, settings, allowed: true })
   }
 
   const applyNow = () => {
@@ -232,6 +236,7 @@ export function startVideoBridge(options: {
       if (current) {
         clearVisual(current)
         clearNativeControls(current)
+        releaseSkipBoost(current, options.getSettings())
       }
       current = null
       activeVideo = null

@@ -25,7 +25,27 @@
   },
   "manifest": {
     "permissions": [
-      "storage"
+      "storage",
+      "declarativeNetRequest"
+    ],
+    "optional_host_permissions": [
+      "*://*.doubleclick.net/*",
+      "*://doubleclick.net/*",
+      "*://*.googlesyndication.com/*",
+      "*://googlesyndication.com/*",
+      "*://*.googleadservices.com/*",
+      "*://googleadservices.com/*",
+      "*://*.googletagservices.com/*",
+      "*://googletagservices.com/*",
+      "*://*.2mdn.net/*",
+      "*://2mdn.net/*",
+      "*://adservice.google.com/*",
+      "*://*.youtube.com/*",
+      "*://youtube.com/*",
+      "*://ads.hotstar.com/*",
+      "*://*.ads.hotstar.com/*",
+      "*://ads.jiohotstar.com/*",
+      "*://*.ads.jiohotstar.com/*"
     ],
     "browser_specific_settings": {
       "gecko": {
