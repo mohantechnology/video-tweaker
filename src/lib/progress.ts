@@ -326,6 +326,10 @@ function startRestore(video: HTMLVideoElement, time: number, onDone: () => void)
       if (tries >= 2) stop()
       return
     }
+    if (video.currentTime > time + 1.25) {
+      stop()
+      return
+    }
     if (video.currentTime >= 1.5 && tries >= 4) {
       stop()
       return
@@ -498,6 +502,10 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
       knownDuration = saved.duration
       appliedKey = nextKey
       pendingKey = ""
+      if (next.currentTime > saved.time + 1.25) {
+        holdSaves = false
+        return
+      }
       if (next.currentTime > 15 && Math.abs(next.currentTime - saved.time) > 8) {
         holdSaves = false
         return
