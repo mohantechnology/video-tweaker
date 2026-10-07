@@ -15,6 +15,24 @@ import type { EffectSettings } from "./types"
 export const HOST_ID = "vee-csui"
 
 let activeVideo: HTMLVideoElement | null = null
+let hostParked = false
+let parkedHost: HTMLElement | null = null
+
+export function parkExtensionHost(): void {
+  hostParked = true
+  const host = parkedHost ?? document.getElementById(HOST_ID)
+  if (!(host instanceof HTMLElement)) return
+  parkedHost = host
+  if (host.isConnected) host.remove()
+}
+
+export function restoreExtensionHost(): void {
+  hostParked = false
+  const host = parkedHost ?? document.getElementById(HOST_ID)
+  parkedHost = null
+  if (!(host instanceof HTMLElement) || host.isConnected) return
+  document.documentElement.appendChild(host)
+}
 
 export function getActiveVideo(): HTMLVideoElement | null {
   return activeVideo
@@ -42,6 +60,7 @@ function playbackStamp(settings: EffectSettings): string {
 }
 
 function placeDock(video: HTMLVideoElement | null): void {
+  if (hostParked) return
   const host = document.getElementById(HOST_ID)
   if (host) {
     host.style.pointerEvents = "none"
@@ -222,21 +241,29 @@ export function startVideoBridge(options: {
     poke: forcePlayback,
     applyNow,
     stop() {
+      if (stopped) return
       stopped = true
       window.clearTimeout(queued)
       window.clearInterval(interval)
       rootObserver?.disconnect()
       styleObserver?.disconnect()
+      rootObserver = null
+      styleObserver = null
       document.removeEventListener("fullscreenchange", schedule)
       document.removeEventListener("scroll", schedulePlace, true)
       window.removeEventListener("resize", schedule)
       window.removeEventListener("yt-navigate-finish", schedule)
       document.removeEventListener("visibilitychange", schedule)
       progress.stop()
-      if (current) {
-        clearVisual(current)
-        clearNativeControls(current)
-        releaseSkipBoost(current, options.getSettings())
+      const settings = options.getSettings()
+      applySkipMethods({ video: null, roots: [], settings, allowed: false })
+      const videos = new Set(scanPage().videos)
+      if (current) videos.add(current)
+      for (const video of videos) {
+        clearVisual(video)
+        clearNativeControls(video)
+        releasePlayback(video)
+        releaseSkipBoost(video, settings)
       }
       current = null
       activeVideo = null

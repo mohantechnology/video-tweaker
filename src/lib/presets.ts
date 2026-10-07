@@ -185,6 +185,36 @@ export function presetLabel(id: string, saved: UserPreset[] = []): string {
   )
 }
 
+function sameSnapshot(a: PresetSnapshot, b: PresetSnapshot): boolean {
+  return PRESET_SNAPSHOT_KEYS.every((key) => {
+    const left = a[key]
+    const right = b[key]
+    if (typeof left === "number" && typeof right === "number") return Math.abs(left - right) < 0.001
+    return left === right
+  })
+}
+
+/** Named preset for these settings. Custom only when nothing matches. */
+export function resolvePresetId(settings: EffectSettings, saved: UserPreset[] = []): string {
+  if (
+    settings.presetId === "default" ||
+    presetById(settings.presetId) ||
+    saved.some((preset) => preset.id === settings.presetId)
+  ) {
+    return settings.presetId
+  }
+  const snap = snapshotFrom(settings)
+  if (sameSnapshot(snap, defaultSnapshot())) return "default"
+  const savedMatch = saved.find((preset) => sameSnapshot(snap, preset.snapshot))
+  if (savedMatch) return savedMatch.id
+  const builtin = PRESETS.find((preset) => {
+    if (preset.id === "default") return false
+    return sameSnapshot(snap, { ...defaultSnapshot(), ...preset.color })
+  })
+  if (builtin) return builtin.id
+  return "custom"
+}
+
 export function presetById(id: string): Preset | undefined {
   return PRESETS.find((preset) => preset.id === id)
 }

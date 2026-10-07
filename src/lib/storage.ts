@@ -17,6 +17,22 @@ import { defaultSettings, type EffectSettings } from "./types"
 export const OPEN_REQUEST_KEY = "veeOpenRequest"
 export const OPEN_MESSAGE = "VEE_OPEN"
 
+/** One switch for every site. Missing means on. */
+export const GLOBAL_ENABLED_KEY = "veeGloballyEnabled"
+
+export function readGlobalEnabled(value: unknown): boolean {
+  return value !== false
+}
+
+export async function loadGlobalEnabled(): Promise<boolean> {
+  const bag = await chrome.storage.local.get(GLOBAL_ENABLED_KEY)
+  return readGlobalEnabled(bag[GLOBAL_ENABLED_KEY])
+}
+
+export async function saveGlobalEnabled(enabled: boolean): Promise<void> {
+  await chrome.storage.local.set({ [GLOBAL_ENABLED_KEY]: enabled })
+}
+
 export type OpenRequest = {
   hostname: string
   at: number

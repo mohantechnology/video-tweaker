@@ -1,5 +1,11 @@
 import { SITE_POLICY_KEY, sanitizeSitePolicy, siteAllowed } from "./sites"
-import { loadSiteSettings, saveSiteSettings, siteStorageKey } from "./storage"
+import {
+  GLOBAL_ENABLED_KEY,
+  loadGlobalEnabled,
+  loadSiteSettings,
+  saveSiteSettings,
+  siteStorageKey
+} from "./storage"
 import { type EffectSettings } from "./types"
 
 /**
@@ -84,7 +90,7 @@ export function initiatorDomain(hostname: string): string | null {
 }
 
 export function blockInputsChanged(changes: { [key: string]: chrome.storage.StorageChange }): boolean {
-  if (changes[SITE_POLICY_KEY]) return true
+  if (changes[GLOBAL_ENABLED_KEY] || changes[SITE_POLICY_KEY]) return true
   for (const [key, change] of Object.entries(changes)) {
     if (!key.startsWith(SITE_KEY_PREFIX)) continue
     const previous = readBlockSlice(change.oldValue)
@@ -114,6 +120,7 @@ function readBlockSlice(
 }
 
 export async function blockInitiatorDomains(): Promise<string[]> {
+  if (!(await loadGlobalEnabled())) return []
   const bag = await chrome.storage.local.get(null)
   const policy = sanitizeSitePolicy(bag[SITE_POLICY_KEY])
   const domains: string[] = []

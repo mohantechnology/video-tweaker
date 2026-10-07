@@ -1,5 +1,4 @@
 import cssText from "data-text:./overlay.css"
-import siteCssText from "data-text:../components/site-policy.css"
 import {
   AudioLines,
   ChevronDown,
@@ -12,7 +11,6 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
-  Globe,
   Layers,
   Link2,
   Maximize2,
@@ -33,21 +31,24 @@ import {
 import type { PlasmoCSConfig, PlasmoGetStyle } from "plasmo"
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
   type Ref
 } from "react"
 
-import { SitePolicyPanel } from "~components/site-policy-panel"
 import { AD_BLOCK_CANCELLED, AD_BLOCK_CHECK, AD_BLOCK_DISMISS, AD_BLOCK_READY } from "~lib/ad-block"
 import {
   HOST_ID,
   getActiveVideo,
+  parkExtensionHost,
   repositionDock,
+  restoreExtensionHost,
   startVideoBridge,
   type VideoBridge
 } from "~lib/bridge"
+import { postEngineActive } from "~lib/engine"
 import { readPageTitle } from "~lib/domains"
 import {
   BLUR_MAX,
@@ -86,12 +87,12 @@ import {
   loadSitePolicy,
   policiesEqual,
   sanitizeSitePolicy,
-  saveSitePolicy,
   siteAllowed,
   type SitePolicy
 } from "~lib/sites"
 import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
 import {
+  GLOBAL_ENABLED_KEY,
   MAX_USER_PRESETS,
   OPEN_MESSAGE,
   OPEN_REQUEST_KEY,
@@ -102,9 +103,11 @@ import {
   type Viewport,
   clampDockBox,
   loadDockLayout,
+  loadGlobalEnabled,
   loadSiteSettings,
   loadUserPresets,
   normalizeSettings,
+  readGlobalEnabled,
   resizeDockBox,
   sanitizeUserPresets,
   saveDockLayout,
@@ -132,7 +135,7 @@ export const getShadowHostId = () => HOST_ID
 
 export const getStyle: PlasmoGetStyle = () => {
   const style = document.createElement("style")
-  style.textContent = `${cssText}\n${siteCssText}`
+  style.textContent = cssText
   return style
 }
 
@@ -344,7 +347,7 @@ function Overlay() {
   const [settings, setSettings] = useState<EffectSettings>(defaultSettings)
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [policyReady, setPolicyReady] = useState(false)
-  const [sitesOpen, setSitesOpen] = useState(false)
+  const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
   const [ready, setReady] = useState(false)
   const [hasVideo, setHasVideo] = useState(false)
   const [pipOn, setPipOn] = useState(false)
@@ -364,6 +367,7 @@ function Overlay() {
   }))
   const settingsRef = useRef(settings)
   const policyRef = useRef(policy)
+  const globallyEnabledRef = useRef(false)
   const appliedRef = useRef(settings)
   const readyRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -405,6 +409,7 @@ function Overlay() {
 
   settingsRef.current = settings
   policyRef.current = policy
+  globallyEnabledRef.current = globallyEnabled === true
   readyRef.current = ready
   layoutRef.current = layout
   presetOpenRef.current = presetOpen
@@ -412,6 +417,11 @@ function Overlay() {
 
   useEffect(() => {
     let alive = true
+    void loadGlobalEnabled().then((enabled) => {
+      if (!alive) return
+      globallyEnabledRef.current = enabled
+      setGloballyEnabled(enabled)
+    })
     void loadSitePolicy()
       .then((loaded) => {
         if (!alive) return
@@ -480,8 +490,20 @@ function Overlay() {
     }
   }, [hostname])
 
+  useLayoutEffect(() => {
+    if (globallyEnabled === true) {
+      restoreExtensionHost()
+      postEngineActive(true)
+      return
+    }
+    bridgeRef.current?.stop()
+    bridgeRef.current = null
+    parkExtensionHost()
+    if (globallyEnabled === false) postEngineActive(false)
+  }, [globallyEnabled])
+
   useEffect(() => {
-    if (!ready || !policyReady) return
+    if (!ready || !policyReady || !globallyEnabled) return
     const bridge = startVideoBridge({
       getSettings: () => effectiveSettings(appliedRef.current),
       isAllowed: () => siteAllowed(hostname, policyRef.current),
@@ -506,16 +528,17 @@ function Overlay() {
       bridge.stop()
       bridgeRef.current = null
     }
-  }, [ready, policyReady, hostname])
+  }, [ready, policyReady, globallyEnabled, hostname])
 
   useEffect(() => {
-    if (!policyReady) return
+    if (!policyReady || !globallyEnabled) return
     bridgeRef.current?.applyNow()
-  }, [policy, policyReady])
+  }, [policy, policyReady, globallyEnabled])
 
   useEffect(() => {
+    if (!globallyEnabled) return
     repositionDock()
-  }, [layout?.mode, hasVideo])
+  }, [layout?.mode, hasVideo, globallyEnabled])
 
   useEffect(() => {
     const onResize = () => {
@@ -548,6 +571,11 @@ function Overlay() {
       area: string
     ) => {
       if (area !== "local") return
+      if (changes[GLOBAL_ENABLED_KEY]) {
+        const enabled = readGlobalEnabled(changes[GLOBAL_ENABLED_KEY].newValue)
+        globallyEnabledRef.current = enabled
+        setGloballyEnabled(enabled)
+      }
       const stored = changes[siteStorageKey(hostname)]?.newValue as
         | Partial<EffectSettings>
         | undefined
@@ -557,14 +585,15 @@ function Overlay() {
         const index = pending.findIndex((item) => settingsEqual(item, incoming))
         if (index >= 0) {
           inflightSaves.current = pending.slice(index + 1)
-        } else if (!dirtyRef.current && !settingsEqual(settingsRef.current, incoming)) {
+        } else if (!settingsEqual(settingsRef.current, incoming)) {
+          dirtyRef.current = false
           window.clearTimeout(applyTimer.current)
           applyTimer.current = 0
           applyDelayRef.current = 0
           settingsRef.current = incoming
           appliedRef.current = incoming
           setSettings(incoming)
-          bridgeRef.current?.applyNow()
+          if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
         }
       }
       if (changes[SITE_POLICY_KEY]) {
@@ -576,7 +605,7 @@ function Overlay() {
       }
       if (changes[PROGRESS_KEY]) void listProgress().then(setProgressRows)
       const request = changes[OPEN_REQUEST_KEY]?.newValue as { hostname?: string } | undefined
-      if (request?.hostname === hostname) reveal()
+      if (request?.hostname === hostname && globallyEnabledRef.current) reveal()
     }
 
     const onMessage = (
@@ -603,7 +632,7 @@ function Overlay() {
         return false
       }
       if (message?.type === OPEN_MESSAGE) {
-        reveal()
+        if (globallyEnabledRef.current) reveal()
         sendResponse({ ok: true })
         return false
       }
@@ -683,12 +712,6 @@ function Overlay() {
       window.removeEventListener("pointermove", onPointerMove)
     }
   }, [layout?.mode, presetOpen, dragging])
-
-  const updatePolicy = (next: SitePolicy) => {
-    policyRef.current = next
-    setPolicy(next)
-    void saveSitePolicy(next)
-  }
 
   const patch = (next: Partial<EffectSettings>, touchPlayback = false, timing: ApplyTiming = "now") => {
     dirtyRef.current = true
@@ -919,7 +942,6 @@ function Overlay() {
   }
 
   const allowed = siteAllowed(hostname, policy)
-  const showSites = sitesOpen || !allowed
   const painted = effectiveSettings(settings)
   const live =
     settings.enabled &&
@@ -927,8 +949,7 @@ function Overlay() {
       (settings.playbackTouched && (settings.audioEnabled || settings.playbackEnabled)))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
 
-  if (!hasVideo || !layout || layout.mode === "closed") return null
-  if (!allowed && window.top !== window) return null
+  if (!globallyEnabled || !allowed || !hasVideo || !layout || layout.mode === "closed") return null
 
   const box = clampDockBox(layout[layout.mode], viewport)
   const tabOn = settings[tabFlag(tab)]
@@ -966,21 +987,9 @@ function Overlay() {
           </button>
           <div className="vee-mini-copy">
             <strong>Video Effects</strong>
-            <span>{!allowed ? "Off for this site" : settings.enabled ? "Effects on" : "Effects off"}</span>
+            <span>{settings.enabled ? "Effects on" : "Effects off"}</span>
           </div>
-          {live && allowed ? <span className="vee-mini-dot" /> : null}
-          <button
-            type="button"
-            className="vee-icon-btn"
-            aria-label="Sites"
-            title="Sites"
-            data-on={String(showSites)}
-            onClick={() => {
-              setSitesOpen(true)
-              setMode("max")
-            }}>
-            <Globe size={15} strokeWidth={1.75} />
-          </button>
+          {live ? <span className="vee-mini-dot" /> : null}
           <button
             ref={presetButtonRef}
             type="button"
@@ -1059,27 +1068,9 @@ function Overlay() {
             </button>
             <div className="vee-title">
               <strong>Video Effects</strong>
-              <span>
-                {!allowed ? "Off for this site" : showSites ? "Where effects run" : settings.enabled ? "On this video" : "Effects are off"}
-              </span>
+              <span>{settings.enabled ? "On this video" : "Effects are off"}</span>
             </div>
             <div className="vee-header-actions">
-              <button
-                type="button"
-                className="vee-icon-btn"
-                aria-label="Sites"
-                aria-pressed={showSites}
-                title="Sites"
-                data-on={String(showSites)}
-                onClick={() => {
-                  if (!allowed) {
-                    setSitesOpen(true)
-                    return
-                  }
-                  setSitesOpen((open) => !open)
-                }}>
-                <Globe size={15} strokeWidth={1.75} />
-              </button>
               <button
                 ref={presetButtonRef}
                 type="button"
@@ -1127,12 +1118,6 @@ function Overlay() {
             ) : null}
           </header>
 
-          {showSites ? (
-            <div className="vee-body vee-sites-body">
-              <SitePolicyPanel hostname={hostname} policy={policy} onChange={updatePolicy} />
-            </div>
-          ) : (
-            <>
           <div className="vee-tabs" role="tablist" aria-label="Effect groups">
             {TABS.map((item) => {
               const Icon = item.icon
@@ -1539,7 +1524,7 @@ function Overlay() {
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
                     <span>Preserve speech</span>
-                    <small>Keeps voices natural when speed is not 1×.</small>
+                    <small>Keeps voices natural when playbackspeed is different than 1×.</small>
                   </div>
                   <button
                     className="vee-switch"
@@ -1547,7 +1532,7 @@ function Overlay() {
                     role="switch"
                     aria-checked={settings.preservePitch}
                     aria-label="Preserve speech"
-                    title="Keeps voices natural when speed is not 1×"
+                    title="Keeps voices natural when playback speed is different than 1×"
                     data-on={String(settings.preservePitch)}
                     onClick={() => patch({ preservePitch: !settings.preservePitch }, true)}>
                     <i />
@@ -1742,8 +1727,6 @@ function Overlay() {
               {actions.reset}
             </button>
           </div>
-            </>
-          )}
         </section>
       ) : null}
 

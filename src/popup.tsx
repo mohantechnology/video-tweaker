@@ -2,7 +2,7 @@ import { ChevronDown } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 import { SitePolicyPanel } from "~components/site-policy-panel"
-import { defaultSnapshot, presetLabel, type UserPreset } from "~lib/presets"
+import { defaultSnapshot, presetLabel, resolvePresetId, type UserPreset } from "~lib/presets"
 import {
   SITE_POLICY_KEY,
   defaultSitePolicy,
@@ -14,12 +14,17 @@ import {
   type SitePolicy
 } from "~lib/sites"
 import {
+  GLOBAL_ENABLED_KEY,
   OPEN_MESSAGE,
   USER_PRESETS_KEY,
+  loadGlobalEnabled,
   loadSiteSettings,
   loadUserPresets,
   normalizeSettings,
+  readGlobalEnabled,
   requestOpenPanel,
+  sanitizeUserPresets,
+  saveGlobalEnabled,
   saveSiteSettings,
   siteStorageKey
 } from "~lib/storage"
@@ -61,6 +66,7 @@ function Popup() {
   const [pageHost, setPageHost] = useState("")
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [savedPresets, setSavedPresets] = useState<UserPreset[]>([])
+  const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
   const [presetMenu, setPresetMenu] = useState(false)
   const [pane, setPane] = useState<"general" | "sites">("general")
   const presetRowRef = useRef<HTMLDivElement>(null)
@@ -69,9 +75,14 @@ function Popup() {
     let alive = true
 
     const load = async () => {
-      const [tab, storedPolicy] = await Promise.all([readActiveTab(), loadSitePolicy()])
+      const [tab, storedPolicy, enabled] = await Promise.all([
+        readActiveTab(),
+        loadSitePolicy(),
+        loadGlobalEnabled()
+      ])
       if (!alive) return
       setPolicy(storedPolicy)
+      setGloballyEnabled(enabled)
       if (!tab?.id) {
         setPageHost("")
         setState({ kind: "unsupported" })
@@ -99,7 +110,10 @@ function Popup() {
       ])
       if (!alive) return
       setSavedPresets(saved)
-      const settings = page.settings ? normalizeSettings({ ...stored, ...page.settings }) : stored
+      const settings =
+        page.settings && page.pending !== true
+          ? normalizeSettings({ ...stored, ...page.settings })
+          : stored
       if (!alive) return
       setState({
         kind: "ready",
@@ -116,8 +130,13 @@ function Popup() {
       area: string
     ) => {
       if (area !== "local") return
+      if (changes[GLOBAL_ENABLED_KEY]) {
+        setGloballyEnabled(readGlobalEnabled(changes[GLOBAL_ENABLED_KEY].newValue))
+      }
       if (changes[SITE_POLICY_KEY]) setPolicy(sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue))
-      if (changes[USER_PRESETS_KEY]) void loadUserPresets().then(setSavedPresets)
+      if (changes[USER_PRESETS_KEY]) {
+        setSavedPresets(sanitizeUserPresets(changes[USER_PRESETS_KEY].newValue))
+      }
       setState((current) => {
         if (current.kind !== "ready") return current
         const stored = changes[siteStorageKey(current.hostname)]?.newValue as
@@ -156,10 +175,10 @@ function Popup() {
   }, [presetMenu])
 
   const toggle = async () => {
-    if (state.kind !== "ready") return
-    const settings = { ...state.settings, enabled: !state.settings.enabled }
-    setState({ ...state, settings })
-    await saveSiteSettings(state.hostname, settings)
+    if (globallyEnabled == null) return
+    const next = !globallyEnabled
+    setGloballyEnabled(next)
+    await saveGlobalEnabled(next)
   }
 
   const applySnapshot = async (presetId: string, snapshot: UserPreset["snapshot"]) => {
@@ -189,8 +208,11 @@ function Popup() {
     setPane(next)
   }
 
+  const activePresetId =
+    state.kind === "ready" ? resolvePresetId(state.settings, savedPresets) : ""
+
   const openControls = async () => {
-    if (state.kind !== "ready") return
+    if (!globallyEnabled || state.kind !== "ready") return
     await requestOpenPanel(state.hostname)
     try {
       await chrome.tabs.sendMessage(state.tabId, { type: OPEN_MESSAGE })
@@ -238,82 +260,88 @@ function Popup() {
         <SitePolicyPanel hostname={pageHost} policy={policy} onChange={updatePolicy} />
       ) : null}
 
-      {pane === "general" && state.kind === "loading" ? (
-        <p className="note">Looking at this page…</p>
-      ) : null}
-
-      {pane === "general" && state.kind === "unsupported" ? (
-        <p className="note">Open a normal web page with a video, then use the controls there.</p>
-      ) : null}
-
-      {pane === "general" && state.kind === "missing" ? (
-        <p className="note">Refresh this page once so Video Effects can attach to the player.</p>
-      ) : null}
-
-      {pane === "general" && state.kind === "ready" ? (
+      {pane === "general" ? (
         <>
           <section className="card">
             <div className="row">
               <div>
                 <span>Effects</span>
-                <strong>{state.settings.enabled ? "On" : "Off"}</strong>
+                <strong>{globallyEnabled == null ? "…" : globallyEnabled ? "On" : "Off"}</strong>
               </div>
               <button
                 className="switch"
                 type="button"
                 role="switch"
-                aria-checked={state.settings.enabled}
+                aria-checked={globallyEnabled === true}
                 aria-label="Toggle effects"
-                data-on={String(state.settings.enabled)}
+                data-on={String(globallyEnabled === true)}
+                disabled={globallyEnabled == null}
                 onClick={() => void toggle()}>
                 <i />
               </button>
             </div>
-            <div className="row preset-row" ref={presetRowRef}>
-              <div>
-                <span>All Presets</span>
-                <strong>{presetLabel(state.settings.presetId, savedPresets)}</strong>
-              </div>
-              <button
-                type="button"
-                className="preset-toggle"
-                aria-label="All presets"
-                aria-expanded={presetMenu}
-                aria-haspopup="listbox"
-                onClick={() => setPresetMenu((open) => !open)}>
-                <ChevronDown size={16} strokeWidth={1.75} />
-              </button>
-              {presetMenu ? (
-                <div className="preset-menu" role="listbox" aria-label="All presets">
-                  <button
-                    type="button"
-                    role="option"
-                    className="preset-option"
-                    aria-selected={state.settings.presetId === "default"}
-                    data-on={String(state.settings.presetId === "default")}
-                    onClick={() => void applyDefault()}>
-                    Default
-                  </button>
-                  {savedPresets.map((preset) => (
+            {state.kind === "ready" ? (
+              <div className="row preset-row" ref={presetRowRef}>
+                <div>
+                  <span>All Presets</span>
+                  <strong>{presetLabel(activePresetId, savedPresets)}</strong>
+                </div>
+                <button
+                  type="button"
+                  className="preset-toggle"
+                  aria-label="All presets"
+                  aria-expanded={presetMenu}
+                  aria-haspopup="listbox"
+                  onClick={() => setPresetMenu((open) => !open)}>
+                  <ChevronDown size={16} strokeWidth={1.75} />
+                </button>
+                {presetMenu ? (
+                  <div className="preset-menu" role="listbox" aria-label="All presets">
                     <button
-                      key={preset.id}
                       type="button"
                       role="option"
                       className="preset-option"
-                      aria-selected={state.settings.presetId === preset.id}
-                      data-on={String(state.settings.presetId === preset.id)}
-                      onClick={() => void applyPreset(preset)}>
-                      {preset.label}
+                      aria-selected={activePresetId === "default"}
+                      data-on={String(activePresetId === "default")}
+                      onClick={() => void applyDefault()}>
+                      Default
                     </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
+                    {savedPresets.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        role="option"
+                        className="preset-option"
+                        aria-selected={activePresetId === preset.id}
+                        data-on={String(activePresetId === preset.id)}
+                        onClick={() => void applyPreset(preset)}>
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </section>
-          <button className="primary" type="button" onClick={() => void openControls()}>
-            Open controls
-          </button>
-          <p className="note">Sliders stay on the video, including while it is fullscreen.</p>
+          {state.kind === "loading" ? <p className="note">Looking at this page…</p> : null}
+          {state.kind === "unsupported" ? (
+            <p className="note">Open a normal web page with a video, then use the controls there.</p>
+          ) : null}
+          {state.kind === "missing" ? (
+            <p className="note">Refresh this page once so Video Effects can attach to the player.</p>
+          ) : null}
+          {state.kind === "ready" ? (
+            <>
+              <button
+                className="primary"
+                type="button"
+                disabled={globallyEnabled !== true}
+                onClick={() => void openControls()}>
+                Open controls
+              </button>
+              <p className="note">Sliders stay on the video, including while it is fullscreen.</p>
+            </>
+          ) : null}
         </>
       ) : null}
     </main>
