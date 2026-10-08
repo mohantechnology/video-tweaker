@@ -121,6 +121,7 @@ import {
 } from "~lib/storage"
 import {
   COLOR_KEYS,
+  HOLD_PLAYBACK_RATE,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   defaultSettings,
@@ -285,6 +286,7 @@ const PLAYBACK_RESET_KEYS = [
   "playbackRate",
   "preservePitch",
   "loop",
+  "holdToSpeed",
   "basicPlaybackOn",
   "advancedPlaybackOn",
   "rememberProgress",
@@ -333,8 +335,7 @@ function tabActions(
       ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
-    resetTitle:
-      "Restore speed, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay."
+    resetTitle: `Restore speed, hold for ${formatRate(HOLD_PLAYBACK_RATE)}, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay.`
   }
 }
 
@@ -1570,6 +1571,26 @@ function Overlay() {
                     ))}
                   </div>
                 </Group>
+                <div className="vee-switch-row vee-switch-solo">
+                  <div>
+                    <span>Hold for {formatRate(HOLD_PLAYBACK_RATE)}</span>
+                    <small>
+                      Press and hold the video to play at {formatRate(HOLD_PLAYBACK_RATE)}. Release to
+                      return to the previous speed.
+                    </small>
+                  </div>
+                  <button
+                    className="vee-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.holdToSpeed}
+                    aria-label={`Hold for ${formatRate(HOLD_PLAYBACK_RATE)}`}
+                    title={`Press and hold the video to play at ${formatRate(HOLD_PLAYBACK_RATE)}. Release to return to the previous speed.`}
+                    data-on={String(settings.holdToSpeed)}
+                    onClick={() => patch({ holdToSpeed: !settings.holdToSpeed })}>
+                    <i />
+                  </button>
+                </div>
                 <Group
                   id="playback-jump"
                   title="Jump"

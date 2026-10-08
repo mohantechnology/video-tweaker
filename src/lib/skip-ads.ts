@@ -1,4 +1,5 @@
 import { clamp } from "./effects"
+import { heldTransport, yieldHoldToAd } from "./hold-speed"
 import { registrableDomain } from "./host"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, type EffectSettings } from "./types"
 
@@ -116,6 +117,10 @@ export function skipMethodFlags(
   }
 }
 
+export function isSkipBoosted(video: HTMLVideoElement): boolean {
+  return boosted.has(video)
+}
+
 export function releaseSkipBoost(video: HTMLVideoElement | null, settings?: EffectSettings): void {
   if (!video) return
   const saved = boosted.get(video)
@@ -161,12 +166,17 @@ export function applySkipMethods(options: {
 }
 
 function boostAdPlayback(video: HTMLVideoElement): void {
+  const held = heldTransport(video)
   if (!boosted.has(video)) {
-    boosted.set(video, {
-      rate: video.playbackRate || 1,
-      defaultRate: video.defaultPlaybackRate || video.playbackRate || 1
-    })
+    boosted.set(
+      video,
+      held ?? {
+        rate: video.playbackRate || 1,
+        defaultRate: video.defaultPlaybackRate || video.playbackRate || 1
+      }
+    )
   }
+  yieldHoldToAd(video)
   try {
     if (video.playbackRate !== AD_PLAYBACK_RATE) video.playbackRate = AD_PLAYBACK_RATE
     if (video.defaultPlaybackRate !== AD_PLAYBACK_RATE) {

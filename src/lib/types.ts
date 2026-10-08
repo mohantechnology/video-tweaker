@@ -13,6 +13,12 @@ export type ColorSettings = {
 export const PLAYBACK_RATE_MIN = 0.1
 export const PLAYBACK_RATE_MAX = 4
 
+/**
+ * Playback rate while the video picture is held down.
+ * 2 means 2×. Change this number to use a different hold speed.
+ */
+export const HOLD_PLAYBACK_RATE = 2
+
 export type EffectSettings = ColorSettings & {
   enabled: boolean
   flipH: boolean
@@ -47,6 +53,8 @@ export type EffectSettings = ColorSettings & {
   videoEnabled: boolean
   audioEnabled: boolean
   playbackEnabled: boolean
+  /** Play at HOLD_PLAYBACK_RATE while the video picture is pressed. */
+  holdToSpeed: boolean
   showNativeControls: boolean
   /**
    * Master switch for skip advertisement. Off leaves the four methods saved
@@ -125,6 +133,7 @@ export function defaultSettings(): EffectSettings {
     videoEnabled: true,
     audioEnabled: true,
     playbackEnabled: true,
+    holdToSpeed: true,
     showNativeControls: false,
     skipAdsEnabled: false,
     skipAds: false,

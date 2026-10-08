@@ -8,8 +8,9 @@ import {
   visualWritesLocked
 } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
+import { maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
 import { createProgressTracker } from "./progress"
-import { applySkipMethods, releaseSkipBoost } from "./skip-ads"
+import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
 import type { EffectSettings } from "./types"
 
 export const HOST_ID = "vee-csui"
@@ -106,6 +107,13 @@ export function startVideoBridge(options: {
   let styleObserver: MutationObserver | null = null
   let interval = 0
   const progress = createProgressTracker(options.getSettings)
+  const hold = startHoldSpeed({
+    getVideo: () => current,
+    getSettings: options.getSettings,
+    isAllowed: () => options.isAllowed?.() !== false,
+    isAdBoosted: isSkipBoosted,
+    restoreOwned: (video) => applyPlayback(video, options.getSettings())
+  })
 
   const schedule = () => {
     if (stopped) return
@@ -164,10 +172,12 @@ export function startVideoBridge(options: {
     const next = document.hidden ? current : findMainVideo(videos)
     const allowed = options.isAllowed?.() !== false
     if (current && current !== next) {
+      releaseHold(current)
       clearVisual(current)
       clearNativeControls(current)
       releaseSkipBoost(current, options.getSettings())
     }
+    if (!allowed) releaseHold(null)
     if (current && !allowed) {
       clearVisual(current)
       clearNativeControls(current)
@@ -214,6 +224,7 @@ export function startVideoBridge(options: {
       }
     }
     applySkipMethods({ video: next, roots, settings, allowed: true })
+    maintainHold(next)
   }
 
   const applyNow = () => {
@@ -255,6 +266,7 @@ export function startVideoBridge(options: {
       window.removeEventListener("yt-navigate-finish", schedule)
       document.removeEventListener("visibilitychange", schedule)
       progress.stop()
+      hold.stop()
       const settings = options.getSettings()
       applySkipMethods({ video: null, roots: [], settings, allowed: false })
       const videos = new Set(scanPage().videos)
