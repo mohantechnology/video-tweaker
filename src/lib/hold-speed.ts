@@ -1,4 +1,4 @@
-import { clamp } from "./effects"
+import { clamp, protectMediaLevel } from "./effects"
 import { scanPage } from "./find-video"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, clampHoldPlaybackRate, type EffectSettings } from "./types"
 
@@ -81,6 +81,9 @@ type Session = {
   originY: number
   savedRate: number
   savedDefault: number
+  /** Loudness before this hold. Rate changes must not keep a different level. */
+  savedVolume: number
+  savedMuted: boolean
   /** True when the picture was already playing at pointer down. */
   wasPlaying: boolean
   phase: Phase
@@ -204,7 +207,12 @@ function installRateGuard(
       if (applyingRate) return
       applyingRate = true
       try {
-        set.call(video, forcingHold(video) ? holdRate() : value)
+        const next = forcingHold(video) ? holdRate() : value
+        if (get.call(video) === next) return
+        set.call(video, next)
+        if (forcingHold(video) && session?.video === video) {
+          protectMediaLevel(video, session.savedVolume, session.savedMuted)
+        }
       } finally {
         applyingRate = false
       }
@@ -256,16 +264,26 @@ function unlockRates(): void {
 
 function writeHoldRate(video: HTMLVideoElement): void {
   const rate = holdRate()
+  const volume = session?.video === video ? session.savedVolume : video.volume
+  const muted = session?.video === video ? session.savedMuted : video.muted
+  let wrote = false
   try {
-    if (video.playbackRate !== rate) video.playbackRate = rate
+    if (video.playbackRate !== rate) {
+      video.playbackRate = rate
+      wrote = true
+    }
   } catch {
     /* The player rejected the rate. The next frame tries again. */
   }
   try {
-    if (video.defaultPlaybackRate !== rate) video.defaultPlaybackRate = rate
+    if (video.defaultPlaybackRate !== rate) {
+      video.defaultPlaybackRate = rate
+      wrote = true
+    }
   } catch {
     /* Some players lock the default rate. The playback rate still changes. */
   }
+  if (wrote) protectMediaLevel(video, volume, muted)
 }
 
 /**
@@ -295,11 +313,22 @@ function resumeHeld(video: HTMLVideoElement): void {
   )
 }
 
-function restoreRates(video: HTMLVideoElement, savedRate: number, savedDefault: number): void {
+function restoreRates(
+  video: HTMLVideoElement,
+  savedRate: number,
+  savedDefault: number,
+  volume: number,
+  muted: boolean
+): void {
   if (!options) return
   const settings = options.getSettings()
   const playbackOn = settings.enabled && settings.playbackEnabled !== false
   const managed = settings.playbackTouched && playbackOn
+  const audioOn =
+    settings.audioTouched &&
+    settings.enabled &&
+    settings.audioEnabled !== false &&
+    settings.basicAudioOn !== false
   try {
     if (managed) {
       const rate = clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
@@ -314,7 +343,11 @@ function restoreRates(video: HTMLVideoElement, savedRate: number, savedDefault: 
   } catch {
     /* The player can reject a rate write while a frame is locked. */
   }
-  if (settings.playbackTouched) options.restoreOwned(video)
+  if (settings.playbackTouched || settings.audioTouched) options.restoreOwned(video)
+  // Last write wins. The rate restore above can change loudness after restoreOwned
+  // has already sampled it, so put the intended level back once more.
+  if (audioOn) protectMediaLevel(video, settings.volume, settings.muted)
+  else protectMediaLevel(video, volume, muted)
 }
 
 function finish(restore: boolean): void {
@@ -326,6 +359,8 @@ function finish(restore: boolean): void {
   releaseCapture(current)
   hideBadge()
   const restoreBoost = restore && current.phase === "boosting"
+  const savedVolume = current.savedVolume
+  const savedMuted = current.savedMuted
   session = null
   resumePending = false
   resumeNotBefore = 0
@@ -334,7 +369,9 @@ function finish(restore: boolean): void {
     swallowUntil = performance.now() + CLICK_SWALLOW_MS
     swallowVideo = current.video
   }
-  if (restoreBoost) restoreRates(current.video, current.savedRate, current.savedDefault)
+  if (restoreBoost) {
+    restoreRates(current.video, current.savedRate, current.savedDefault, savedVolume, savedMuted)
+  }
 }
 
 function unwatch(video: HTMLVideoElement): void {
@@ -434,6 +471,8 @@ function onPointerDown(event: PointerEvent): void {
     originY: event.clientY,
     savedRate: video.playbackRate || 1,
     savedDefault: video.defaultPlaybackRate || video.playbackRate || 1,
+    savedVolume: video.volume,
+    savedMuted: video.muted,
     wasPlaying: true,
     phase: "pending",
     swallowClick: false,
@@ -504,6 +543,8 @@ function engage(): void {
     return
   }
   session.phase = "boosting"
+  session.savedVolume = video.volume
+  session.savedMuted = video.muted
   lockRates(video)
   writeHoldRate(video)
   session.swallowClick = true

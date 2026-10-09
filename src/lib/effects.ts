@@ -265,11 +265,28 @@ function readPitch(video: HTMLVideoElement): boolean {
   return (video as PitchVideo).preservesPitch !== false
 }
 
-function writePitch(video: HTMLVideoElement, preserve: boolean): void {
+/**
+ * True when pitch preservation actually changed.
+ * Assigning the same value restarts the audio resampler and the loudness jumps.
+ * Prefixed flags are set only when the browser already exposes them as booleans,
+ * so a missing moz/webkit flag cannot force a rewrite on every apply.
+ */
+function writePitch(video: HTMLVideoElement, preserve: boolean): boolean {
   const pitched = video as PitchVideo
-  pitched.preservesPitch = preserve
-  pitched.mozPreservesPitch = preserve
-  pitched.webkitPreservesPitch = preserve
+  let wrote = false
+  if (pitched.preservesPitch !== preserve) {
+    pitched.preservesPitch = preserve
+    wrote = true
+  }
+  if (typeof pitched.mozPreservesPitch === "boolean" && pitched.mozPreservesPitch !== preserve) {
+    pitched.mozPreservesPitch = preserve
+    wrote = true
+  }
+  if (typeof pitched.webkitPreservesPitch === "boolean" && pitched.webkitPreservesPitch !== preserve) {
+    pitched.webkitPreservesPitch = preserve
+    wrote = true
+  }
+  return wrote
 }
 
 function mediaState(video: HTMLVideoElement): OwnedMedia {
@@ -288,51 +305,128 @@ function mediaState(video: HTMLVideoElement): OwnedMedia {
   return created
 }
 
-function writeTransport(video: HTMLVideoElement, rate: number, loop: boolean): void {
+/**
+ * True when playbackRate actually changed. A hold guard can ignore the write,
+ * and loop changes do not disturb loudness.
+ */
+function writeTransport(video: HTMLVideoElement, rate: number, loop: boolean): boolean {
   const nextRate = clamp(rate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
-  if (video.playbackRate !== nextRate) video.playbackRate = nextRate
+  const before = video.playbackRate
+  if (before !== nextRate) video.playbackRate = nextRate
   if (video.loop !== loop) video.loop = loop
+  return video.playbackRate !== before
 }
 
 function writeAudio(video: HTMLVideoElement, volume: number, muted: boolean): void {
+  restoreMediaLevel(video, volume, muted)
+}
+
+const LEVEL_EPSILON = 0.005
+
+export function restoreMediaLevel(video: HTMLVideoElement, volume: number, muted: boolean): void {
   const nextVolume = clamp(volume, 0, 1)
-  if (Math.abs(video.volume - nextVolume) > 0.005) video.volume = nextVolume
+  if (Math.abs(video.volume - nextVolume) > LEVEL_EPSILON) video.volume = nextVolume
   if (video.muted !== muted) video.muted = muted
 }
 
-export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings): void {
-  if (!settings.playbackTouched) return
+type LevelGuard = { ticket: number; frame: number; timer: number }
 
-  const state = mediaState(video)
-  const playbackOn = settings.enabled && settings.playbackEnabled !== false
-  const audioOn = settings.enabled && settings.audioEnabled !== false
+let levelTicket = 0
+const levelGuards = new WeakMap<HTMLVideoElement, LevelGuard>()
 
+/**
+ * Players and Chrome itself rewrite volume from the ratechange handler,
+ * sometimes a frame later. Put the previous loudness back.
+ * A newer call cancels the pending one so a stale restore cannot land last.
+ */
+export function protectMediaLevel(video: HTMLVideoElement, volume: number, muted: boolean): void {
+  const ticket = ++levelTicket
+  const apply = () => {
+    const guard = levelGuards.get(video)
+    if (!guard || guard.ticket !== ticket) return
+    try {
+      restoreMediaLevel(video, volume, muted)
+    } catch {
+      /* The element can already be detached. */
+    }
+  }
   try {
+    restoreMediaLevel(video, volume, muted)
+  } catch {
+    return
+  }
+  const previous = levelGuards.get(video)
+  if (previous) {
+    if (previous.frame) cancelAnimationFrame(previous.frame)
+    window.clearTimeout(previous.timer)
+  }
+  const timer = window.setTimeout(apply, 0)
+  levelGuards.set(video, { ticket, frame: 0, timer })
+  queueMicrotask(apply)
+  try {
+    const guard = levelGuards.get(video)
+    if (guard && guard.ticket === ticket) guard.frame = requestAnimationFrame(apply)
+  } catch {
+    /* No animation frame here. The timeout still puts the loudness back. */
+  }
+}
+
+function playbackControlled(settings: EffectSettings): boolean {
+  return settings.enabled && settings.playbackEnabled !== false && settings.playbackTouched
+}
+
+function audioControlled(settings: EffectSettings): boolean {
+  return (
+    settings.enabled &&
+    settings.audioEnabled !== false &&
+    settings.basicAudioOn !== false &&
+    settings.audioTouched
+  )
+}
+
+export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings): void {
+  const playbackOn = playbackControlled(settings)
+  const audioOn = audioControlled(settings)
+  const existing = ownedMedia.get(video)
+  if (!playbackOn && !audioOn && !existing?.playback && !existing?.audio) return
+
+  const state = existing ?? mediaState(video)
+  try {
+    // Remember the player loudness before a rate write can replace it.
+    if (audioOn && !state.audio) {
+      state.volume = video.volume
+      state.muted = video.muted
+      state.audio = true
+    }
+
+    const level = { volume: video.volume, muted: video.muted }
+    let disturbed = false
+
     if (playbackOn) {
       if (!state.playback) {
         state.playbackRate = video.playbackRate || 1
         state.loop = video.loop
         state.preservesPitch = readPitch(video)
+        state.playback = true
       }
-      writeTransport(video, settings.playbackRate, settings.loop)
-      writePitch(video, settings.preservePitch)
-      state.playback = true
+      disturbed = writeTransport(video, settings.playbackRate, settings.loop)
+      disturbed = writePitch(video, settings.preservePitch) || disturbed
     } else if (state.playback) {
-      writeTransport(video, state.playbackRate, state.loop)
-      writePitch(video, state.preservesPitch)
+      disturbed = writeTransport(video, state.playbackRate, state.loop)
+      disturbed = writePitch(video, state.preservesPitch) || disturbed
       state.playback = false
     }
 
     if (audioOn) {
-      if (!state.audio) {
-        state.volume = video.volume
-        state.muted = video.muted
-      }
       writeAudio(video, settings.volume, settings.muted)
-      state.audio = true
+      if (disturbed) protectMediaLevel(video, settings.volume, settings.muted)
     } else if (state.audio) {
-      writeAudio(video, state.volume, state.muted)
+      const saved = { volume: state.volume, muted: state.muted }
+      writeAudio(video, saved.volume, saved.muted)
       state.audio = false
+      if (disturbed) protectMediaLevel(video, saved.volume, saved.muted)
+    } else if (disturbed) {
+      protectMediaLevel(video, level.volume, level.muted)
     }
   } catch {
     /* Some players reject rate or volume changes while a frame is locked. */
@@ -342,12 +436,19 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
 export function releasePlayback(video: HTMLVideoElement): void {
   const state = ownedMedia.get(video)
   if (!state) return
+  const level = { volume: video.volume, muted: video.muted }
   try {
+    let disturbed = false
     if (state.playback) {
-      writeTransport(video, state.playbackRate, state.loop)
-      writePitch(video, state.preservesPitch)
+      disturbed = writeTransport(video, state.playbackRate, state.loop)
+      disturbed = writePitch(video, state.preservesPitch) || disturbed
     }
-    if (state.audio) writeAudio(video, state.volume, state.muted)
+    if (state.audio) {
+      writeAudio(video, state.volume, state.muted)
+      if (disturbed) protectMediaLevel(video, state.volume, state.muted)
+    } else if (disturbed) {
+      protectMediaLevel(video, level.volume, level.muted)
+    }
   } catch {
     /* The element can already be detached from the player. */
   }

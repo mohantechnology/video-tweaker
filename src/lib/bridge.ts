@@ -54,6 +54,8 @@ function playbackStamp(settings: EffectSettings): string {
     settings.volume,
     settings.muted,
     settings.loop,
+    settings.audioTouched,
+    settings.basicAudioOn,
     settings.audioEnabled,
     settings.playbackEnabled,
     settings.showNativeControls

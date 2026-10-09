@@ -58,7 +58,13 @@ export type EffectSettings = ColorSettings & {
   volume: number
   muted: boolean
   loop: boolean
+  /** User changed speed, pitch, or loop. Until then the player keeps its own rate. */
   playbackTouched: boolean
+  /**
+   * User changed volume or mute. Until then speed changes, hold-to-speed,
+   * and the on/off switch leave the player loudness alone.
+   */
+  audioTouched: boolean
   presetId: string
   rememberProgress: boolean
   videoEnabled: boolean
@@ -141,6 +147,7 @@ export function defaultSettings(): EffectSettings {
     muted: false,
     loop: false,
     playbackTouched: false,
+    audioTouched: false,
     presetId: "default",
     rememberProgress: true,
     videoEnabled: true,

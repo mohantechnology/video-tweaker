@@ -80,6 +80,13 @@ export function normalizeSettings(value: unknown): EffectSettings {
   next.blur = Math.round(clamp(next.blur, 0, BLUR_MAX) * 10) / 10
   next.opacity = clamp(next.opacity, OPACITY_MIN, OPACITY_MAX)
   next.holdPlaybackRate = clampHoldPlaybackRate(next.holdPlaybackRate)
+  // Older saves have no audioTouched. A custom volume or mute was chosen.
+  // Default loudness was not: treating it as chosen made every speed change
+  // snap the player back to 100%.
+  if (typeof raw.audioTouched !== "boolean") {
+    next.audioTouched =
+      next.muted !== defaults.muted || Math.abs(next.volume - defaults.volume) > 0.005
+  }
   return next
 }
 

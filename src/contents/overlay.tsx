@@ -255,6 +255,10 @@ function sectionTouchesMedia(flag: SectionFlag): boolean {
   return flag === "basicAudioOn" || flag === "basicPlaybackOn"
 }
 
+function touchesAudio(next: Partial<EffectSettings>): boolean {
+  return "volume" in next || "muted" in next
+}
+
 const VIDEO_RESET_KEYS = [
   ...COLOR_KEYS,
   "flipH",
@@ -544,15 +548,18 @@ function Overlay() {
       isAllowed: () => siteAllowed(hostname, policyRef.current),
       onPresence: setHasVideo,
       onVideo: (video) => {
-        if (!video || settingsRef.current.playbackTouched) return
-        const next = {
-          ...settingsRef.current,
-          volume: video.volume,
-          muted: video.muted,
-          playbackRate: video.playbackRate || 1,
-          loop: video.loop
+        if (!video) return
+        const current = settingsRef.current
+        const next: EffectSettings = { ...current }
+        if (!current.playbackTouched) {
+          next.playbackRate = video.playbackRate || 1
+          next.loop = video.loop
         }
-        if (settingsEqual(settingsRef.current, next)) return
+        if (!current.audioTouched) {
+          if (Math.abs(current.volume - video.volume) >= 0.005) next.volume = video.volume
+          if (current.muted !== video.muted) next.muted = video.muted
+        }
+        if (settingsEqual(current, next)) return
         settingsRef.current = next
         if (!applyTimer.current) appliedRef.current = next
         setSettings(next)
@@ -770,11 +777,13 @@ function Overlay() {
       typeof next.presetId === "string" && next.presetId !== "" && next.presetId !== "custom"
     const resolved: Partial<EffectSettings> =
       snapshotChanged && !applyingPreset ? { ...next, presetId: "" } : next
+    const touchAudio = touchesAudio(resolved)
     dirtyRef.current = true
     const merged: EffectSettings = {
       ...settingsRef.current,
       ...resolved,
-      playbackTouched: touchPlayback ? true : settingsRef.current.playbackTouched
+      playbackTouched: touchPlayback ? true : settingsRef.current.playbackTouched,
+      audioTouched: touchAudio ? true : settingsRef.current.audioTouched
     }
     settingsRef.current = merged
     setSettings(merged)
@@ -786,7 +795,8 @@ function Overlay() {
       appliedRef.current = {
         ...appliedRef.current,
         ...resolved,
-        playbackTouched: touchPlayback ? true : appliedRef.current.playbackTouched
+        playbackTouched: touchPlayback ? true : appliedRef.current.playbackTouched,
+        audioTouched: touchAudio ? true : appliedRef.current.audioTouched
       }
       bridgeRef.current?.applyNow()
       if (!pendingDelay) return
@@ -806,7 +816,7 @@ function Overlay() {
     const next: Partial<EffectSettings> = {}
     for (const key of resetKeys(tab)) next[key] = defaults[key] as never
     next.presetId = ""
-    patch(next, tab !== "video", tab === "video" ? "heavy" : "light")
+    patch(next, tab === "playback", tab === "video" ? "heavy" : "light")
   }
 
   const resetAllTabs = () => {
@@ -830,14 +840,14 @@ function Overlay() {
     const next: Partial<EffectSettings> = { [flag]: true, presetId: "" }
     for (const key of SECTION_FIELDS[flag]) next[key] = defaults[key] as never
     const media = sectionTouchesMedia(flag)
-    patch(next, media, sectionIsVisual(flag) ? "heavy" : media ? "light" : "now")
+    patch(next, flag === "basicPlaybackOn", sectionIsVisual(flag) ? "heavy" : media ? "light" : "now")
   }
 
   const toggleSectionApply = (flag: SectionFlag) => {
     const media = sectionTouchesMedia(flag)
     patch(
       { [flag]: !settingsRef.current[flag] },
-      media,
+      flag === "basicPlaybackOn",
       sectionIsVisual(flag) ? "heavy" : media ? "light" : "now"
     )
   }
@@ -1013,7 +1023,8 @@ function Overlay() {
   const live =
     settings.enabled &&
     ((settings.videoEnabled && !isVisualIdentity(painted)) ||
-      (settings.playbackTouched && (settings.audioEnabled || settings.playbackEnabled)))
+      (settings.audioTouched && settings.audioEnabled) ||
+      (settings.playbackTouched && settings.playbackEnabled))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
   const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
 
@@ -1511,7 +1522,7 @@ function Overlay() {
                     value={settings.volume}
                     display={percent(settings.volume)}
                     onChange={(value) =>
-                      patch({ volume: readRange(String(value), 2), muted: false }, true, "light")
+                      patch({ volume: readRange(String(value), 2), muted: false }, false, "light")
                     }
                   />
                   <div className="vee-actions">
@@ -1520,7 +1531,7 @@ function Overlay() {
                       className="vee-action"
                       data-on={String(settings.muted)}
                       aria-pressed={settings.muted}
-                      onClick={() => patch({ muted: !settings.muted }, true)}>
+                      onClick={() => patch({ muted: !settings.muted })}>
                       {settings.muted ? (
                         <VolumeX size={14} strokeWidth={1.75} />
                       ) : (

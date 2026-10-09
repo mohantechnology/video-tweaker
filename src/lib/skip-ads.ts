@@ -1,4 +1,4 @@
-import { clamp } from "./effects"
+import { clamp, protectMediaLevel } from "./effects"
 import { heldTransport, yieldHoldToAd } from "./hold-speed"
 import { registrableDomain } from "./host"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, type EffectSettings } from "./types"
@@ -133,13 +133,8 @@ export function releaseSkipBoost(video: HTMLVideoElement | null, settings?: Effe
   const rate = managed
     ? clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
     : saved.rate
-  try {
-    video.playbackRate = rate
-    video.defaultPlaybackRate = managed ? rate : saved.defaultRate
-    boosted.delete(video)
-  } catch {
-    /* Keep the saved rate and try again on the next scan. */
-  }
+  if (!commitRate(video, rate, managed ? rate : saved.defaultRate)) return
+  boosted.delete(video)
 }
 
 export function applySkipMethods(options: {
@@ -177,14 +172,29 @@ function boostAdPlayback(video: HTMLVideoElement): void {
     )
   }
   yieldHoldToAd(video)
+  commitRate(video, AD_PLAYBACK_RATE, AD_PLAYBACK_RATE)
+}
+
+/** True when the rate write finished. A rejected write leaves the saved rate for the next scan. */
+function commitRate(video: HTMLVideoElement, rate: number, defaultRate: number): boolean {
+  const volume = video.volume
+  const muted = video.muted
+  let wrote = false
   try {
-    if (video.playbackRate !== AD_PLAYBACK_RATE) video.playbackRate = AD_PLAYBACK_RATE
-    if (video.defaultPlaybackRate !== AD_PLAYBACK_RATE) {
-      video.defaultPlaybackRate = AD_PLAYBACK_RATE
+    if (video.playbackRate !== rate) {
+      video.playbackRate = rate
+      wrote = true
+    }
+    if (video.defaultPlaybackRate !== defaultRate) {
+      video.defaultPlaybackRate = defaultRate
+      wrote = true
     }
   } catch {
-    /* The player can reject rate changes during an ad. The next scan tries again. */
+    if (wrote) protectMediaLevel(video, volume, muted)
+    return false
   }
+  if (wrote) protectMediaLevel(video, volume, muted)
+  return true
 }
 
 function seekAd(video: HTMLVideoElement): void {
