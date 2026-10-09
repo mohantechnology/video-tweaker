@@ -11,8 +11,8 @@ const CLICK_SWALLOW_MS = 500
 const CONTROL_STRIP_PX = 48
 /** A control this large is the picture's own tap surface, not a like or volume button. */
 const SURFACE_COVERS = 0.5
-/** Horizontal center, this far down from the top of the picture. */
-const BADGE_TOP_RATIO = 0.14
+/** Center of the badge, this far down from the top of the visible picture. */
+const BADGE_TOP_RATIO = 0.1
 
 const mediaRate = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "playbackRate")
 const mediaDefaultRate = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "defaultPlaybackRate")
@@ -62,7 +62,7 @@ const BADGE_STYLE = `
   font-weight: 650;
   line-height: 1;
   letter-spacing: 0.01em;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) !important;
   user-select: none;
 }
 .vee-hold-badge svg {
@@ -545,16 +545,288 @@ function badgeParent(video: HTMLVideoElement): HTMLElement {
   return document.documentElement
 }
 
+type Box = { left: number; top: number; right: number; bottom: number }
+
+function boxFromRect(rect: DOMRectReadOnly): Box {
+  return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+}
+
+function boxWidth(box: Box): number {
+  return box.right - box.left
+}
+
+function boxHeight(box: Box): number {
+  return box.bottom - box.top
+}
+
+function boxVisible(box: Box): boolean {
+  return boxWidth(box) >= 1 && boxHeight(box) >= 1
+}
+
+function intersectBoxes(a: Box, b: Box, clipX = true, clipY = true): Box {
+  return {
+    left: clipX ? Math.max(a.left, b.left) : a.left,
+    top: clipY ? Math.max(a.top, b.top) : a.top,
+    right: clipX ? Math.min(a.right, b.right) : a.right,
+    bottom: clipY ? Math.min(a.bottom, b.bottom) : a.bottom
+  }
+}
+
+function cssPx(value: string): number {
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function parentElementOf(node: Node): Element | null {
+  if (node.parentElement) return node.parentElement
+  const root = node.getRootNode()
+  return root instanceof ShadowRoot ? root.host : null
+}
+
+function transformIsFlat(transform: string): boolean {
+  if (!transform || transform === "none") return true
+  try {
+    const matrix = new DOMMatrix(transform)
+    return (
+      Math.abs(matrix.m12) < 0.001 &&
+      Math.abs(matrix.m21) < 0.001 &&
+      Math.abs(matrix.m13) < 0.001 &&
+      Math.abs(matrix.m23) < 0.001 &&
+      Math.abs(matrix.m31) < 0.001 &&
+      Math.abs(matrix.m32) < 0.001
+    )
+  } catch {
+    return false
+  }
+}
+
+function paintsContent(style: CSSStyleDeclaration): boolean {
+  return style.contentVisibility === "auto" || /paint|strict|content/.test(style.contain)
+}
+
+/** Fixed boxes escape overflow until an ancestor becomes their containing block. */
+function makesContainingBlock(style: CSSStyleDeclaration): boolean {
+  if (style.transform && style.transform !== "none") return true
+  if (style.filter && style.filter !== "none") return true
+  if (style.perspective && style.perspective !== "none") return true
+  if (style.backdropFilter && style.backdropFilter !== "none") return true
+  if (/paint|layout|strict|content/.test(style.contain)) return true
+  if (style.contentVisibility === "auto" || style.contentVisibility === "hidden") return true
+  const will = style.willChange
+  return Boolean(will && will !== "auto" && /transform|filter|perspective|contain/.test(will))
+}
+
+function clipBounds(element: Element, style: CSSStyleDeclaration): Box {
+  const rect = element.getBoundingClientRect()
+  const box = boxFromRect(rect)
+  if (!transformIsFlat(style.transform)) return box
+  const localW = element instanceof HTMLElement ? element.offsetWidth : rect.width
+  const localH = element instanceof HTMLElement ? element.offsetHeight : rect.height
+  if (localW < 1 || localH < 1) return box
+  const scaleX = rect.width / localW
+  const scaleY = rect.height / localH
+  return {
+    left: box.left + cssPx(style.borderLeftWidth) * scaleX,
+    top: box.top + cssPx(style.borderTopWidth) * scaleY,
+    right: box.right - cssPx(style.borderRightWidth) * scaleX,
+    bottom: box.bottom - cssPx(style.borderBottomWidth) * scaleY
+  }
+}
+
+function axisOffset(token: string | undefined, extra: number, scale: number): number {
+  const value = token?.trim() || "50%"
+  if (value.endsWith("%")) {
+    const pct = Number.parseFloat(value)
+    return Number.isFinite(pct) ? (extra * pct) / 100 : extra / 2
+  }
+  if (value.endsWith("px")) {
+    const px = Number.parseFloat(value)
+    return Number.isFinite(px) ? px * scale : extra / 2
+  }
+  if (value === "left" || value === "top") return 0
+  if (value === "right" || value === "bottom") return extra
+  if (value === "center") return extra / 2
+  return extra / 2
+}
+
+function contentBox(video: HTMLVideoElement, border: Box, style: CSSStyleDeclaration): Box {
+  const localW = video.offsetWidth || boxWidth(border)
+  const localH = video.offsetHeight || boxHeight(border)
+  if (localW < 1 || localH < 1) return border
+  const scaleX = boxWidth(border) / localW
+  const scaleY = boxHeight(border) / localH
+  const box = {
+    left: border.left + (cssPx(style.borderLeftWidth) + cssPx(style.paddingLeft)) * scaleX,
+    top: border.top + (cssPx(style.borderTopWidth) + cssPx(style.paddingTop)) * scaleY,
+    right: border.right - (cssPx(style.borderRightWidth) + cssPx(style.paddingRight)) * scaleX,
+    bottom: border.bottom - (cssPx(style.borderBottomWidth) + cssPx(style.paddingBottom)) * scaleY
+  }
+  return boxVisible(box) ? box : border
+}
+
+function fittedSize(fit: string, localW: number, localH: number, videoW: number, videoH: number): {
+  width: number
+  height: number
+} | null {
+  const ratio = videoW / videoH
+  const elementRatio = localW / localH
+  if (fit === "contain") {
+    if (ratio > elementRatio) return { width: localW, height: localW / ratio }
+    return { width: localH * ratio, height: localH }
+  }
+  if (fit === "none") return { width: videoW, height: videoH }
+  if (fit === "scale-down") {
+    const contained =
+      ratio > elementRatio
+        ? { width: localW, height: localW / ratio }
+        : { width: localH * ratio, height: localH }
+    if (videoW <= contained.width && videoH <= contained.height) return { width: videoW, height: videoH }
+    return contained
+  }
+  return null
+}
+
+/** Frames drawn inside the element. Letterboxing stays outside this box. */
+function fittedFrame(video: HTMLVideoElement, border: Box, style: CSSStyleDeclaration): Box {
+  const videoW = video.videoWidth
+  const videoH = video.videoHeight
+  const fit = style.objectFit
+  if (!videoW || !videoH || fit === "fill" || fit === "cover") return border
+
+  const box = contentBox(video, border, style)
+  const width = boxWidth(box)
+  const height = boxHeight(box)
+  const localW = Math.max(1, video.clientWidth - cssPx(style.paddingLeft) - cssPx(style.paddingRight))
+  const localH = Math.max(1, video.clientHeight - cssPx(style.paddingTop) - cssPx(style.paddingBottom))
+  const size = fittedSize(fit, localW, localH, videoW, videoH)
+  if (!size || width < 1 || height < 1) return border
+
+  const scaleX = width / localW
+  const scaleY = height / localH
+  const contentW = size.width * scaleX
+  const contentH = size.height * scaleY
+  const extraX = width - contentW
+  const extraY = height - contentH
+  const [xToken, yToken] = style.objectPosition.split(/\s+/).filter(Boolean)
+  const left = box.left + axisOffset(xToken, extraX, scaleX)
+  const top = box.top + axisOffset(yToken, extraY, scaleY)
+  const frame = { left, top, right: left + contentW, bottom: top + contentH }
+  const visible = intersectBoxes(frame, box)
+  return boxVisible(visible) ? visible : border
+}
+
+function insetClip(video: HTMLVideoElement, border: Box, style: CSSStyleDeclaration): Box | null {
+  const clip = style.clipPath
+  if (!clip.startsWith("inset(") || !clip.endsWith(")")) return null
+  const parts = clip
+    .slice(6, -1)
+    .split(/\s+round\b/i)[0]
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const edges =
+    parts.length === 1
+      ? [parts[0], parts[0], parts[0], parts[0]]
+      : parts.length === 2
+        ? [parts[0], parts[1], parts[0], parts[1]]
+        : parts.length === 3
+          ? [parts[0], parts[1], parts[2], parts[1]]
+          : parts.length === 4
+            ? parts
+            : null
+  if (!edges) return null
+
+  const width = boxWidth(border)
+  const height = boxHeight(border)
+  const localW = video.offsetWidth || width
+  const localH = video.offsetHeight || height
+  const scaleX = localW ? width / localW : 1
+  const scaleY = localH ? height / localH : 1
+  const top = insetLength(edges[0], height, scaleY)
+  const right = insetLength(edges[1], width, scaleX)
+  const bottom = insetLength(edges[2], height, scaleY)
+  const left = insetLength(edges[3], width, scaleX)
+  if (top === null || right === null || bottom === null || left === null) return null
+  const box = {
+    left: border.left + left,
+    top: border.top + top,
+    right: border.right - right,
+    bottom: border.bottom - bottom
+  }
+  return boxVisible(box) ? box : null
+}
+
+function insetLength(token: string, size: number, scale: number): number | null {
+  if (token.endsWith("%")) {
+    const pct = Number.parseFloat(token)
+    return Number.isFinite(pct) ? (size * pct) / 100 : null
+  }
+  if (token.endsWith("px")) {
+    const px = Number.parseFloat(token)
+    return Number.isFinite(px) ? px * scale : null
+  }
+  return null
+}
+
+function viewportBox(): Box {
+  return { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+}
+
+/**
+ * Picture the viewer can see. The video element also includes letterboxing
+ * and the parts an overflow parent has cropped away.
+ */
+function visiblePicture(video: HTMLVideoElement): Box {
+  const border = boxFromRect(video.getBoundingClientRect())
+  if (!boxVisible(border)) return border
+
+  const videoStyle = getComputedStyle(video)
+  let flat = transformIsFlat(videoStyle.transform)
+  let fixed = videoStyle.position === "fixed"
+  const clips: { box: Box; clipX: boolean; clipY: boolean }[] = []
+
+  for (let node = parentElementOf(video); node; node = parentElementOf(node)) {
+    const style = getComputedStyle(node)
+    if (flat && !transformIsFlat(style.transform)) flat = false
+    const contained = makesContainingBlock(style)
+    if (!fixed || contained) {
+      const paints = paintsContent(style)
+      const clipX = style.overflowX !== "visible" || paints
+      const clipY = style.overflowY !== "visible" || paints
+      if (clipX || clipY) {
+        const bounds = clipBounds(node, style)
+        if (boxVisible(bounds)) clips.push({ box: bounds, clipX, clipY })
+      }
+    }
+    if (fixed && contained) fixed = false
+  }
+
+  let frame = flat ? fittedFrame(video, border, videoStyle) : border
+  if (flat) {
+    const inset = insetClip(video, border, videoStyle)
+    if (inset) frame = intersectBoxes(frame, inset)
+  }
+  for (const clip of clips) frame = intersectBoxes(frame, clip.box, clip.clipX, clip.clipY)
+
+  const seen = intersectBoxes(frame, viewportBox())
+  if (boxVisible(seen)) return seen
+  if (boxVisible(frame)) return frame
+  return border
+}
+
 function placeBadge(video: HTMLVideoElement): void {
   const node = ensureBadge()
-  const rect = video.getBoundingClientRect()
+  const picture = visiblePicture(video)
   const parent = node.matches(":popover-open")
     ? (document.body ?? document.documentElement)
     : badgeParent(video)
   if (node.parentElement !== parent) parent.appendChild(node)
-  const offset = Math.max(40, Math.min(rect.height * BADGE_TOP_RATIO, 88))
-  node.style.left = `${rect.left + rect.width / 2}px`
-  node.style.top = `${rect.top + offset}px`
+  const x = picture.left + boxWidth(picture) / 2
+  const y = picture.top + boxHeight(picture) * BADGE_TOP_RATIO
+  node.style.setProperty("left", `${x}px`, "important")
+  node.style.setProperty("top", `${y}px`, "important")
+  node.style.setProperty("right", "auto", "important")
+  node.style.setProperty("bottom", "auto", "important")
 }
 
 function presentBadge(node: HTMLDivElement): void {
