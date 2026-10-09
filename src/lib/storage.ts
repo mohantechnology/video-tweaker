@@ -18,7 +18,7 @@ import {
   type PresetSnapshot,
   type UserPreset
 } from "./presets"
-import { defaultSettings, type EffectSettings } from "./types"
+import { clampHoldPlaybackRate, defaultSettings, type EffectSettings } from "./types"
 
 export const OPEN_REQUEST_KEY = "veeOpenRequest"
 export const OPEN_MESSAGE = "VEE_OPEN"
@@ -79,6 +79,7 @@ export function normalizeSettings(value: unknown): EffectSettings {
   next.cropBottom = clamp(next.cropBottom, 0, CROP_MAX)
   next.blur = Math.round(clamp(next.blur, 0, BLUR_MAX) * 10) / 10
   next.opacity = clamp(next.opacity, OPACITY_MIN, OPACITY_MAX)
+  next.holdPlaybackRate = clampHoldPlaybackRate(next.holdPlaybackRate)
   return next
 }
 

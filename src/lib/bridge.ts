@@ -108,7 +108,6 @@ export function startVideoBridge(options: {
   let interval = 0
   const progress = createProgressTracker(options.getSettings)
   const hold = startHoldSpeed({
-    getVideo: () => current,
     getSettings: options.getSettings,
     isAllowed: () => options.isAllowed?.() !== false,
     isAdBoosted: isSkipBoosted,

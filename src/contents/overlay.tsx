@@ -8,6 +8,7 @@ import {
   ChevronsRight,
   Clock,
   Crop,
+  FastForward,
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
@@ -121,9 +122,12 @@ import {
 } from "~lib/storage"
 import {
   COLOR_KEYS,
-  HOLD_PLAYBACK_RATE,
+  HOLD_RATE_MAX,
+  HOLD_RATE_MIN,
+  HOLD_RATE_STEP,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
+  clampHoldPlaybackRate,
   defaultSettings,
   settingsEqual,
   type ColorSettings,
@@ -287,6 +291,7 @@ const PLAYBACK_RESET_KEYS = [
   "preservePitch",
   "loop",
   "holdToSpeed",
+  "holdPlaybackRate",
   "basicPlaybackOn",
   "advancedPlaybackOn",
   "rememberProgress",
@@ -335,7 +340,7 @@ function tabActions(
       ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
-    resetTitle: `Restore speed, hold for ${formatRate(HOLD_PLAYBACK_RATE)}, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay.`
+    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay."
   }
 }
 
@@ -1010,6 +1015,7 @@ function Overlay() {
     ((settings.videoEnabled && !isVisualIdentity(painted)) ||
       (settings.playbackTouched && (settings.audioEnabled || settings.playbackEnabled)))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
+  const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
 
   if (!globallyEnabled || !allowed || !hasVideo || !layout || layout.mode === "closed") return null
 
@@ -1571,26 +1577,32 @@ function Overlay() {
                     ))}
                   </div>
                 </Group>
-                <div className="vee-switch-row vee-switch-solo">
-                  <div>
-                    <span>Hold for {formatRate(HOLD_PLAYBACK_RATE)}</span>
-                    <small>
-                      Press and hold the video to play at {formatRate(HOLD_PLAYBACK_RATE)}. Release to
-                      return to the previous speed.
-                    </small>
-                  </div>
-                  <button
-                    className="vee-switch"
-                    type="button"
-                    role="switch"
-                    aria-checked={settings.holdToSpeed}
-                    aria-label={`Hold for ${formatRate(HOLD_PLAYBACK_RATE)}`}
-                    title={`Press and hold the video to play at ${formatRate(HOLD_PLAYBACK_RATE)}. Release to return to the previous speed.`}
-                    data-on={String(settings.holdToSpeed)}
-                    onClick={() => patch({ holdToSpeed: !settings.holdToSpeed })}>
-                    <i />
-                  </button>
-                </div>
+                <Group
+                  id="playback-hold"
+                  title="Hold"
+                  icon={FastForward}
+                  open={sectionOpen("playback-hold")}
+                  onToggle={() => toggleSection("playback-hold")}>
+                  <SwitchRow
+                    label={`Hold for ${formatRate(holdSpeed)}`}
+                    detail={`Press and hold the video to play at ${formatRate(holdSpeed)}. Release to return to the previous speed.`}
+                    checked={settings.holdToSpeed}
+                    onClick={() => patch({ holdToSpeed: !settings.holdToSpeed })}
+                  />
+                  <Slider
+                    label="Hold speed"
+                    min={HOLD_RATE_MIN}
+                    max={HOLD_RATE_MAX}
+                    step={HOLD_RATE_STEP}
+                    value={holdSpeed}
+                    display={formatRate(holdSpeed)}
+                    onChange={(value) =>
+                      patch({
+                        holdPlaybackRate: clampHoldPlaybackRate(readRange(String(value), 1))
+                      })
+                    }
+                  />
+                </Group>
                 <Group
                   id="playback-jump"
                   title="Jump"

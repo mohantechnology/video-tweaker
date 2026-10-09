@@ -1,5 +1,6 @@
 import { clamp } from "./effects"
-import { HOLD_PLAYBACK_RATE, PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, type EffectSettings } from "./types"
+import { scanPage } from "./find-video"
+import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, clampHoldPlaybackRate, type EffectSettings } from "./types"
 
 /** Matches the shadow host id in bridge.ts. Kept here so this file does not import the bridge. */
 const DOCK_HOST_ID = "vee-csui"
@@ -80,6 +81,8 @@ type Session = {
   originY: number
   savedRate: number
   savedDefault: number
+  /** True when the picture was already playing at pointer down. */
+  wasPlaying: boolean
   phase: Phase
   swallowClick: boolean
   target: Element | null
@@ -88,7 +91,6 @@ type Session = {
 }
 
 export type HoldSpeedOptions = {
-  getVideo: () => HTMLVideoElement | null
   getSettings: () => EffectSettings
   isAllowed: () => boolean
   isAdBoosted: (video: HTMLVideoElement) => boolean
@@ -106,9 +108,11 @@ let badgeLabel: HTMLSpanElement | null = null
 let lockedVideo: HTMLVideoElement | null = null
 let savedRateDesc: PropertyDescriptor | undefined
 let savedDefaultDesc: PropertyDescriptor | undefined
+let resumePending = false
+let resumeNotBefore = 0
 
 function holdRate(): number {
-  return clamp(HOLD_PLAYBACK_RATE, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
+  return clampHoldPlaybackRate(options?.getSettings().holdPlaybackRate ?? Number.NaN)
 }
 
 function formatHoldRate(rate: number): string {
@@ -127,7 +131,7 @@ function playing(video: HTMLVideoElement): boolean {
 }
 
 /**
- * Rate from before this hold, so an ad boost can restore that speed instead of 2×.
+ * Rate from before this hold, so an ad boost can restore that speed instead of the hold speed.
  * Null while the press has not changed the rate yet.
  */
 export function heldTransport(video: HTMLVideoElement): { rate: number; defaultRate: number } | null {
@@ -135,7 +139,7 @@ export function heldTransport(video: HTMLVideoElement): { rate: number; defaultR
   return { rate: session.savedRate, defaultRate: session.savedDefault }
 }
 
-/** Ad playback takes the rate. A hold in progress stops writing 2× and does not restore over the ad. */
+/** Ad playback takes the rate. A hold in progress stops writing the hold speed and does not restore over the ad. */
 export function yieldHoldToAd(video: HTMLVideoElement): void {
   if (!session || session.video !== video) return
   if (session.phase === "pending") {
@@ -154,20 +158,24 @@ export function yieldHoldToAd(video: HTMLVideoElement): void {
 export function releaseHold(video: HTMLVideoElement | null): void {
   if (!session) return
   if (video && session.video !== video) return
+  // The pointer still owns this picture. Switching the dock's main video must
+  // not cancel a press that has not been released yet.
+  if (video && session.phase !== "yielded") return
   finish(session.phase === "boosting")
 }
 
-/** Puts 2× back after another writer, such as the playback settings, touched the same video. */
+/** Puts the hold speed back after another writer, such as the playback settings, touched the same video. */
 export function maintainHold(video: HTMLVideoElement | null): void {
   if (!options || !session || session.phase !== "boosting" || !video || video !== session.video) return
   if (options.isAdBoosted(video)) {
     yieldHoldToAd(video)
     return
   }
-  if (!playing(video) || !gestureAllowed()) {
+  if (!gestureAllowed() || !video.isConnected || video.ended) {
     finish(true)
     return
   }
+  if (session.wasPlaying && video.paused) resumeHeld(video)
   writeHoldRate(video)
   placeBadge(video)
 }
@@ -205,8 +213,8 @@ function installRateGuard(
 }
 
 /**
- * Instagram writes playbackRate back to 1 as soon as it changes.
- * While the hold is on, those writes stay at the hold speed.
+ * Players such as Instagram, Facebook, and Dailymotion write playbackRate
+ * back as soon as it changes. While the hold is on, those writes stay at the hold speed.
  */
 function lockRates(video: HTMLVideoElement): void {
   unlockRates()
@@ -246,23 +254,45 @@ function unlockRates(): void {
   restoreRateProperty(video, "defaultPlaybackRate", defaultDesc)
 }
 
-function writeHoldRate(video: HTMLVideoElement): boolean {
+function writeHoldRate(video: HTMLVideoElement): void {
   const rate = holdRate()
-  const previous = video.playbackRate
-  const previousDefault = video.defaultPlaybackRate
   try {
     if (video.playbackRate !== rate) video.playbackRate = rate
-    if (video.defaultPlaybackRate !== rate) video.defaultPlaybackRate = rate
-    return true
   } catch {
-    try {
-      video.playbackRate = previous
-      video.defaultPlaybackRate = previousDefault
-    } catch {
-      /* The player rejected both the hold and the rollback. */
-    }
-    return false
+    /* The player rejected the rate. The next frame tries again. */
   }
+  try {
+    if (video.defaultPlaybackRate !== rate) video.defaultPlaybackRate = rate
+  } catch {
+    /* Some players lock the default rate. The playback rate still changes. */
+  }
+}
+
+/**
+ * A press on Facebook or Dailymotion pauses the picture before the hold starts.
+ * While the button stays down, start that picture again.
+ */
+function resumeHeld(video: HTMLVideoElement): void {
+  if (resumePending || performance.now() < resumeNotBefore) return
+  if (!video.isConnected || video.ended || !video.paused) return
+  resumePending = true
+  let pending: Promise<void>
+  try {
+    pending = video.play()
+  } catch {
+    resumePending = false
+    resumeNotBefore = performance.now() + HOLD_DELAY_MS
+    return
+  }
+  void pending.then(
+    () => {
+      resumePending = false
+    },
+    () => {
+      resumePending = false
+      resumeNotBefore = performance.now() + HOLD_DELAY_MS
+    }
+  )
 }
 
 function restoreRates(video: HTMLVideoElement, savedRate: number, savedDefault: number): void {
@@ -297,6 +327,8 @@ function finish(restore: boolean): void {
   hideBadge()
   const restoreBoost = restore && current.phase === "boosting"
   session = null
+  resumePending = false
+  resumeNotBefore = 0
   unlockRates()
   if (current.swallowClick) {
     swallowUntil = performance.now() + CLICK_SWALLOW_MS
@@ -311,7 +343,8 @@ function unwatch(video: HTMLVideoElement): void {
 }
 
 function onVideoStop(): void {
-  if (session?.phase === "boosting") finish(true)
+  if (!session || session.phase !== "boosting") return
+  if (session.video.ended) finish(true)
 }
 
 function releaseCapture(current: Session): void {
@@ -325,27 +358,28 @@ function releaseCapture(current: Session): void {
 }
 
 function pointInVideo(event: MouseEvent, video: HTMLVideoElement): boolean {
-  const rect = video.getBoundingClientRect()
-  if (rect.width < 1 || rect.height < 1) return false
-  if (event.clientX < rect.left || event.clientX > rect.right) return false
-  if (event.clientY < rect.top || event.clientY > rect.bottom) return false
-  if (video.controls && event.clientY >= rect.bottom - CONTROL_STRIP_PX) return false
+  const picture = visiblePicture(video)
+  if (!boxVisible(picture)) return false
+  if (event.clientX < picture.left || event.clientX > picture.right) return false
+  if (event.clientY < picture.top || event.clientY > picture.bottom) return false
+  if (video.controls && event.clientY >= picture.bottom - CONTROL_STRIP_PX) return false
   return true
 }
 
 /**
- * Instagram lays a button or link over the whole picture for play and pause.
+ * Facebook and Dailymotion lay a button or link over the whole picture for play and pause.
  * That surface contains the press, but it does not contain the video element,
- * so a size check is what separates it from the small buttons beside the picture.
+ * so a size check against the visible picture separates it from the small buttons beside the picture.
  */
 function coversPicture(node: Element, video: HTMLVideoElement): boolean {
-  const picture = video.getBoundingClientRect()
+  const picture = visiblePicture(video)
+  if (!boxVisible(picture)) return false
   const box = node.getBoundingClientRect()
-  if (picture.width < 1 || picture.height < 1 || box.width < 1 || box.height < 1) return false
+  if (box.width < 1 || box.height < 1) return false
   const width = Math.min(box.right, picture.right) - Math.max(box.left, picture.left)
   const height = Math.min(box.bottom, picture.bottom) - Math.max(box.top, picture.top)
   if (width <= 0 || height <= 0) return false
-  return (width * height) / (picture.width * picture.height) >= SURFACE_COVERS
+  return (width * height) / (boxWidth(picture) * boxHeight(picture)) >= SURFACE_COVERS
 }
 
 function pressBlocked(event: PointerEvent, video: HTMLVideoElement): boolean {
@@ -359,11 +393,39 @@ function pressBlocked(event: PointerEvent, video: HTMLVideoElement): boolean {
   return false
 }
 
+/** Playing, or paused by this press before the listener ran. A never-started picture stays out. */
+function canHold(video: HTMLVideoElement): boolean {
+  if (!video.isConnected || video.ended) return false
+  if (playing(video)) return true
+  return video.paused && video.currentTime > 0
+}
+
+/**
+ * The picture under the pointer. Pages often have more than one video,
+ * and the dock's main video is not always the one being pressed.
+ * The smallest matching picture wins when several overlap.
+ */
+function videoAtPoint(event: PointerEvent): HTMLVideoElement | null {
+  if (!options) return null
+  let best: HTMLVideoElement | null = null
+  let bestArea = Infinity
+  for (const video of scanPage().videos) {
+    if (!canHold(video) || options.isAdBoosted(video)) continue
+    if (!pointInVideo(event, video) || pressBlocked(event, video)) continue
+    const picture = visiblePicture(video)
+    const area = boxWidth(picture) * boxHeight(picture)
+    if (area < bestArea) {
+      best = video
+      bestArea = area
+    }
+  }
+  return best
+}
+
 function onPointerDown(event: PointerEvent): void {
   if (!options || session || event.button !== 0 || !event.isPrimary || !gestureAllowed()) return
-  const video = options.getVideo()
-  if (!video || !playing(video) || options.isAdBoosted(video)) return
-  if (!pointInVideo(event, video) || pressBlocked(event, video)) return
+  const video = videoAtPoint(event)
+  if (!video) return
 
   session = {
     pointerId: event.pointerId,
@@ -372,6 +434,7 @@ function onPointerDown(event: PointerEvent): void {
     originY: event.clientY,
     savedRate: video.playbackRate || 1,
     savedDefault: video.defaultPlaybackRate || video.playbackRate || 1,
+    wasPlaying: true,
     phase: "pending",
     swallowClick: false,
     target: event.target instanceof Element ? event.target : null,
@@ -436,29 +499,17 @@ function onVisibility(): void {
 function engage(): void {
   if (!session || session.phase !== "pending" || !options) return
   const video = session.video
-  const active = options.getVideo()
-  if (
-    !playing(video) ||
-    (active && active !== video) ||
-    !gestureAllowed() ||
-    options.isAdBoosted(video)
-  ) {
-    finish(false)
-    return
-  }
-  if (!writeHoldRate(video)) {
+  if (!video.isConnected || video.ended || !gestureAllowed() || options.isAdBoosted(video)) {
     finish(false)
     return
   }
   session.phase = "boosting"
   lockRates(video)
-  if (!writeHoldRate(video)) {
-    finish(true)
-    return
-  }
+  writeHoldRate(video)
   session.swallowClick = true
   video.addEventListener("pause", onVideoStop)
   video.addEventListener("ended", onVideoStop)
+  if (session.wasPlaying && video.paused) resumeHeld(video)
   try {
     session.target?.setPointerCapture(session.pointerId)
   } catch {
@@ -478,8 +529,7 @@ function tick(): void {
 function reassert(): void {
   if (!session || session.phase !== "boosting" || !options) return
   const video = session.video
-  const active = options.getVideo()
-  if (!playing(video) || (active && active !== video) || !gestureAllowed()) {
+  if (!video.isConnected || video.ended || !gestureAllowed()) {
     finish(true)
     return
   }
@@ -487,10 +537,8 @@ function reassert(): void {
     yieldHoldToAd(video)
     return
   }
-  if (!writeHoldRate(video)) {
-    finish(true)
-    return
-  }
+  if (session.wasPlaying && video.paused) resumeHeld(video)
+  writeHoldRate(video)
   placeBadge(video)
 }
 
@@ -816,6 +864,11 @@ function visiblePicture(video: HTMLVideoElement): Box {
 
 function placeBadge(video: HTMLVideoElement): void {
   const node = ensureBadge()
+  const label = formatHoldRate(holdRate())
+  if (badgeLabel && badgeLabel.textContent !== label) {
+    badgeLabel.textContent = label
+    node.setAttribute("aria-label", label)
+  }
   const picture = visiblePicture(video)
   const parent = node.matches(":popover-open")
     ? (document.body ?? document.documentElement)

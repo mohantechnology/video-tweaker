@@ -14,10 +14,21 @@ export const PLAYBACK_RATE_MIN = 0.1
 export const PLAYBACK_RATE_MAX = 4
 
 /**
- * Playback rate while the video picture is held down.
- * 2 means 2×. Change this number to use a different hold speed.
+ * Default playback rate while the video picture is held down.
+ * 2 means 2×.
  */
 export const HOLD_PLAYBACK_RATE = 2
+export const HOLD_RATE_MIN = 1
+export const HOLD_RATE_MAX = 4
+export const HOLD_RATE_STEP = 0.1
+
+/** Snaps a hold speed onto the 1×–4× slider, one tenth at a time. */
+export function clampHoldPlaybackRate(value: number): number {
+  if (!Number.isFinite(value)) return HOLD_PLAYBACK_RATE
+  const stepped = Math.round(value / HOLD_RATE_STEP) * HOLD_RATE_STEP
+  const tenths = Math.round(stepped * 10) / 10
+  return Math.min(HOLD_RATE_MAX, Math.max(HOLD_RATE_MIN, tenths))
+}
 
 export type EffectSettings = ColorSettings & {
   enabled: boolean
@@ -53,8 +64,10 @@ export type EffectSettings = ColorSettings & {
   videoEnabled: boolean
   audioEnabled: boolean
   playbackEnabled: boolean
-  /** Play at HOLD_PLAYBACK_RATE while the video picture is pressed. */
+  /** Press and hold the video picture to play at holdPlaybackRate. */
   holdToSpeed: boolean
+  /** Speed used while the video picture is held down. */
+  holdPlaybackRate: number
   showNativeControls: boolean
   /**
    * Master switch for skip advertisement. Off leaves the four methods saved
@@ -134,6 +147,7 @@ export function defaultSettings(): EffectSettings {
     audioEnabled: true,
     playbackEnabled: true,
     holdToSpeed: true,
+    holdPlaybackRate: HOLD_PLAYBACK_RATE,
     showNativeControls: false,
     skipAdsEnabled: false,
     skipAds: false,
