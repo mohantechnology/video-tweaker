@@ -62,29 +62,66 @@ function playbackStamp(settings: EffectSettings): string {
   ].join("|")
 }
 
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null
+}
+
+/** Standard and WebKit fullscreen. Dailymotion fullscreens `document.body`. */
+function activeFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument
+  return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null
+}
+
+/**
+ * The fullscreen node when it contains the video and is not the video itself.
+ * A fullscreen `<video>` is the top layer; the host stays on the document.
+ */
+function dockParent(video: HTMLVideoElement | null): HTMLElement {
+  const fullscreen = activeFullscreenElement()
+  if (
+    fullscreen instanceof HTMLElement &&
+    video &&
+    fullscreen !== video &&
+    fullscreen.contains(video)
+  ) {
+    return fullscreen
+  }
+  return document.documentElement
+}
+
+/** The host is the page's stacking box. A shadow child with z-index auto paints under the player. */
+function raiseExtensionHost(host: HTMLElement): void {
+  const inFrame = window.top !== window
+  const set = (property: string, value: string) => host.style.setProperty(property, value, "important")
+  set("position", "fixed")
+  set("z-index", "2147483647")
+  set("overflow", "visible")
+  set("pointer-events", "none")
+  set("top", "0")
+  set("right", "auto")
+  set("bottom", "auto")
+  set("left", "0")
+  // A zero-size host inside Dailymotion's player is clipped, so the dock never appears.
+  if (inFrame) {
+    set("width", "100%")
+    set("height", "100%")
+  } else {
+    set("width", "0")
+    set("height", "0")
+  }
+}
+
 function placeDock(video: HTMLVideoElement | null): void {
   if (hostParked) return
   const host = document.getElementById(HOST_ID)
   if (host) {
-    host.style.pointerEvents = "none"
-    const fullscreen = document.fullscreenElement
-    const parent =
-      fullscreen &&
-      video &&
-      fullscreen !== video &&
-      fullscreen.contains(video)
-        ? fullscreen
-        : document.documentElement
-    if (host.parentElement !== parent) parent.appendChild(host)
+    raiseExtensionHost(host)
+    const parent = dockParent(video)
+    if (host.parentElement !== parent || parent.lastElementChild !== host) parent.appendChild(host)
   }
 
   const dock = host?.shadowRoot?.querySelector(".vee-dock") as HTMLElement | null
   if (!dock) return
-
-  if (!video) {
-    dock.style.display = "none"
-    return
-  }
 
   dock.style.display = "flex"
   dock.style.right = "auto"
@@ -238,6 +275,7 @@ export function startVideoBridge(options: {
   observeRoot(document)
 
   document.addEventListener("fullscreenchange", schedule)
+  document.addEventListener("webkitfullscreenchange", schedule)
   document.addEventListener("scroll", schedulePlace, true)
   window.addEventListener("resize", schedule)
   window.addEventListener("yt-navigate-finish", schedule)
@@ -262,6 +300,7 @@ export function startVideoBridge(options: {
       rootObserver = null
       styleObserver = null
       document.removeEventListener("fullscreenchange", schedule)
+      document.removeEventListener("webkitfullscreenchange", schedule)
       document.removeEventListener("scroll", schedulePlace, true)
       window.removeEventListener("resize", schedule)
       window.removeEventListener("yt-navigate-finish", schedule)

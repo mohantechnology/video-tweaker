@@ -190,6 +190,16 @@
   text-overflow: ellipsis;
 }
 
+.vee-missing {
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 196, 87, 0.14);
+  color: #ffe3a3;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .vee-icon-btn {
   flex: none;
   width: 28px;

@@ -15,3 +15,9 @@ export const PROGRESS_SAVE_INTERVAL_MS = 3000
  * The bar stays visible while the pointer is over it.
  */
 export const MINIBAR_HIDE_DELAY_MS = 3000
+
+/**
+ * How often to look for a video again while Open controls is showing
+ * and this page still has no player.
+ */
+export const VIDEO_SCAN_INTERVAL_MS = 5000

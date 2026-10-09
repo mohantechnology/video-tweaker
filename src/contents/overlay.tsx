@@ -51,6 +51,7 @@ import {
 } from "~lib/bridge"
 import { postEngineActive } from "~lib/engine"
 import { readPageTitle } from "~lib/domains"
+import { registrableDomain } from "~lib/host"
 import {
   BLUR_MAX,
   OPACITY_MIN,
@@ -85,13 +86,20 @@ import { PRESETS, PRESET_SNAPSHOT_KEYS, builtinSnapshot, exactPresetId, presetBy
 import {
   SITE_POLICY_KEY,
   defaultSitePolicy,
+  hostMatches,
   loadSitePolicy,
+  normalizeHost,
   policiesEqual,
   sanitizeSitePolicy,
   siteAllowed,
   type SitePolicy
 } from "~lib/sites"
-import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
+import {
+  HEAVY_APPLY_DELAY_MS,
+  LIGHT_APPLY_DELAY_MS,
+  MINIBAR_HIDE_DELAY_MS,
+  VIDEO_SCAN_INTERVAL_MS
+} from "~settings"
 import {
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
@@ -352,12 +360,59 @@ function sectionIsVisual(flag: SectionFlag): boolean {
   return flag === "basicVideoOn" || flag === "frameOn" || flag === "advancedVideoOn"
 }
 
+const FRAME_VIDEO = "vee-video-frame"
+const FRAME_ASK = "vee-video-ask"
+const FRAME_OPEN = "vee-video-open"
+const FRAME_PANEL = "vee-video-panel"
+
 function hostsMatch(messageHost: string | undefined, pageHost: string): boolean {
   return (messageHost ?? "").trim().toLowerCase() === pageHost.trim().toLowerCase()
 }
 
+/** The watch page is www.dailymotion.com. The player iframe is geo.dailymotion.com. */
+function sameSite(frameHost: string, requestHost: string | undefined): boolean {
+  const site = normalizeHost(requestHost ?? "")
+  if (!site) return false
+  return hostMatches(frameHost, site)
+}
+
+function tellChildFrames(source: string): void {
+  for (let index = 0; index < window.frames.length; index += 1) {
+    window.frames[index].postMessage({ source }, "*")
+  }
+}
+
+/** Shared site record, then this frame's older host-only record, then www. */
+async function loadFrameSettings(pageHost: string): Promise<EffectSettings | null> {
+  const domain = registrableDomain(pageHost)
+  const shared = await loadStoredSiteSettings(domain)
+  if (shared) return shared
+  if (pageHost !== domain) {
+    const exact = await loadStoredSiteSettings(pageHost)
+    if (exact) return exact
+  }
+  const wwwHost = `www.${domain}`
+  if (pageHost !== wwwHost) return loadStoredSiteSettings(wwwHost)
+  return null
+}
+
+function askChildFrames(): void {
+  tellChildFrames(FRAME_ASK)
+}
+
+function postVideoPresence(present: boolean): void {
+  if (window.parent === window) return
+  window.parent.postMessage({ source: FRAME_VIDEO, present }, "*")
+}
+
+function postPanelOpen(open: boolean): void {
+  if (window.parent === window) return
+  window.parent.postMessage({ source: FRAME_PANEL, open }, "*")
+}
+
 function Overlay() {
   const hostname = location.hostname
+  const settingsHostname = registrableDomain(hostname)
   const [settings, setSettings] = useState<EffectSettings>(() => ({
     ...defaultSettings(),
     presetId: ""
@@ -367,6 +422,10 @@ function Overlay() {
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
   const [ready, setReady] = useState(false)
   const [hasVideo, setHasVideo] = useState(false)
+  const [forceOpen, setForceOpen] = useState(false)
+  const [childHasVideo, setChildHasVideo] = useState(false)
+  const [childPanel, setChildPanel] = useState(false)
+  const [noticeReady, setNoticeReady] = useState(false)
   const [pipOn, setPipOn] = useState(false)
   const [tab, setTab] = useState<PanelTab>("video")
   const [userPresets, setUserPresets] = useState<UserPreset[]>([])
@@ -406,6 +465,11 @@ function Overlay() {
   const pointerRef = useRef({ x: -1, y: -1 })
   const layoutRef = useRef<DockLayout | null>(null)
   const pendingOpen = useRef(false)
+  const queuedOpen = useRef(false)
+  const openPanelRef = useRef<() => void>(() => {})
+  const hasVideoRef = useRef(false)
+  const panelShownRef = useRef(false)
+  hasVideoRef.current = hasVideo
   const swallowClick = useRef(false)
   const dragRef = useRef<null | {
     pointerId: number
@@ -441,13 +505,35 @@ function Overlay() {
     const seq = ++saveSeq.current
     inflightSaves.current = [...inflightSaves.current, snapshot]
     dirtyRef.current = false
-    void saveSiteSettings(hostname, snapshot).then(() => {
+    void saveSiteSettings(settingsHostname, snapshot).then(() => {
       if (seq >= adoptedSeq.current) return
       const latest = settingsRef.current
       inflightSaves.current = [...inflightSaves.current, latest]
-      void saveSiteSettings(hostname, latest)
+      void saveSiteSettings(settingsHostname, latest)
     })
   }
+
+  const openPanel = () => {
+    if (!globallyEnabledRef.current) {
+      queuedOpen.current = true
+      return
+    }
+    queuedOpen.current = false
+    setForceOpen(true)
+    tellChildFrames(FRAME_OPEN)
+    if (window.top === window) askChildFrames()
+    setLayout((current) => {
+      if (!current) {
+        pendingOpen.current = true
+        return current
+      }
+      const next = withMode(current, "max")
+      if (next === current) return current
+      void saveDockLayout(next)
+      return next
+    })
+  }
+  openPanelRef.current = openPanel
 
   useEffect(() => {
     let alive = true
@@ -455,6 +541,15 @@ function Overlay() {
       if (!alive) return
       globallyEnabledRef.current = enabled
       setGloballyEnabled(enabled)
+      if (!enabled) return
+      if (queuedOpen.current) openPanelRef.current()
+      void chrome.storage.local.get(OPEN_REQUEST_KEY).then((bag) => {
+        if (!alive || !globallyEnabledRef.current) return
+        const request = bag[OPEN_REQUEST_KEY] as { hostname?: string; at?: number } | undefined
+        if (!request || !sameSite(hostname, request.hostname)) return
+        if (Date.now() - (request.at ?? 0) > 20000) return
+        openPanelRef.current()
+      })
     })
     void loadSitePolicy()
       .then((loaded) => {
@@ -468,7 +563,7 @@ function Overlay() {
         setPolicyReady(true)
       })
     void Promise.all([
-      loadStoredSiteSettings(hostname),
+      loadFrameSettings(hostname),
       loadGlobalPreset(),
       loadUserPresets()
     ]).then(([stored, globalPreset, presets]) => {
@@ -595,19 +690,82 @@ function Overlay() {
   }, [])
 
   useEffect(() => {
-    const reveal = () => {
-      setLayout((current) => {
-        if (!current) {
-          pendingOpen.current = true
-          return current
+    const frames = new Map<object, boolean>()
+    const panels = new Map<object, boolean>()
+    const onFrameMessage = (event: MessageEvent) => {
+      const data = event.data as { source?: string; present?: boolean; open?: boolean } | null
+      if (!data || event.source === window) return
+      if (data.source === FRAME_ASK) {
+        if (event.source && "postMessage" in event.source) {
+          ;(event.source as Window).postMessage(
+            { source: FRAME_VIDEO, present: hasVideoRef.current },
+            "*"
+          )
         }
-        const next = withMode(current, "max")
-        if (next === current) return current
-        void saveDockLayout(next)
-        return next
-      })
+        return
+      }
+      if (data.source === FRAME_PANEL) {
+        if (window.top !== window) {
+          window.parent.postMessage({ source: FRAME_PANEL, open: data.open === true }, "*")
+          return
+        }
+        if (!event.source) return
+        panels.set(event.source, data.open === true)
+        setChildPanel([...panels.values()].some(Boolean))
+        return
+      }
+      if (data.source !== FRAME_VIDEO) return
+      if (window.top !== window) {
+        window.parent.postMessage({ source: FRAME_VIDEO, present: data.present === true }, "*")
+        return
+      }
+      if (!event.source) return
+      frames.set(event.source, data.present === true)
+      setChildHasVideo([...frames.values()].some(Boolean))
     }
+    window.addEventListener("message", onFrameMessage)
+    return () => window.removeEventListener("message", onFrameMessage)
+  }, [])
 
+  useEffect(() => {
+    postVideoPresence(hasVideo)
+  }, [hasVideo])
+
+  useEffect(() => {
+    if (window.parent === window) return
+    const tick = () => {
+      postVideoPresence(hasVideoRef.current)
+      postPanelOpen(panelShownRef.current)
+    }
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    if (!forceOpen || hasVideo || childPanel) {
+      setNoticeReady(false)
+      return
+    }
+    const wait = window.setTimeout(() => setNoticeReady(true), 200)
+    const scan = window.setInterval(() => {
+      bridgeRef.current?.applyNow()
+      if (window.top === window) {
+        askChildFrames()
+        tellChildFrames(FRAME_OPEN)
+      }
+    }, VIDEO_SCAN_INTERVAL_MS)
+    if (window.top === window) {
+      askChildFrames()
+      tellChildFrames(FRAME_OPEN)
+    }
+    return () => {
+      window.clearTimeout(wait)
+      window.clearInterval(scan)
+    }
+  }, [forceOpen, hasVideo, childPanel])
+
+  useEffect(() => {
     const onStorage = (
       changes: { [key: string]: chrome.storage.StorageChange },
       area: string
@@ -629,7 +787,7 @@ function Overlay() {
         setSettings(incoming)
         if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
       }
-      const siteChange = changes[siteStorageKey(hostname)]
+      const siteChange = changes[siteStorageKey(settingsHostname)]
       if (siteChange?.newValue != null) {
         settingsSynced.current = true
         siteOverrideRef.current = true
@@ -661,7 +819,7 @@ function Overlay() {
       }
       if (changes[PROGRESS_KEY]) void listProgress().then(setProgressRows)
       const request = changes[OPEN_REQUEST_KEY]?.newValue as { hostname?: string } | undefined
-      if (request?.hostname === hostname && globallyEnabledRef.current) reveal()
+      if (sameSite(hostname, request?.hostname)) openPanelRef.current()
     }
 
     const onMessage = (
@@ -688,7 +846,7 @@ function Overlay() {
         return false
       }
       if (message?.type === OPEN_MESSAGE) {
-        if (globallyEnabledRef.current) reveal()
+        openPanelRef.current()
         sendResponse({ ok: true })
         return false
       }
@@ -699,13 +857,21 @@ function Overlay() {
       setPipOn(document.pictureInPictureElement === getActiveVideo())
     }
 
+    const onFrameOpen = (event: MessageEvent) => {
+      const data = event.data as { source?: string } | null
+      if (!data || data.source !== FRAME_OPEN || event.source === window) return
+      openPanelRef.current()
+    }
+
     chrome.storage.onChanged.addListener(onStorage)
     chrome.runtime.onMessage.addListener(onMessage)
+    window.addEventListener("message", onFrameOpen)
     document.addEventListener("enterpictureinpicture", onPip)
     document.addEventListener("leavepictureinpicture", onPip)
     return () => {
       chrome.storage.onChanged.removeListener(onStorage)
       chrome.runtime.onMessage.removeListener(onMessage)
+      window.removeEventListener("message", onFrameOpen)
       document.removeEventListener("enterpictureinpicture", onPip)
       document.removeEventListener("leavepictureinpicture", onPip)
     }
@@ -880,6 +1046,7 @@ function Overlay() {
   }
 
   const setMode = (mode: DockMode) => {
+    if (mode === "closed") setForceOpen(false)
     setLayout((current) => {
       if (!current) return current
       const next = withMode(current, mode)
@@ -1028,7 +1195,20 @@ function Overlay() {
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
   const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
 
-  if (!globallyEnabled || !allowed || !hasVideo || !layout || layout.mode === "closed") return null
+  const showMissing = forceOpen && !hasVideo && noticeReady && !childPanel
+  const panelShown =
+    globallyEnabled === true &&
+    allowed &&
+    layout != null &&
+    layout.mode !== "closed" &&
+    (hasVideo || showMissing)
+  panelShownRef.current = panelShown
+
+  useEffect(() => {
+    postPanelOpen(panelShown)
+  }, [panelShown])
+
+  if (!panelShown || !layout) return null
 
   const activePresetId = exactPresetId(settings, userPresets)
 
@@ -1157,7 +1337,9 @@ function Overlay() {
             </button>
             <div className="vee-title">
               <strong>Video Effects</strong>
-              <span>{settings.enabled ? "On this video" : "Effects are off"}</span>
+              <span>
+                {!hasVideo ? "No video on this page" : settings.enabled ? "On this video" : "Effects are off"}
+              </span>
             </div>
             <div className="vee-header-actions">
               <button
@@ -1214,6 +1396,11 @@ function Overlay() {
               />
             ) : null}
           </header>
+          {!hasVideo ? (
+            <p className="vee-missing" role="status">
+              No video detected. Checking again every {VIDEO_SCAN_INTERVAL_MS / 1000} seconds.
+            </p>
+          ) : null}
 
           <div className="vee-tabs" role="tablist" aria-label="Effect groups">
             {TABS.map((item) => {

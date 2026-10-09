@@ -101,9 +101,8 @@ function layoutViewportBox(
 }
 
 function scoreVideo(video: HTMLVideoElement): number {
-  if (video.videoWidth === 0 && video.readyState < 2) return 0
-
   // Stretch, zoom, and pan change the painted box, not the layout box.
+  // Dailymotion's video is already this large at readyState 0, before a stream attaches.
   const size = laidOutSize(video)
   if (size.width < MIN_WIDTH || size.height < MIN_HEIGHT) return 0
 
