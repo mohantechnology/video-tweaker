@@ -1,9 +1,11 @@
 import { clamp, protectMediaLevel } from "./effects"
 import { scanPage } from "./find-video"
+import { registrableDomain } from "./host"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, clampHoldPlaybackRate, type EffectSettings } from "./types"
 
 /** Matches the shadow host id in bridge.ts. Kept here so this file does not import the bridge. */
 const DOCK_HOST_ID = "vee-csui"
+const YOUTUBE_SPEED_STYLE_ID = "vee-hide-yt-speed"
 
 const HOLD_DELAY_MS = 400
 const MOVE_CANCEL_PX = 12
@@ -935,6 +937,20 @@ function presentBadge(node: HTMLDivElement): void {
   }
 }
 
+function hideYoutubeSpeedLabel(hidden: boolean): void {
+  if (registrableDomain(location.hostname) !== "youtube.com") return
+  const current = document.getElementById(YOUTUBE_SPEED_STYLE_ID)
+  if (!hidden) {
+    current?.remove()
+    return
+  }
+  if (current) return
+  const style = document.createElement("style")
+  style.id = YOUTUBE_SPEED_STYLE_ID
+  style.textContent = ".ytp-speedmaster-overlay{display:none!important}"
+  document.documentElement.append(style)
+}
+
 function showBadge(video: HTMLVideoElement): void {
   const node = ensureBadge()
   const label = formatHoldRate(holdRate())
@@ -942,9 +958,11 @@ function showBadge(video: HTMLVideoElement): void {
   node.setAttribute("aria-label", label)
   presentBadge(node)
   placeBadge(video)
+  hideYoutubeSpeedLabel(true)
 }
 
 function hideBadge(): void {
+  hideYoutubeSpeedLabel(false)
   if (!badge) return
   try {
     if (badge.matches(":popover-open")) badge.hidePopover()
@@ -982,6 +1000,7 @@ function stopHoldSpeed(): void {
   finish(session?.phase === "boosting")
   removeListeners()
   options = null
+  hideYoutubeSpeedLabel(false)
   badge?.remove()
   badge = null
   badgeLabel = null

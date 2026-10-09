@@ -1,3 +1,4 @@
+import { VIDEO_DETECT_INTERVAL_MS } from "../settings"
 import {
   applyNativeControls,
   applyPlayback,
@@ -12,6 +13,9 @@ import { maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
 import { createProgressTracker } from "./progress"
 import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
 import type { EffectSettings } from "./types"
+
+/** How often to rescan while a main video is already selected. */
+const PRESENT_POLL_MS = 700
 
 export const HOST_ID = "vee-csui"
 
@@ -81,11 +85,6 @@ function placeDock(video: HTMLVideoElement | null): void {
   const dock = host?.shadowRoot?.querySelector(".vee-dock") as HTMLElement | null
   if (!dock) return
 
-  if (!video) {
-    dock.style.display = "none"
-    return
-  }
-
   dock.style.display = "flex"
   dock.style.right = "auto"
   dock.style.top = "auto"
@@ -108,6 +107,7 @@ export function startVideoBridge(options: {
   let rootObserver: MutationObserver | null = null
   let styleObserver: MutationObserver | null = null
   let interval = 0
+  let pollHasVideo = false
   const progress = createProgressTracker(options.getSettings)
   const hold = startHoldSpeed({
     getSettings: options.getSettings,
@@ -164,7 +164,18 @@ export function startVideoBridge(options: {
     rootObserver.observe(root, { childList: true, subtree: true })
   }
 
-  const sync = () => {
+  let sync!: () => void
+
+  const armPoll = (hasVideo: boolean) => {
+    if (interval !== 0 && pollHasVideo === hasVideo) return
+    pollHasVideo = hasVideo
+    window.clearInterval(interval)
+    interval = window.setInterval(() => {
+      if (!document.hidden) sync()
+    }, hasVideo ? PRESENT_POLL_MS : VIDEO_DETECT_INTERVAL_MS)
+  }
+
+  sync = () => {
     if (stopped) return
     const { videos, roots } = scanPage()
     for (const root of roots) observeRoot(root)
@@ -204,6 +215,7 @@ export function startVideoBridge(options: {
     if (now !== present) {
       present = now
       options.onPresence(now)
+      armPoll(now)
     }
 
     placeDock(next)
@@ -243,10 +255,7 @@ export function startVideoBridge(options: {
   window.addEventListener("yt-navigate-finish", schedule)
   document.addEventListener("visibilitychange", schedule)
 
-  interval = window.setInterval(() => {
-    if (!document.hidden) sync()
-  }, 700)
-
+  armPoll(false)
   sync()
 
   return {

@@ -91,7 +91,12 @@ import {
   siteAllowed,
   type SitePolicy
 } from "~lib/sites"
-import { HEAVY_APPLY_DELAY_MS, LIGHT_APPLY_DELAY_MS, MINIBAR_HIDE_DELAY_MS } from "~settings"
+import {
+  HEAVY_APPLY_DELAY_MS,
+  LIGHT_APPLY_DELAY_MS,
+  MINIBAR_HIDE_DELAY_MS,
+  NO_VIDEO_NOTICE_DELAY_MS
+} from "~settings"
 import {
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
@@ -367,6 +372,8 @@ function Overlay() {
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
   const [ready, setReady] = useState(false)
   const [hasVideo, setHasVideo] = useState(false)
+  const [forcedOpen, setForcedOpen] = useState(false)
+  const [missingNotice, setMissingNotice] = useState(false)
   const [pipOn, setPipOn] = useState(false)
   const [tab, setTab] = useState<PanelTab>("video")
   const [userPresets, setUserPresets] = useState<UserPreset[]>([])
@@ -406,6 +413,7 @@ function Overlay() {
   const pointerRef = useRef({ x: -1, y: -1 })
   const layoutRef = useRef<DockLayout | null>(null)
   const pendingOpen = useRef(false)
+  const hadVideoRef = useRef(false)
   const swallowClick = useRef(false)
   const dragRef = useRef<null | {
     pointerId: number
@@ -578,6 +586,23 @@ function Overlay() {
   }, [policy, policyReady, globallyEnabled])
 
   useEffect(() => {
+    if (!hasVideo && hadVideoRef.current) {
+      const mode = layoutRef.current?.mode
+      if (mode === "min" || mode === "max") setForcedOpen(true)
+    }
+    hadVideoRef.current = hasVideo
+  }, [hasVideo])
+
+  useEffect(() => {
+    if (hasVideo) {
+      setMissingNotice(false)
+      return
+    }
+    const timer = window.setTimeout(() => setMissingNotice(true), NO_VIDEO_NOTICE_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [hasVideo])
+
+  useEffect(() => {
     if (!globallyEnabled) return
     repositionDock()
   }, [layout?.mode, hasVideo, globallyEnabled])
@@ -596,6 +621,7 @@ function Overlay() {
 
   useEffect(() => {
     const reveal = () => {
+      setForcedOpen(true)
       setLayout((current) => {
         if (!current) {
           pendingOpen.current = true
@@ -1028,7 +1054,8 @@ function Overlay() {
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
   const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
 
-  if (!globallyEnabled || !allowed || !hasVideo || !layout || layout.mode === "closed") return null
+  if (!globallyEnabled || !allowed || !layout || layout.mode === "closed") return null
+  if (!hasVideo && !forcedOpen) return null
 
   const activePresetId = exactPresetId(settings, userPresets)
 
@@ -1068,7 +1095,19 @@ function Overlay() {
           </button>
           <div className="vee-mini-copy">
             <strong>Video Effects</strong>
-            <span>{settings.enabled ? "Effects on" : "Effects off"}</span>
+            <span className="vee-status">
+              <span
+                data-hide={missingNotice ? "true" : undefined}
+                aria-hidden={missingNotice ? true : undefined}>
+                {settings.enabled ? "Effects on" : "Effects off"}
+              </span>
+              <span
+                data-hide={missingNotice ? undefined : "true"}
+                data-warn="true"
+                aria-hidden={missingNotice ? undefined : true}>
+                No video detected
+              </span>
+            </span>
           </div>
           {live ? <span className="vee-mini-dot" /> : null}
           <button
@@ -1157,7 +1196,25 @@ function Overlay() {
             </button>
             <div className="vee-title">
               <strong>Video Effects</strong>
-              <span>{settings.enabled ? "On this video" : "Effects are off"}</span>
+              <span className="vee-status">
+                <span
+                  data-hide={missingNotice ? "true" : undefined}
+                  aria-hidden={missingNotice ? true : undefined}>
+                  {hasVideo
+                    ? settings.enabled
+                      ? "On this video"
+                      : "Effects are off"
+                    : settings.enabled
+                      ? "Effects on"
+                      : "Effects off"}
+                </span>
+                <span
+                  data-hide={missingNotice ? undefined : "true"}
+                  data-warn="true"
+                  aria-hidden={missingNotice ? undefined : true}>
+                  No video detected
+                </span>
+              </span>
             </div>
             <div className="vee-header-actions">
               <button
@@ -1214,6 +1271,13 @@ function Overlay() {
               />
             ) : null}
           </header>
+
+          <p
+            className={`vee-video-warning${missingNotice ? " is-on" : ""}`}
+            role={missingNotice ? "status" : undefined}
+            aria-hidden={missingNotice ? undefined : true}>
+            <span>No video detected</span>
+          </p>
 
           <div className="vee-tabs" role="tablist" aria-label="Effect groups">
             {TABS.map((item) => {

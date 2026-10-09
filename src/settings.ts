@@ -15,3 +15,12 @@ export const PROGRESS_SAVE_INTERVAL_MS = 3000
  * The bar stays visible while the pointer is over it.
  */
 export const MINIBAR_HIDE_DELAY_MS = 3000
+
+/** How often to look again for a player while none is selected. */
+export const VIDEO_DETECT_INTERVAL_MS = 5000
+
+/**
+ * Wait after the player disappears before showing "No video detected".
+ * A short preview, such as a search thumbnail, can come and go inside this window.
+ */
+export const NO_VIDEO_NOTICE_DELAY_MS = 5000
