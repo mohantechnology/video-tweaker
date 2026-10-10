@@ -349,7 +349,7 @@ function tabActions(
       ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
-    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the browser progress bar on the Playback tab. Saved resume points stay."
+    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the on-video progress bar on the Playback tab. Saved resume points stay."
   }
 }
 
@@ -1871,9 +1871,9 @@ function Overlay() {
                 </Group>
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
-                    <span>Browser progress bar</span>
+                    <span>On-video progress bar</span>
                     <small>
-                      Shows the browser's own timeline on sites that hide it, such as Instagram.
+                      A seek bar on the bottom of the picture that stays visible and works above site overlays.
                     </small>
                   </div>
                   <button
@@ -1881,8 +1881,8 @@ function Overlay() {
                     type="button"
                     role="switch"
                     aria-checked={settings.showNativeControls}
-                    aria-label="Browser progress bar"
-                    title="Show the browser's own timeline on sites that hide it, such as Instagram"
+                    aria-label="On-video progress bar"
+                    title="Show a seek bar on the bottom of the video that stays visible and works above site overlays"
                     data-on={String(settings.showNativeControls)}
                     onClick={() => patch({ showNativeControls: !settings.showNativeControls })}>
                     <i />

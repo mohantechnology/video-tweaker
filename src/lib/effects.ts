@@ -455,18 +455,7 @@ export function releasePlayback(video: HTMLVideoElement): void {
   ownedMedia.delete(video)
 }
 
-export function applyNativeControls(video: HTMLVideoElement, settings: EffectSettings): void {
-  if (!settings.enabled || settings.playbackEnabled === false) {
-    clearNativeControls(video)
-    return
-  }
-  if (settings.showNativeControls) {
-    if (!video.controls) {
-      video.controls = true
-      video.dataset.veeControls = "1"
-    }
-    return
-  }
+export function applyNativeControls(video: HTMLVideoElement, _settings: EffectSettings): void {
   clearNativeControls(video)
 }
 

@@ -1,6 +1,7 @@
 import { clamp, protectMediaLevel } from "./effects"
 import { scanPage } from "./find-video"
 import { registrableDomain } from "./host"
+import { SEEK_BAR_ID, seekBarHitTest } from "./seek-bar"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, clampHoldPlaybackRate, type EffectSettings } from "./types"
 
 /** Matches the shadow host id in bridge.ts. Kept here so this file does not import the bridge. */
@@ -397,6 +398,7 @@ function releaseCapture(current: Session): void {
 }
 
 function pointInVideo(event: MouseEvent, video: HTMLVideoElement): boolean {
+  if (seekBarHitTest(event)) return false
   const picture = visiblePicture(video)
   if (!boxVisible(picture)) return false
   if (event.clientX < picture.left || event.clientX > picture.right) return false
@@ -422,6 +424,7 @@ function coversPicture(node: Element, video: HTMLVideoElement): boolean {
 }
 
 function pressBlocked(event: PointerEvent, video: HTMLVideoElement): boolean {
+  if (seekBarHitTest(event)) return true
   for (const node of event.composedPath()) {
     if (!(node instanceof Element)) continue
     if (node.id === DOCK_HOST_ID) return true
@@ -514,7 +517,13 @@ function overHeldVideo(event: Event, video: HTMLVideoElement): boolean {
 
 function onClick(event: MouseEvent): void {
   if (performance.now() > swallowUntil || !swallowVideo) return
-  if (event.composedPath().some((node) => node instanceof Element && node.id === DOCK_HOST_ID)) return
+  if (
+    event.composedPath().some(
+      (node) => node instanceof Element && (node.id === DOCK_HOST_ID || node.id === SEEK_BAR_ID)
+    )
+  ) {
+    return
+  }
   if (!overHeldVideo(event, swallowVideo)) return
   event.preventDefault()
   event.stopPropagation()

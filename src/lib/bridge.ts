@@ -11,6 +11,7 @@ import {
 import { findMainVideo, scanPage } from "./find-video"
 import { maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
 import { createProgressTracker } from "./progress"
+import { startSeekBar } from "./seek-bar"
 import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
 import type { EffectSettings } from "./types"
 
@@ -109,6 +110,7 @@ export function startVideoBridge(options: {
   let interval = 0
   let pollHasVideo = false
   const progress = createProgressTracker(options.getSettings)
+  const seekBar = startSeekBar({ getSettings: options.getSettings })
   const hold = startHoldSpeed({
     getSettings: options.getSettings,
     isAllowed: () => options.isAllowed?.() !== false,
@@ -127,7 +129,10 @@ export function startVideoBridge(options: {
     placeQueued = true
     requestAnimationFrame(() => {
       placeQueued = false
-      if (!stopped) placeDock(activeVideo)
+      if (!stopped) {
+        placeDock(activeVideo)
+        seekBar.place(activeVideo)
+      }
     })
   }
 
@@ -219,6 +224,7 @@ export function startVideoBridge(options: {
     }
 
     placeDock(next)
+    seekBar.sync(allowed ? next : null)
     progress.setTracking(allowed)
     const settings = options.getSettings()
     if (!allowed) {
@@ -276,6 +282,7 @@ export function startVideoBridge(options: {
       window.removeEventListener("yt-navigate-finish", schedule)
       document.removeEventListener("visibilitychange", schedule)
       progress.stop()
+      seekBar.stop()
       hold.stop()
       const settings = options.getSettings()
       applySkipMethods({ video: null, roots: [], settings, allowed: false })
