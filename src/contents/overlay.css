@@ -951,9 +951,56 @@ a.vee-progress-link:hover {
 .vee-tab svg,
 .vee-icon-btn svg,
 .vee-group-toggle svg,
-.vee-switch-row svg {
+.vee-switch-row svg,
+.vee-dock-pick svg {
   display: block;
   flex: none;
+}
+
+.vee-dock-picks {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.vee-dock-pick {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(246, 243, 255, 0.72);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.vee-dock-pick span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vee-dock-pick:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.vee-dock-pick[data-on="true"] {
+  background: linear-gradient(145deg, #8d73ff, #5d46e8);
+  border-color: transparent;
+  color: #fff;
 }
 
 .vee-switch-row {

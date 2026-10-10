@@ -9,9 +9,9 @@ import {
   visualWritesLocked
 } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
-import { maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
+import { isHoldBoosting, maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
 import { createProgressTracker } from "./progress"
-import { startSeekBar } from "./seek-bar"
+import { startSeekBar, type DockControl, type DockMedia } from "./seek-bar"
 import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
 import type { EffectSettings } from "./types"
 
@@ -63,7 +63,15 @@ function playbackStamp(settings: EffectSettings): string {
     settings.basicAudioOn,
     settings.audioEnabled,
     settings.playbackEnabled,
-    settings.showNativeControls
+    settings.showNativeControls,
+    settings.dockPlay,
+    settings.dockTime,
+    settings.dockVolume,
+    settings.dockSpeed,
+    settings.dockLoop,
+    settings.dockPip,
+    settings.dockFullscreen,
+    settings.dockSkip
   ].join("|")
 }
 
@@ -93,9 +101,13 @@ function placeDock(video: HTMLVideoElement | null): void {
 
 export function startVideoBridge(options: {
   getSettings: () => EffectSettings
+  /** Panel values, including ones a disabled section would otherwise hide. */
+  getUiSettings?: () => EffectSettings
   isAllowed?: () => boolean
   onPresence: (present: boolean) => void
   onVideo?: (video: HTMLVideoElement | null) => void
+  onControl?: (control: DockControl) => void
+  onMedia?: (media: DockMedia) => void
 }): VideoBridge {
   let current: HTMLVideoElement | null = null
   let present = false
@@ -110,7 +122,17 @@ export function startVideoBridge(options: {
   let interval = 0
   let pollHasVideo = false
   const progress = createProgressTracker(options.getSettings)
-  const seekBar = startSeekBar({ getSettings: options.getSettings })
+  const seekBar = startSeekBar({
+    getSettings: options.getSettings,
+    getUiSettings: options.getUiSettings,
+    onControl: options.onControl,
+    onMedia: options.onMedia,
+    rateSource: (video) => {
+      if (isHoldBoosting(video)) return "hold"
+      if (isSkipBoosted(video)) return "ignore"
+      return "live"
+    }
+  })
   const hold = startHoldSpeed({
     getSettings: options.getSettings,
     isAllowed: () => options.isAllowed?.() !== false,

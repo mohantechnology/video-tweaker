@@ -13,6 +13,9 @@ import {
   FlipVertical2,
   Gauge,
   Layers,
+  PictureInPicture2,
+  Play,
+  Repeat,
   Link2,
   Maximize2,
   Minus,
@@ -82,6 +85,7 @@ import {
   type SavedProgress
 } from "~lib/progress"
 import { PRESETS, PRESET_SNAPSHOT_KEYS, builtinSnapshot, exactPresetId, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
+import { type DockControl, type DockMedia, suppressDockMedia } from "~lib/seek-bar"
 import {
   SITE_POLICY_KEY,
   defaultSitePolicy,
@@ -130,6 +134,7 @@ import {
   HOLD_RATE_MAX,
   HOLD_RATE_MIN,
   HOLD_RATE_STEP,
+  DOCK_CONTROL_KEYS,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   clampHoldPlaybackRate,
@@ -195,6 +200,27 @@ const COLOR_CONTROLS: {
 ]
 
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 4]
+
+const DOCK_PICKS: {
+  key: (typeof DOCK_CONTROL_KEYS)[number]
+  label: string
+  title: string
+  icon: typeof Play
+}[] = [
+  { key: "dockPlay", label: "Play", title: "Play and pause on the video", icon: Play },
+  { key: "dockTime", label: "Time", title: "Current time and duration on the video", icon: Clock },
+  { key: "dockVolume", label: "Volume", title: "Mute and volume on the video", icon: Volume2 },
+  { key: "dockSpeed", label: "Speed", title: "Playback speed on the video", icon: Gauge },
+  { key: "dockLoop", label: "Loop", title: "Loop on the video", icon: Repeat },
+  {
+    key: "dockPip",
+    label: "PiP",
+    title: "Picture in picture on the video",
+    icon: PictureInPicture2
+  },
+  { key: "dockFullscreen", label: "Full", title: "Full screen on the video", icon: Maximize2 },
+  { key: "dockSkip", label: "Skip", title: "Skip back and forward 10 seconds on the video", icon: ChevronsRight }
+]
 
 type ApplyTiming = "now" | "light" | "heavy"
 const PANEL_EDGES = ["n", "s", "e", "w", "ne", "nw", "se", "sw"]
@@ -305,6 +331,7 @@ const PLAYBACK_RESET_KEYS = [
   "advancedPlaybackOn",
   "rememberProgress",
   "showNativeControls",
+  ...DOCK_CONTROL_KEYS,
   "skipAdsEnabled",
   "skipAds",
   "skipAdsSpeed",
@@ -404,6 +431,10 @@ function Overlay() {
   const applyDelayRef = useRef(0)
   const inflightSaves = useRef<EffectSettings[]>([])
   const bridgeRef = useRef<VideoBridge | null>(null)
+  const dockBridge = useRef({
+    onControl: (_control: DockControl) => undefined,
+    onMedia: (_media: DockMedia) => undefined
+  })
   const dockRef = useRef<HTMLDivElement>(null)
   const presetMenuRef = useRef<HTMLDivElement>(null)
   const presetButtonRef = useRef<HTMLButtonElement>(null)
@@ -553,8 +584,11 @@ function Overlay() {
     if (!ready || !policyReady || !globallyEnabled) return
     const bridge = startVideoBridge({
       getSettings: () => effectiveSettings(appliedRef.current),
+      getUiSettings: () => settingsRef.current,
       isAllowed: () => siteAllowed(hostname, policyRef.current),
       onPresence: setHasVideo,
+      onControl: (control) => dockBridge.current.onControl(control),
+      onMedia: (media) => dockBridge.current.onMedia(media),
       onVideo: (video) => {
         if (!video) return
         const current = settingsRef.current
@@ -804,6 +838,14 @@ function Overlay() {
     const resolved: Partial<EffectSettings> =
       snapshotChanged && !applyingPreset ? { ...next, presetId: "" } : next
     const touchAudio = touchesAudio(resolved)
+    if (
+      "volume" in resolved ||
+      "muted" in resolved ||
+      "playbackRate" in resolved ||
+      "loop" in resolved
+    ) {
+      suppressDockMedia(LIGHT_APPLY_DELAY_MS + 280)
+    }
     dirtyRef.current = true
     const merged: EffectSettings = {
       ...settingsRef.current,
@@ -835,6 +877,59 @@ function Overlay() {
       appliedRef.current = settingsRef.current
       bridgeRef.current?.applyNow()
     }, wait)
+  }
+
+  dockBridge.current.onControl = (control) => {
+    if (control.type === "audio") {
+      const next: Partial<EffectSettings> = {}
+      if (typeof control.volume === "number") next.volume = control.volume
+      if (typeof control.muted === "boolean") next.muted = control.muted
+      patch(next, false, "light")
+      return
+    }
+    if (control.type === "rate") {
+      patch(
+        {
+          playbackRate: Math.min(
+            PLAYBACK_RATE_MAX,
+            Math.max(PLAYBACK_RATE_MIN, control.playbackRate)
+          )
+        },
+        true
+      )
+      return
+    }
+    patch({ loop: control.loop }, true)
+  }
+
+  dockBridge.current.onMedia = (media) => {
+    const current = settingsRef.current
+    let volume = current.volume
+    let muted = current.muted
+    let playbackRate = current.playbackRate
+    let loop = current.loop
+    let changed = false
+    if (Math.abs(current.volume - media.volume) >= 0.005) {
+      volume = media.volume
+      changed = true
+    }
+    if (current.muted !== media.muted) {
+      muted = media.muted
+      changed = true
+    }
+    if (media.playbackRate !== null && Math.abs(current.playbackRate - media.playbackRate) >= 0.001) {
+      playbackRate = media.playbackRate
+      changed = true
+    }
+    if (current.loop !== media.loop) {
+      loop = media.loop
+      changed = true
+    }
+    if (!changed) return
+    const next: EffectSettings = { ...current, volume, muted, playbackRate, loop }
+    settingsRef.current = next
+    appliedRef.current = { ...appliedRef.current, volume, muted, playbackRate, loop }
+    setSettings(next)
   }
 
   const resetCurrentTab = () => {
@@ -1873,7 +1968,7 @@ function Overlay() {
                   <div>
                     <span>On-video progress bar</span>
                     <small>
-                      A seek bar on the bottom of the picture that stays visible and works above site overlays.
+                      A seek bar on the bottom of the picture. Pick which controls appear with it.
                     </small>
                   </div>
                   <button
@@ -1882,12 +1977,33 @@ function Overlay() {
                     role="switch"
                     aria-checked={settings.showNativeControls}
                     aria-label="On-video progress bar"
-                    title="Show a seek bar on the bottom of the video that stays visible and works above site overlays"
+                    title="Show a seek bar on the bottom of the video, with the controls you turn on below"
                     data-on={String(settings.showNativeControls)}
                     onClick={() => patch({ showNativeControls: !settings.showNativeControls })}>
                     <i />
                   </button>
                 </div>
+                {settings.showNativeControls ? (
+                  <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
+                    {DOCK_PICKS.map((pick) => {
+                      const Icon = pick.icon
+                      const on = settings[pick.key]
+                      return (
+                        <button
+                          key={pick.key}
+                          type="button"
+                          className="vee-dock-pick"
+                          aria-pressed={on}
+                          data-on={String(on)}
+                          title={pick.title}
+                          onClick={() => patch({ [pick.key]: !settings[pick.key] })}>
+                          <Icon size={15} strokeWidth={1.75} />
+                          <span>{pick.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : null}
               </>
             ) : null}
 

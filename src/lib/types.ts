@@ -75,6 +75,22 @@ export type EffectSettings = ColorSettings & {
   /** Speed used while the video picture is held down. */
   holdPlaybackRate: number
   showNativeControls: boolean
+  /** Play and pause on the on-video bar. */
+  dockPlay: boolean
+  /** Current time and duration on the on-video bar. */
+  dockTime: boolean
+  /** Mute and volume on the on-video bar. */
+  dockVolume: boolean
+  /** Playback speed on the on-video bar. */
+  dockSpeed: boolean
+  /** Loop on the on-video bar. */
+  dockLoop: boolean
+  /** Picture in picture on the on-video bar. */
+  dockPip: boolean
+  /** Full screen on the on-video bar. */
+  dockFullscreen: boolean
+  /** Skip back and forward 10 seconds on the on-video bar. */
+  dockSkip: boolean
   /**
    * Master switch for skip advertisement. Off leaves the four methods saved
    * and unused. On runs each method whose own switch is on.
@@ -89,6 +105,18 @@ export type EffectSettings = ColorSettings & {
   /** Block known ad request URLs on this website. */
   skipAdsBlock: boolean
 }
+
+/** Which buttons the on-video bar may show. Not part of a color preset. */
+export const DOCK_CONTROL_KEYS = [
+  "dockPlay",
+  "dockTime",
+  "dockVolume",
+  "dockSpeed",
+  "dockLoop",
+  "dockPip",
+  "dockFullscreen",
+  "dockSkip"
+] as const satisfies readonly (keyof EffectSettings)[]
 
 export const COLOR_KEYS: (keyof ColorSettings)[] = [
   "brightness",
@@ -156,6 +184,14 @@ export function defaultSettings(): EffectSettings {
     holdToSpeed: true,
     holdPlaybackRate: HOLD_PLAYBACK_RATE,
     showNativeControls: false,
+    dockPlay: true,
+    dockTime: true,
+    dockVolume: true,
+    dockSpeed: true,
+    dockLoop: false,
+    dockPip: false,
+    dockFullscreen: false,
+    dockSkip: false,
     skipAdsEnabled: false,
     skipAds: false,
     skipAdsSpeed: false,

@@ -106,6 +106,8 @@ export type HoldSpeedOptions = {
 
 let options: HoldSpeedOptions | null = null
 let session: Session | null = null
+let holdEchoVideo: HTMLVideoElement | null = null
+let holdEchoUntil = 0
 let swallowUntil = 0
 let swallowVideo: HTMLVideoElement | null = null
 let listening = false
@@ -143,6 +145,16 @@ function playing(video: HTMLVideoElement): boolean {
 export function heldTransport(video: HTMLVideoElement): { rate: number; defaultRate: number } | null {
   if (!session || session.video !== video || session.phase === "pending") return null
   return { rate: session.savedRate, defaultRate: session.savedDefault }
+}
+
+/**
+ * True while the hold speed is on screen, and for a short moment after release.
+ * The rate is restored in that moment, and it must not be saved as the chosen speed.
+ */
+export function isHoldBoosting(video: HTMLVideoElement | null): boolean {
+  if (!video) return false
+  if (session?.video === video && session.phase === "boosting") return true
+  return holdEchoVideo === video && performance.now() < holdEchoUntil
 }
 
 /** Ad playback takes the rate. A hold in progress stops writing the hold speed and does not restore over the ad. */
@@ -364,6 +376,10 @@ function finish(restore: boolean): void {
   const restoreBoost = restore && current.phase === "boosting"
   const savedVolume = current.savedVolume
   const savedMuted = current.savedMuted
+  if (restoreBoost) {
+    holdEchoVideo = current.video
+    holdEchoUntil = performance.now() + 400
+  }
   session = null
   resumePending = false
   resumeNotBefore = 0
@@ -1009,6 +1025,8 @@ function stopHoldSpeed(): void {
   finish(session?.phase === "boosting")
   removeListeners()
   options = null
+  holdEchoVideo = null
+  holdEchoUntil = 0
   hideYoutubeSpeedLabel(false)
   badge?.remove()
   badge = null
