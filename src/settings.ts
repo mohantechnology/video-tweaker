@@ -16,6 +16,12 @@ export const PROGRESS_SAVE_INTERVAL_MS = 3000
  */
 export const MINIBAR_HIDE_DELAY_MS = 3000
 
+/**
+ * How long the on-video progress bar and its controls stay up
+ * after the pointer stops moving. Move over the picture to show them again.
+ */
+export const PLAYER_CHROME_HIDE_MS = 3000
+
 /** How often to look again for a player while none is selected. */
 export const VIDEO_DETECT_INTERVAL_MS = 5000
 

@@ -1,3 +1,4 @@
+#vee-csui,
 #plasmo-shadow-container,
 .plasmo-csui-container {
   pointer-events: none !important;
@@ -9,6 +10,10 @@
   top: auto !important;
   left: auto !important;
   z-index: auto !important;
+  transform: none !important;
+  filter: none !important;
+  perspective: none !important;
+  contain: none !important;
   background: none !important;
   border: 0 !important;
   margin: 0 !important;
@@ -23,7 +28,7 @@
 .vee-dock {
   all: initial;
   position: fixed;
-  z-index: 2147483646;
+  z-index: 2147483647;
   display: flex;
   flex-direction: column;
   align-items: stretch;

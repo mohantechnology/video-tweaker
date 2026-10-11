@@ -1,5 +1,6 @@
 import { seekBy, togglePictureInPicture } from "./effects"
 import { formatClock } from "./progress"
+import { PLAYER_CHROME_HIDE_MS } from "../settings"
 import type { EffectSettings } from "./types"
 
 export const SEEK_BAR_ID = "vee-seek-bar"
@@ -9,9 +10,8 @@ const Z_INDEX = 2147483646
 const TRACK_HEIGHT_PX = 4
 const HIT_HEIGHT_PX = 20
 const DOCK_HEIGHT_PX = 76
-const HIDE_MS = 650
-const TOUCH_HIDE_MS = 2400
 const WRITE_GUARD_MS = 280
+const FS_SHELL_ID = "vee-fs-shell"
 const SKIP_SECONDS = 10
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 4]
 
@@ -48,6 +48,15 @@ const BAR_STYLE = `
 }
 #${SEEK_BAR_ID}[data-visible="true"] {
   display: block;
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+#${SEEK_BAR_ID}[data-visible="true"][data-hot="true"],
+#${SEEK_BAR_ID}[data-drag="true"] {
+  opacity: 1;
+}
+#${SEEK_BAR_ID}:not([data-hot="true"]) .vee-seek-hit {
+  pointer-events: none !important;
 }
 #${SEEK_BAR_ID} .vee-scrim {
   position: absolute;
@@ -286,7 +295,33 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID}[data-hot="true"] .vee-seek-tip {
   bottom: 62px;
 }
+#${FS_SHELL_ID} {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: #000 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: ${Z_INDEX} !important;
+  box-sizing: border-box !important;
+}
+#${FS_SHELL_ID} > video {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  object-fit: contain !important;
+  position: relative !important;
+  inset: auto !important;
+}
 @media (prefers-reduced-motion: reduce) {
+  #${SEEK_BAR_ID},
   #${SEEK_BAR_ID} .vee-scrim,
   #${SEEK_BAR_ID} .vee-chrome,
   #${SEEK_BAR_ID} .vee-seek-track,
@@ -355,6 +390,20 @@ let hotTimer = 0
 let ignoreUntil = 0
 let lastAudible = 1
 let pointerInside = false
+let fullscreenHooked = false
+let fsOpening = false
+let fsEntered = false
+let controlsBeforeFullscreen: boolean | null = null
+let controlsObserver: MutationObserver | null = null
+let suppressingControls = false
+
+type FsSession = {
+  video: HTMLVideoElement
+  mark: Comment
+  shell: HTMLDivElement
+}
+
+let fsSession: FsSession | null = null
 let getSettings: (() => EffectSettings) | null = null
 let getUiSettings: (() => EffectSettings) | null = null
 let onControl: ((control: DockControl) => void) | null = null
@@ -386,19 +435,6 @@ function formatRate(value: number): string {
   return `${rounded.toFixed(2).replace(/\.?0+$/, "")}×`
 }
 
-function controlsWanted(settings: EffectSettings): boolean {
-  return (
-    settings.dockPlay ||
-    settings.dockTime ||
-    settings.dockVolume ||
-    settings.dockSpeed ||
-    settings.dockLoop ||
-    settings.dockPip ||
-    settings.dockFullscreen ||
-    settings.dockSkip
-  )
-}
-
 function noteWrite(): void {
   ignoreUntil = performance.now() + WRITE_GUARD_MS
 }
@@ -408,28 +444,25 @@ function closePops(): void {
   if (volumePop) delete volumePop.dataset.open
 }
 
-function showChrome(hideAfter = 0): void {
-  const settings = readSettings()
-  if (!root || !settings || !controlsWanted(settings)) return
+function armChromeHide(): void {
   window.clearTimeout(hotTimer)
-  root.dataset.hot = "true"
-  if (hideAfter > 0) {
-    hotTimer = window.setTimeout(() => {
-      hideChromeSoon(0)
-    }, hideAfter)
-  }
+  hotTimer = window.setTimeout(hideChromeIfIdle, PLAYER_CHROME_HIDE_MS)
 }
 
-function hideChromeSoon(delay = HIDE_MS): void {
-  window.clearTimeout(hotTimer)
-  hotTimer = window.setTimeout(() => {
-    if (!root) return
-    if (root.matches(":hover")) return
-    if (pointerInside && root.querySelector(":focus")) return
-    delete root.dataset.hot
-    closePops()
-    pointerInside = false
-  }, delay)
+function hideChromeIfIdle(): void {
+  if (!root) return
+  if (dragging || volumeDrag || root.matches(":hover")) {
+    armChromeHide()
+    return
+  }
+  delete root.dataset.hot
+  closePops()
+}
+
+function showChrome(): void {
+  if (!root) return
+  root.dataset.hot = "true"
+  armChromeHide()
 }
 
 function pointerOverVideo(event: Pick<PointerEvent, "clientX" | "clientY">): boolean {
@@ -449,14 +482,12 @@ function onDocumentHover(event: PointerEvent): void {
   if (event.pointerType === "touch") return
   const target = event.target
   const inside = pointerOverVideo(event) || (target instanceof Node && root.contains(target))
-  if (inside) {
-    pointerInside = true
-    showChrome()
+  if (!inside) {
+    pointerInside = false
     return
   }
-  if (!pointerInside) return
-  pointerInside = false
-  hideChromeSoon()
+  pointerInside = true
+  showChrome()
 }
 
 function onDockEnter(): void {
@@ -468,13 +499,12 @@ function onDockLeave(event: PointerEvent): void {
   const next = event.relatedTarget
   if (next instanceof Node && root?.contains(next)) return
   pointerInside = false
-  hideChromeSoon()
 }
 
 function onDocPointerDown(event: PointerEvent): void {
   const target = event.target
   if (!(target instanceof Node && root?.contains(target))) closePops()
-  if (event.pointerType === "touch" && pointerOverVideo(event)) showChrome(TOUCH_HIDE_MS)
+  if (event.pointerType === "touch" && pointerOverVideo(event)) showChrome()
 }
 
 function stopAct(event: Event): void {
@@ -489,7 +519,138 @@ function shownRate(video: HTMLVideoElement, settings: EffectSettings): number {
 
 function videoIsFullscreen(video: HTMLVideoElement): boolean {
   const current = document.fullscreenElement
-  return !!current && (current === video || current.contains(video))
+  if (!current) return false
+  return current === video || current.contains(video)
+}
+
+type VideoFullscreen = HTMLVideoElement & {
+  webkitEnterFullscreen?: () => void
+}
+
+type ElementFullscreen = HTMLElement & {
+  webkitRequestFullscreen?: () => void
+}
+
+function ensureShell(): HTMLDivElement {
+  const existing = document.getElementById(FS_SHELL_ID)
+  if (existing instanceof HTMLDivElement) return existing
+  ensureStyle()
+  const shell = document.createElement("div")
+  shell.id = FS_SHELL_ID
+  return shell
+}
+
+function requestElementFullscreen(element: HTMLElement): Promise<void> {
+  const vendor = element as ElementFullscreen
+  if (typeof element.requestFullscreen === "function") {
+    return element.requestFullscreen({ navigationUI: "hide" })
+  }
+  if (typeof vendor.webkitRequestFullscreen === "function") {
+    vendor.webkitRequestFullscreen()
+    return Promise.resolve()
+  }
+  return Promise.reject(new Error("fullscreen unavailable"))
+}
+
+function restorePlayerFullscreen(): void {
+  const session = fsSession
+  if (!session) return
+  fsSession = null
+  fsEntered = false
+  const { video, mark, shell } = session
+  delete video.dataset.veeFs
+  const parent = mark.parentNode
+  if (parent) parent.insertBefore(video, mark)
+  mark.remove()
+  if (shell.isConnected) shell.remove()
+}
+
+async function enterPlayerFullscreen(video: HTMLVideoElement): Promise<void> {
+  if (fsSession?.video === video && document.fullscreenElement === fsSession.shell) return
+  if (fsSession) restorePlayerFullscreen()
+  const parent = video.parentNode
+  if (!parent) return
+  ensureStyle()
+  const shell = ensureShell()
+  const mark = document.createComment("vee-fs")
+  fsOpening = true
+  try {
+    parent.insertBefore(mark, video)
+    shell.appendChild(video)
+    video.dataset.veeFs = "1"
+    if (!shell.isConnected) document.documentElement.appendChild(shell)
+    void shell.offsetWidth
+    fsSession = { video, mark, shell }
+    await requestElementFullscreen(shell)
+  } catch (error) {
+    if (fsSession) restorePlayerFullscreen()
+    else {
+      delete video.dataset.veeFs
+      if (mark.parentNode) mark.parentNode.insertBefore(video, mark)
+      mark.remove()
+      shell.remove()
+    }
+    throw error
+  } finally {
+    fsOpening = false
+  }
+}
+
+function installFullscreenHook(): void {
+  if (fullscreenHooked) return
+  fullscreenHooked = true
+  const proto = HTMLVideoElement.prototype
+  const native = proto.requestFullscreen
+  proto.requestFullscreen = function (this: HTMLVideoElement, options?: FullscreenOptions) {
+    if (this === boundVideo && root?.dataset.visible === "true") return enterPlayerFullscreen(this)
+    return native.call(this, options)
+  }
+  const vendor = proto as VideoFullscreen
+  const enter = vendor.webkitEnterFullscreen
+  if (typeof enter !== "function") return
+  vendor.webkitEnterFullscreen = function (this: HTMLVideoElement) {
+    if (this === boundVideo && root?.dataset.visible === "true") {
+      void enterPlayerFullscreen(this).catch(() => undefined)
+      return
+    }
+    return enter.call(this)
+  }
+}
+
+function suppressNativeControls(video: HTMLVideoElement): void {
+  if (video.controls) video.controls = false
+  if (!controlsObserver) {
+    controlsObserver = new MutationObserver(() => {
+      const current = boundVideo
+      const fullscreen = document.fullscreenElement
+      if (!current || !fullscreen) return
+      if (fullscreen !== current && !fullscreen.contains(current)) return
+      if (current.controls) current.controls = false
+    })
+  }
+  controlsObserver.disconnect()
+  controlsObserver.observe(video, { attributes: true, attributeFilter: ["controls"] })
+}
+
+function releaseNativeControls(video: HTMLVideoElement | null): void {
+  controlsObserver?.disconnect()
+  if (video && controlsBeforeFullscreen !== null) video.controls = controlsBeforeFullscreen
+}
+
+function syncNativeControls(video: HTMLVideoElement): void {
+  const fullscreen = document.fullscreenElement
+  const covered = !!fullscreen && (fullscreen === video || fullscreen.contains(video))
+  if (covered && root?.dataset.visible === "true") {
+    suppressingControls = true
+    suppressNativeControls(video)
+    return
+  }
+  if (suppressingControls) {
+    suppressingControls = false
+    releaseNativeControls(video)
+    return
+  }
+  if (!fullscreen) controlsBeforeFullscreen = video.controls
 }
 
 function paintTime(video: HTMLVideoElement): void {
@@ -565,10 +726,6 @@ function paintControls(): void {
   if (leftCluster) {
     const visible = [playBtn, timeEl].some((node) => node && !node.hidden)
     leftCluster.hidden = !visible
-  }
-  if (!controlsWanted(settings)) {
-    delete root.dataset.hot
-    closePops()
   }
 }
 
@@ -794,12 +951,14 @@ function ensureBar(): HTMLDivElement {
     void togglePictureInPicture(video).catch(() => undefined)
   })
   fullBtn?.addEventListener("click", (event) => {
-    stopAct(event)
+    event.stopPropagation()
     const video = boundVideo
     if (!video) return
-    const exit = videoIsFullscreen(video)
-    const action = exit ? document.exitFullscreen() : video.requestFullscreen()
-    void action.catch(() => undefined)
+    if (videoIsFullscreen(video)) {
+      void document.exitFullscreen().catch(() => undefined)
+      return
+    }
+    void enterPlayerFullscreen(video).catch(() => undefined)
   })
 
   hit?.addEventListener("pointerdown", onPointerDown)
@@ -811,12 +970,6 @@ function ensureBar(): HTMLDivElement {
   })
   node.addEventListener("pointerenter", onDockEnter)
   node.addEventListener("pointerleave", onDockLeave)
-  node.addEventListener("focusout", () => {
-    window.setTimeout(() => {
-      if (!root || root.contains(document.activeElement) || root.matches(":hover")) return
-      hideChromeSoon(0)
-    }, 0)
-  })
   root = node
   return node
 }
@@ -957,13 +1110,15 @@ function onPointerUp(event: PointerEvent): void {
   } catch {
     /* Pointer already released. */
   }
-  if (!pointerOverVideo(event)) {
-    pointerInside = false
-    hideChromeSoon()
-  }
+  if (!pointerOverVideo(event)) pointerInside = false
+  showChrome()
 }
 
 function onPresentationChange(): void {
+  if (fsSession && document.fullscreenElement === fsSession.shell) fsEntered = true
+  if (fsSession && document.fullscreenElement !== fsSession.shell && !(fsOpening && !fsEntered)) {
+    restorePlayerFullscreen()
+  }
   const video = boundVideo
   const settings = readSettings()
   if (video && document.pictureInPictureElement === video) {
@@ -971,9 +1126,12 @@ function onPresentationChange(): void {
     return
   }
   if (video && settings && shouldShow(settings) && root) {
+    const showing = root.dataset.visible === "true" && root.style.display !== "none"
     root.dataset.visible = "true"
     placeSeekBar(video)
+    if (!showing || videoIsFullscreen(video)) showChrome()
   }
+  if (video) syncNativeControls(video)
   paintControls()
 }
 
@@ -1038,6 +1196,7 @@ export function seekBarContains(node: EventTarget | null): boolean {
 export function seekBarHitTest(event: Pick<MouseEvent, "clientX" | "clientY">): boolean {
   const bar = document.getElementById(SEEK_BAR_ID)
   if (!(bar instanceof HTMLElement) || bar.dataset.visible !== "true") return false
+  if (bar.dataset.hot !== "true" && bar.dataset.drag !== "true") return false
   const seek = bar.querySelector(".vee-seek-hit")
   if (seek && boxHas(seek, event)) return true
   if (bar.dataset.hot === "true") {
@@ -1092,8 +1251,11 @@ export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSett
     boundVideo = video
     bindVideo(video)
   }
+  const showing = bar.dataset.visible === "true" && bar.style.display !== "none"
   bar.dataset.visible = "true"
   placeSeekBar(video)
+  syncNativeControls(video)
+  if (!showing) showChrome()
   reportLoop()
 }
 
@@ -1102,6 +1264,10 @@ export function suppressDockMedia(ms = WRITE_GUARD_MS): void {
 }
 
 export function stopSeekBar(): void {
+  restorePlayerFullscreen()
+  controlsObserver?.disconnect()
+  controlsObserver = null
+  suppressingControls = false
   document.removeEventListener("pointermove", onPointerMove, true)
   document.removeEventListener("pointermove", onDocumentHover)
   document.removeEventListener("pointerup", onPointerUp, true)
@@ -1155,6 +1321,7 @@ export function startSeekBar(options: {
   onControl = options.onControl ?? null
   onMedia = options.onMedia ?? null
   rateSource = options.rateSource ?? null
+  installFullscreenHook()
   ensureBar()
   document.addEventListener("pointermove", onPointerMove, true)
   document.addEventListener("pointermove", onDocumentHover)
