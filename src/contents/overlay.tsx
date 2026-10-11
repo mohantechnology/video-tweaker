@@ -11,8 +11,12 @@ import {
   FastForward,
   FlipHorizontal2,
   FlipVertical2,
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Gauge,
   Layers,
+  RectangleHorizontal,
   PictureInPicture2,
   Play,
   Repeat,
@@ -141,6 +145,7 @@ import {
   defaultSettings,
   settingsEqual,
   type ColorSettings,
+  type DockAlign,
   type EffectSettings
 } from "~lib/types"
 
@@ -202,11 +207,17 @@ const COLOR_CONTROLS: {
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 4]
 
 const DOCK_PICKS: {
-  key: (typeof DOCK_CONTROL_KEYS)[number]
+  key: (typeof DOCK_CONTROL_KEYS)[number] | "dockProgress"
   label: string
   title: string
   icon: typeof Play
 }[] = [
+  {
+    key: "dockProgress",
+    label: "Progress",
+    title: "Seek track on the bottom of the video. The other buttons stay when this is off.",
+    icon: RectangleHorizontal
+  },
   { key: "dockPlay", label: "Play", title: "Play and pause on the video", icon: Play },
   { key: "dockTime", label: "Time", title: "Current time and duration on the video", icon: Clock },
   { key: "dockVolume", label: "Volume", title: "Mute and volume on the video", icon: Volume2 },
@@ -220,6 +231,17 @@ const DOCK_PICKS: {
   },
   { key: "dockFullscreen", label: "Full", title: "Full screen on the video", icon: Maximize2 },
   { key: "dockSkip", label: "Skip", title: "Skip back and forward 10 seconds on the video", icon: ChevronsRight }
+]
+
+const ALIGN_PICKS: {
+  align: DockAlign
+  label: string
+  title: string
+  icon: typeof AlignLeft
+}[] = [
+  { align: "left", label: "Left", title: "Place the on-video buttons on the left", icon: AlignLeft },
+  { align: "center", label: "Center", title: "Place the on-video buttons in the center", icon: AlignCenter },
+  { align: "right", label: "Right", title: "Place the on-video buttons on the right", icon: AlignRight }
 ]
 
 type ApplyTiming = "now" | "light" | "heavy"
@@ -331,6 +353,8 @@ const PLAYBACK_RESET_KEYS = [
   "advancedPlaybackOn",
   "rememberProgress",
   "showNativeControls",
+  "dockProgress",
+  "dockAlign",
   ...DOCK_CONTROL_KEYS,
   "skipAdsEnabled",
   "skipAds",
@@ -376,7 +400,7 @@ function tabActions(
       ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
-    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the on-video progress bar on the Playback tab. Saved resume points stay."
+    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the on-video controls on the Playback tab. Saved resume points stay."
   }
 }
 
@@ -1964,46 +1988,47 @@ function Overlay() {
                     onDeleteDomain={deleteProgressForDomain}
                   />
                 </Group>
-                <div className="vee-switch-row vee-switch-solo">
-                  <div>
-                    <span>On-video progress bar</span>
-                    <small>
-                      A seek bar on the bottom of the picture. Pick which controls appear with it.
-                    </small>
-                  </div>
-                  <button
-                    className="vee-switch"
-                    type="button"
-                    role="switch"
-                    aria-checked={settings.showNativeControls}
-                    aria-label="On-video progress bar"
-                    title="Show a seek bar on the bottom of the video, with the controls you turn on below"
-                    data-on={String(settings.showNativeControls)}
-                    onClick={() => patch({ showNativeControls: !settings.showNativeControls })}>
-                    <i />
-                  </button>
+                <p className="vee-hint">
+                  Each button is its own switch. Progress is only the seek track.
+                </p>
+                <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
+                  {DOCK_PICKS.map((pick) => {
+                    const Icon = pick.icon
+                    const on = settings[pick.key]
+                    return (
+                      <button
+                        key={pick.key}
+                        type="button"
+                        className="vee-dock-pick"
+                        aria-pressed={on}
+                        data-on={String(on)}
+                        title={pick.title}
+                        onClick={() => patch({ [pick.key]: !settings[pick.key] })}>
+                        <Icon size={15} strokeWidth={1.75} />
+                        <span>{pick.label}</span>
+                      </button>
+                    )
+                  })}
                 </div>
-                {settings.showNativeControls ? (
-                  <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
-                    {DOCK_PICKS.map((pick) => {
-                      const Icon = pick.icon
-                      const on = settings[pick.key]
-                      return (
-                        <button
-                          key={pick.key}
-                          type="button"
-                          className="vee-dock-pick"
-                          aria-pressed={on}
-                          data-on={String(on)}
-                          title={pick.title}
-                          onClick={() => patch({ [pick.key]: !settings[pick.key] })}>
-                          <Icon size={15} strokeWidth={1.75} />
-                          <span>{pick.label}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                ) : null}
+                <div className="vee-dock-align" role="group" aria-label="Control alignment">
+                  {ALIGN_PICKS.map((pick) => {
+                    const Icon = pick.icon
+                    const on = settings.dockAlign === pick.align
+                    return (
+                      <button
+                        key={pick.align}
+                        type="button"
+                        className="vee-dock-pick"
+                        aria-pressed={on}
+                        data-on={String(on)}
+                        title={pick.title}
+                        onClick={() => patch({ dockAlign: pick.align })}>
+                        <Icon size={15} strokeWidth={1.75} />
+                        <span>{pick.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
               </>
             ) : null}
 

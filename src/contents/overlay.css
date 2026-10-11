@@ -1008,6 +1008,13 @@ a.vee-progress-link:hover {
   color: #fff;
 }
 
+.vee-dock-align {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
 .vee-switch-row {
   display: flex;
   align-items: center;

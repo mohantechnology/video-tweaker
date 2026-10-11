@@ -23,21 +23,33 @@ export const HOST_ID = "vee-csui"
 let activeVideo: HTMLVideoElement | null = null
 let hostParked = false
 let parkedHost: HTMLElement | null = null
+let dockHost: HTMLElement | null = null
+
+function extensionHost(): HTMLElement | null {
+  const found = document.getElementById(HOST_ID)
+  if (found instanceof HTMLElement) {
+    dockHost = found
+    return found
+  }
+  return dockHost
+}
 
 export function parkExtensionHost(): void {
   hostParked = true
-  const host = parkedHost ?? document.getElementById(HOST_ID)
-  if (!(host instanceof HTMLElement)) return
+  const host = extensionHost()
+  if (!host) return
+  dockHost = host
   parkedHost = host
   if (host.isConnected) host.remove()
 }
 
 export function restoreExtensionHost(): void {
   hostParked = false
-  const host = parkedHost ?? document.getElementById(HOST_ID)
+  const host = extensionHost()
   parkedHost = null
-  if (!(host instanceof HTMLElement) || host.isConnected) return
-  document.documentElement.appendChild(host)
+  if (!host) return
+  dockHost = host
+  if (!host.isConnected) document.documentElement.appendChild(host)
 }
 
 export function getActiveVideo(): HTMLVideoElement | null {
@@ -64,6 +76,8 @@ function playbackStamp(settings: EffectSettings): string {
     settings.audioEnabled,
     settings.playbackEnabled,
     settings.showNativeControls,
+    settings.dockProgress,
+    settings.dockAlign,
     settings.dockPlay,
     settings.dockTime,
     settings.dockVolume,
@@ -77,21 +91,20 @@ function playbackStamp(settings: EffectSettings): string {
 
 function placeDock(video: HTMLVideoElement | null): void {
   if (hostParked) return
-  const host = document.getElementById(HOST_ID)
-  if (host) {
-    host.style.pointerEvents = "none"
-    const fullscreen = document.fullscreenElement
-    const parent =
-      fullscreen &&
-      video &&
-      fullscreen !== video &&
-      fullscreen.contains(video)
-        ? fullscreen
-        : document.documentElement
-    if (host.parentElement !== parent) parent.appendChild(host)
-  }
+  const host = extensionHost()
+  if (!host) return
+  host.style.pointerEvents = "none"
+  const fullscreen = document.fullscreenElement
+  const parent =
+    fullscreen instanceof HTMLElement &&
+    video &&
+    fullscreen !== video &&
+    fullscreen.contains(video)
+      ? fullscreen
+      : document.documentElement
+  if (host.parentElement !== parent) parent.appendChild(host)
 
-  const dock = host?.shadowRoot?.querySelector(".vee-dock") as HTMLElement | null
+  const dock = host.shadowRoot?.querySelector(".vee-dock") as HTMLElement | null
   if (!dock) return
 
   dock.style.display = "flex"
@@ -274,9 +287,15 @@ export function startVideoBridge(options: {
     sync()
   }
 
+  const onFullscreenPlace = () => {
+    if (stopped || hostParked) return
+    placeDock(activeVideo)
+  }
+
   rootObserver = new MutationObserver(() => schedule())
   observeRoot(document)
 
+  document.addEventListener("fullscreenchange", onFullscreenPlace, true)
   document.addEventListener("fullscreenchange", schedule)
   document.addEventListener("scroll", schedulePlace, true)
   window.addEventListener("resize", schedule)
@@ -298,6 +317,7 @@ export function startVideoBridge(options: {
       styleObserver?.disconnect()
       rootObserver = null
       styleObserver = null
+      document.removeEventListener("fullscreenchange", onFullscreenPlace, true)
       document.removeEventListener("fullscreenchange", schedule)
       document.removeEventListener("scroll", schedulePlace, true)
       window.removeEventListener("resize", schedule)

@@ -75,6 +75,10 @@ export type EffectSettings = ColorSettings & {
   /** Speed used while the video picture is held down. */
   holdPlaybackRate: number
   showNativeControls: boolean
+  /** Seek track on the on-video bar. The buttons stay when this is off. */
+  dockProgress: boolean
+  /** Where the on-video buttons sit. The seek track stays full width. */
+  dockAlign: DockAlign
   /** Play and pause on the on-video bar. */
   dockPlay: boolean
   /** Current time and duration on the on-video bar. */
@@ -105,6 +109,8 @@ export type EffectSettings = ColorSettings & {
   /** Block known ad request URLs on this website. */
   skipAdsBlock: boolean
 }
+
+export type DockAlign = "left" | "center" | "right"
 
 /** Which buttons the on-video bar may show. Not part of a color preset. */
 export const DOCK_CONTROL_KEYS = [
@@ -184,10 +190,12 @@ export function defaultSettings(): EffectSettings {
     holdToSpeed: true,
     holdPlaybackRate: HOLD_PLAYBACK_RATE,
     showNativeControls: false,
-    dockPlay: true,
-    dockTime: true,
-    dockVolume: true,
-    dockSpeed: true,
+    dockProgress: false,
+    dockAlign: "left",
+    dockPlay: false,
+    dockTime: false,
+    dockVolume: false,
+    dockSpeed: false,
     dockLoop: false,
     dockPip: false,
     dockFullscreen: false,

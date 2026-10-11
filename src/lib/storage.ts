@@ -18,7 +18,13 @@ import {
   type PresetSnapshot,
   type UserPreset
 } from "./presets"
-import { clampHoldPlaybackRate, defaultSettings, type EffectSettings } from "./types"
+import {
+  DOCK_CONTROL_KEYS,
+  clampHoldPlaybackRate,
+  defaultSettings,
+  type DockAlign,
+  type EffectSettings
+} from "./types"
 
 export const OPEN_REQUEST_KEY = "veeOpenRequest"
 export const OPEN_MESSAGE = "VEE_OPEN"
@@ -87,7 +93,21 @@ export function normalizeSettings(value: unknown): EffectSettings {
     next.audioTouched =
       next.muted !== defaults.muted || Math.abs(next.volume - defaults.volume) > 0.005
   }
+  if (!isDockAlign(raw.dockAlign)) next.dockAlign = "left"
+  // Older saves used one switch for the whole bar. On kept the button picks.
+  // Off meant nothing was on the video, so the picks match that.
+  if (typeof raw.dockProgress !== "boolean") {
+    const barOn = raw.showNativeControls === true
+    next.dockProgress = barOn
+    if (!barOn) {
+      for (const key of DOCK_CONTROL_KEYS) next[key] = false
+    }
+  }
   return next
+}
+
+function isDockAlign(value: unknown): value is DockAlign {
+  return value === "left" || value === "center" || value === "right"
 }
 
 export async function loadSiteSettings(hostname: string): Promise<EffectSettings> {
