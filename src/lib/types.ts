@@ -100,6 +100,16 @@ export type EffectSettings = ColorSettings & {
   dockAlign: DockAlign
   /** Where each on-video control sits. Stored per site. */
   dockLayout: ControlLayout
+  /**
+   * While true, on-video placement follows this site's preset, including a
+   * Facebook reel versus a long video. Moving a control turns it off.
+   */
+  dockLayoutAuto: boolean
+  /**
+   * While true, which on-video controls are shown follows this site's preset.
+   * Toggling a control turns it off.
+   */
+  dockFlagsAuto: boolean
   /** Resume starts this many seconds before the saved moment. */
   resumeLeadSeconds: number
   /** Play and pause on the on-video bar. */
@@ -282,6 +292,11 @@ export const DOCK_CONTROL_KEYS = [
   "dockSkip"
 ] as const satisfies readonly (keyof EffectSettings)[]
 
+/** On-video bar and buttons. Progress is not in the icon pack. */
+export const DOCK_FLAG_KEYS = ["dockProgress", ...DOCK_CONTROL_KEYS] as const satisfies readonly (keyof EffectSettings)[]
+
+export type DockFlagKey = (typeof DOCK_FLAG_KEYS)[number]
+
 export const COLOR_KEYS: (keyof ColorSettings)[] = [
   "brightness",
   "contrast",
@@ -352,6 +367,8 @@ export function defaultSettings(): EffectSettings {
     dockProgress: false,
     dockAlign: "left",
     dockLayout: defaultControlLayout(),
+    dockLayoutAuto: true,
+    dockFlagsAuto: true,
     resumeLeadSeconds: RESUME_LEAD_DEFAULT,
     dockPlay: false,
     dockTime: false,

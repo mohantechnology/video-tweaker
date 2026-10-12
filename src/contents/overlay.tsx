@@ -54,7 +54,13 @@ import {
   type VideoBridge
 } from "~lib/bridge"
 import { postEngineActive } from "~lib/engine"
-import { domainDockDefaults, readPageTitle } from "~lib/domains"
+import {
+  dockContextOf,
+  domainDockView,
+  domainPlacement,
+  readPageTitle,
+  type DockContext
+} from "~lib/domains"
 import {
   BLUR_MAX,
   OPACITY_MIN,
@@ -137,12 +143,10 @@ import {
   HOLD_RATE_MIN,
   HOLD_RATE_STEP,
   DOCK_CONTROL_KEYS,
-  DOCK_ICON_ORDER,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   clampHoldPlaybackRate,
   customAnchor,
-  defaultDockPlacement,
   defaultSettings,
   settingsEqual,
   type ColorSettings,
@@ -372,6 +376,8 @@ const PLAYBACK_RESET_KEYS = [
   "dockProgress",
   "dockAlign",
   "dockLayout",
+  "dockLayoutAuto",
+  "dockFlagsAuto",
   "resumeLeadSeconds",
   ...DOCK_CONTROL_KEYS,
   "skipAdsEnabled",
@@ -455,6 +461,7 @@ function Overlay() {
   const [dragging, setDragging] = useState(false)
   const [barIdle, setBarIdle] = useState(false)
   const [placePick, setPlacePick] = useState<DockPickKey | null>(null)
+  const [dockCtx, setDockCtx] = useState<DockContext>(() => dockContextOf(null, location.pathname))
   const [viewport, setViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight
@@ -629,7 +636,8 @@ function Overlay() {
     if (!ready || !policyReady || !globallyEnabled) return
     const bridge = startVideoBridge({
       getSettings: () => effectiveSettings(appliedRef.current),
-      getUiSettings: () => settingsRef.current,
+      getUiSettings: () =>
+        domainDockView(settingsRef.current, location.hostname, dockContextOf(getActiveVideo())),
       isAllowed: () => siteAllowed(hostname, policyRef.current),
       onPresence: setHasVideo,
       onControl: (control) => dockBridge.current.onControl(control),
@@ -685,6 +693,30 @@ function Overlay() {
     if (!globallyEnabled) return
     repositionDock()
   }, [layout?.mode, hasVideo, globallyEnabled])
+
+  useEffect(() => {
+    const read = () => {
+      const next = dockContextOf(getActiveVideo())
+      setDockCtx((current) =>
+        current.pathname === next.pathname &&
+        current.videoWidth === next.videoWidth &&
+        current.videoHeight === next.videoHeight &&
+        current.boxWidth === next.boxWidth &&
+        current.boxHeight === next.boxHeight
+          ? current
+          : next
+      )
+    }
+    read()
+    const timer = window.setInterval(read, 500)
+    window.addEventListener("popstate", read)
+    window.addEventListener("yt-navigate-finish", read)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener("popstate", read)
+      window.removeEventListener("yt-navigate-finish", read)
+    }
+  }, [hasVideo, hostname])
 
   useEffect(() => {
     const onResize = () => {
@@ -876,7 +908,7 @@ function Overlay() {
       body?.removeEventListener("scroll", pin)
       window.removeEventListener("resize", pin)
     }
-  }, [placePick, settings.dockLayout, viewport])
+  }, [placePick, settings.dockLayout, settings.dockLayoutAuto, dockCtx, viewport])
 
   useEffect(() => {
     if (!placePick) return
@@ -1055,6 +1087,37 @@ function Overlay() {
     }
     next.presetId = ""
     patch(next, true, "heavy")
+  }
+
+  const liveDock = () => domainDockView(settingsRef.current, hostname, dockContextOf(getActiveVideo()))
+
+  const toggleDockFlag = (key: DockPickKey) => {
+    const view = liveDock()
+    const flags: Partial<EffectSettings> = { dockFlagsAuto: false, dockProgress: view.dockProgress }
+    for (const flag of DOCK_CONTROL_KEYS) flags[flag] = view[flag]
+    flags[key] = !view[key]
+    patch(flags)
+  }
+
+  const moveDock = (id: DockPlaceId, change: Partial<DockPlacement>) => {
+    const view = liveDock()
+    patch({
+      dockLayoutAuto: false,
+      dockLayout: nextPlacement(view.dockLayout, id, change)
+    })
+  }
+
+  const resetDockPlace = (id: DockPlaceId) => {
+    const ctx = dockContextOf(getActiveVideo())
+    const view = domainDockView(settingsRef.current, hostname, ctx)
+    patch({
+      dockLayoutAuto: false,
+      dockLayout: { ...view.dockLayout, [id]: domainPlacement(hostname, ctx, id) }
+    })
+  }
+
+  const resetDockPositions = () => {
+    patch({ dockLayoutAuto: true })
   }
 
   const sectionOpen = (id: string) => openSections[id] !== false
@@ -1265,6 +1328,7 @@ function Overlay() {
   const tabOn = settings[tabFlag(tab)]
   const actions = tabActions(tab, tabOn)
   const miniIdle = layout.mode === "min" && barIdle
+  const dockView = domainDockView(settings, hostname, dockCtx)
   const placeChoice = placePick ? (DOCK_PICKS.find((item) => item.key === placePick) ?? null) : null
   const placeId = placeChoice ? DOCK_PLACE_BY_KEY[placeChoice.key] : null
 
@@ -2099,7 +2163,7 @@ function Overlay() {
                   <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
                     {DOCK_PICKS.map((pick) => {
                       const Icon = pick.icon
-                      const on = settings[pick.key]
+                      const on = dockView[pick.key]
                       const open = placePick === pick.key
                       return (
                         <button
@@ -2120,12 +2184,13 @@ function Overlay() {
                       )
                     })}
                   </div>
-                  <PlayerPreview
-                    layout={settings.dockLayout}
-                    enabled={DOCK_PICKS.filter((pick) => settings[pick.key]).map(
-                      (pick) => DOCK_PLACE_BY_KEY[pick.key]
-                    )}
-                  />
+                  <button
+                    type="button"
+                    className="vee-reset"
+                    title="Put the on-video controls back on this site's default places"
+                    onClick={resetDockPositions}>
+                    Reset positions
+                  </button>
                 </Group>
               </>
             ) : null}
@@ -2167,24 +2232,11 @@ function Overlay() {
             id={placeId}
             label={placeChoice.label}
             icon={placeChoice.icon}
-            place={settings.dockLayout[placeId]}
-            enabled={settings[placeChoice.key]}
-            onEnabled={() =>
-              patch({ [placeChoice.key]: !settingsRef.current[placeChoice.key] })
-            }
-            onReset={() =>
-              patch({
-                dockLayout: {
-                  ...settingsRef.current.dockLayout,
-                  [placeId]: defaultPlacementFor(hostname, placeId)
-                }
-              })
-            }
-            onChange={(change) =>
-              patch({
-                dockLayout: nextPlacement(settingsRef.current.dockLayout, placeId, change)
-              })
-            }
+            place={dockView.dockLayout[placeId]}
+            enabled={dockView[placeChoice.key]}
+            onEnabled={() => toggleDockFlag(placeChoice.key)}
+            onReset={() => resetDockPlace(placeId)}
+            onChange={(change) => moveDock(placeId, change)}
           />
         </div>
       ) : null}
@@ -2346,11 +2398,6 @@ function slotChoices(edge: DockEdge): { slot: DockSlot; label: string }[] {
   ]
 }
 
-function defaultPlacementFor(hostname: string, id: DockPlaceId): DockPlacement {
-  const site = domainDockDefaults(hostname)[id]
-  return site ? { ...defaultDockPlacement(id), ...site } : defaultDockPlacement(id)
-}
-
 function nextPlacement(
   layout: ControlLayout,
   id: DockPlaceId,
@@ -2365,90 +2412,6 @@ function nextPlacement(
     next = { ...next, edge: change.edge, ...customAnchor(id, change.edge, along) }
   }
   return { ...layout, [id]: next }
-}
-
-function previewMarks(layout: ControlLayout, enabled: readonly DockPlaceId[]) {
-  const marks: { id: DockPlaceId; x: number; y: number; w: number; h: number; bar: boolean }[] = []
-  const groups = new Map<string, DockPlaceId[]>()
-  for (const id of DOCK_ICON_ORDER) {
-    if (!enabled.includes(id)) continue
-    const place = layout[id]
-    if (!place) continue
-    if (place.slot === "custom") {
-      marks.push({ id, x: place.x, y: place.y, w: 0, h: 0, bar: false })
-      continue
-    }
-    const key = `${place.edge}:${place.slot}`
-    const list = groups.get(key) ?? []
-    list.push(id)
-    groups.set(key, list)
-  }
-  const lift =
-    enabled.includes("progress") && layout.progress?.slot !== "custom" ? layout.progress.edge : ""
-  for (const [key, ids] of groups) {
-    const [edge, slot] = key.split(":") as [DockEdge, DockSlot]
-    const vertical = edge === "left" || edge === "right"
-    ids.forEach((id, index) => {
-      const count = ids.length
-      if (vertical) {
-        const step = 14
-        const start = slot === "center" ? 50 - ((count - 1) * step) / 2 : slot === "end" ? 86 - (count - 1) * step : 16
-        const x = edge === "left" ? (lift === "left" ? 16 : 8) : lift === "right" ? 84 : 92
-        marks.push({ id, x, y: start + index * step, w: 0, h: 0, bar: false })
-      } else {
-        const step = 12
-        const start = slot === "center" ? 50 - ((count - 1) * step) / 2 : slot === "end" ? 90 - (count - 1) * step : 10
-        const y = edge === "top" ? (lift === "top" ? 18 : 12) : lift === "bottom" ? 82 : 88
-        marks.push({ id, x: start + index * step, y, w: 0, h: 0, bar: false })
-      }
-    })
-  }
-  if (enabled.includes("progress") && layout.progress) {
-    const place = layout.progress
-    const custom = place.slot === "custom"
-    if (place.edge === "left" || place.edge === "right") {
-      const x = custom ? place.x : place.edge === "left" ? 0 : 98.5
-      const y = custom ? place.y : 0
-      marks.push({
-        id: "progress",
-        x,
-        y,
-        w: 1.5,
-        h: custom ? Math.max(24, 100 - y) : 100,
-        bar: true
-      })
-    } else {
-      const x = custom ? place.x : 0
-      const y = custom ? place.y : place.edge === "top" ? 0 : 98
-      marks.push({
-        id: "progress",
-        x,
-        y,
-        w: custom ? Math.max(24, 100 - x) : 100,
-        h: 2,
-        bar: true
-      })
-    }
-  }
-  return marks
-}
-
-function PlayerPreview({ layout, enabled }: { layout: ControlLayout; enabled: readonly DockPlaceId[] }) {
-  return (
-    <div className="vee-stage" aria-hidden="true">
-      {previewMarks(layout, enabled).map((mark) => (
-        <i
-          key={mark.id}
-          data-kind={mark.bar ? "progress" : "icon"}
-          style={
-            mark.bar
-              ? { left: `${mark.x}%`, top: `${mark.y}%`, width: `${mark.w}%`, height: `${mark.h}%` }
-              : { left: `${mark.x}%`, top: `${mark.y}%` }
-          }
-        />
-      ))}
-    </div>
-  )
 }
 
 function PlaceCard({

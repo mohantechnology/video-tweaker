@@ -1012,35 +1012,6 @@ a.vee-progress-link:hover {
   box-shadow: inset 0 0 0 1px rgba(216, 204, 255, 0.9);
 }
 
-.vee-stage {
-  position: relative;
-  height: 96px;
-  margin: 2px 0 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
-    #14121c;
-  overflow: hidden;
-}
-
-.vee-stage i {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  margin: -4px 0 0 -4px;
-  border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(141, 115, 255, 0.35);
-}
-
-.vee-stage i[data-kind="progress"] {
-  margin: 0;
-  border-radius: 999px;
-  background: #8d73ff;
-  box-shadow: none;
-}
-
 .vee-place-card {
   margin: 0 0 8px;
   padding: 10px;

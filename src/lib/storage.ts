@@ -18,9 +18,10 @@ import {
   type PresetSnapshot,
   type UserPreset
 } from "./presets"
-import { domainDockDefaults } from "./domains"
+import { domainDockDefaults, domainDockPreset } from "./domains"
 import {
   DOCK_CONTROL_KEYS,
+  DOCK_FLAG_KEYS,
   clampHoldPlaybackRate,
   clampResumeLead,
   defaultSettings,
@@ -115,7 +116,16 @@ export function normalizeSettings(value: unknown, hostname = ""): EffectSettings
       for (const key of DOCK_CONTROL_KEYS) next[key] = false
     }
   }
+  // A site that never turned a control on follows the domain preset.
+  // A site that already enabled one keeps that setup until Reset positions.
+  if (typeof raw.dockLayoutAuto !== "boolean") next.dockLayoutAuto = !dockFlagsChosen(raw)
+  if (typeof raw.dockFlagsAuto !== "boolean") next.dockFlagsAuto = !dockFlagsChosen(raw)
   return next
+}
+
+function dockFlagsChosen(raw: Record<string, unknown>): boolean {
+  if (DOCK_FLAG_KEYS.some((key) => raw[key] === true)) return true
+  return typeof raw.dockProgress !== "boolean" && raw.showNativeControls === true
 }
 
 function isDockAlign(value: unknown): value is DockAlign {
@@ -124,7 +134,22 @@ function isDockAlign(value: unknown): value is DockAlign {
 
 export function defaultSettingsFor(hostname: string): EffectSettings {
   const next = defaultSettings()
-  next.dockLayout = resolveDockLayout(undefined, next.dockAlign, domainDockDefaults(hostname))
+  const preset = domainDockPreset(hostname, {
+    pathname: "",
+    videoWidth: 0,
+    videoHeight: 0,
+    boxWidth: 0,
+    boxHeight: 0
+  })
+  next.dockLayout = resolveDockLayout(undefined, next.dockAlign, preset?.layout ?? domainDockDefaults(hostname))
+  if (!preset) return next
+  next.dockProgress = false
+  for (const key of DOCK_CONTROL_KEYS) next[key] = false
+  for (const key of DOCK_FLAG_KEYS) {
+    if (preset.controls[key] === true) next[key] = true
+  }
+  next.dockLayoutAuto = true
+  next.dockFlagsAuto = true
   return next
 }
 
