@@ -2,8 +2,17 @@ import {
   dockContextOf,
   domainIconOrder,
   domainShape,
-  domainSkin
+  domainSkin,
+  readPageTitle
 } from "./domains"
+import { directMediaUrl, DOWNLOAD_MESSAGE, fileUrl, mediaPath } from "./media-file"
+import {
+  postRenditionAsk,
+  qualityLabel,
+  readRenditionMessage,
+  sortRenditions,
+  type Rendition
+} from "./renditions"
 import { seekBy, togglePictureInPicture } from "./effects"
 import { formatClock } from "./progress"
 import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
@@ -263,6 +272,12 @@ const BAR_STYLE = `
   right: 0;
   transform: none;
 }
+#${SEEK_BAR_ID} .vee-pop-anchor[data-align="start"][data-out="up"] .vee-pop,
+#${SEEK_BAR_ID} .vee-pop-anchor[data-align="start"][data-out="down"] .vee-pop {
+  left: 0;
+  right: auto;
+  transform: none;
+}
 #${SEEK_BAR_ID} .vee-pop-card {
   border-radius: 16px;
   background: rgba(12, 12, 14, 0.72);
@@ -396,6 +411,32 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-speed-chips button[data-on="true"] {
   background: rgba(255, 255, 255, 0.34);
   color: #fff;
+}
+#${SEEK_BAR_ID} .vee-quality-pop .vee-pop-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 92px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+#${SEEK_BAR_ID} .vee-quality-pop button {
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#${SEEK_BAR_ID} .vee-quality-pop button:hover,
+#${SEEK_BAR_ID} .vee-quality-pop button[data-on="true"] {
+  background: rgba(255, 255, 255, 0.34);
 }
 #${SEEK_BAR_ID} .vee-speed-caption {
   display: grid;
@@ -711,6 +752,10 @@ const ICON_FULL =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>'
 const ICON_EXIT_FULL =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
+const ICON_DOWNLOAD =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>'
+const ICON_QUALITY =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg>'
 
 type Timeline = {
   start: number
@@ -740,6 +785,11 @@ let volumePop: HTMLDivElement | null = null
 let volumeInput: HTMLInputElement | null = null
 let loopBtn: HTMLButtonElement | null = null
 let pipBtn: HTMLButtonElement | null = null
+let downloadBtn: HTMLButtonElement | null = null
+let qualityAnchor: HTMLDivElement | null = null
+let qualityBtn: HTMLButtonElement | null = null
+let qualityPop: HTMLDivElement | null = null
+let qualityList: HTMLDivElement | null = null
 let fullBtn: HTMLButtonElement | null = null
 const controlNodes = new Map<DockPlaceId, HTMLDivElement>()
 const packNodes = new Map<string, HTMLDivElement>()
@@ -751,6 +801,7 @@ let volumeDrag = false
 let speedDrag = false
 let volumeCloseTimer = 0
 let speedCloseTimer = 0
+let qualityCloseTimer = 0
 let volumeApplyTimer = 0
 let speedApplyTimer = 0
 let pendingVolume: { volume: number; muted: boolean } | null = null
@@ -772,6 +823,25 @@ let fsEntered = false
 let controlsBeforeFullscreen: boolean | null = null
 let controlsObserver: MutationObserver | null = null
 let suppressingControls = false
+let downloadBusy = false
+let qualityToken = 0
+let qualityStamp = ""
+const rememberedSrc = new WeakMap<HTMLVideoElement, string>()
+const pinnedGroup = new WeakMap<HTMLVideoElement, Rendition[]>()
+const startedPath = new WeakMap<HTMLVideoElement, string>()
+const sidecars = new WeakMap<HTMLVideoElement, HTMLAudioElement>()
+let renditionGroups: Rendition[][] = []
+let playedPaths: string[] = []
+let latestBatch: Rendition[][] = []
+let latestAt = 0
+let lockedVideo: HTMLVideoElement | null = null
+let lockedUrl = ""
+let lockedAudio = ""
+let lockedCode = ""
+let applyingQuality = false
+let passingMedia = false
+let pendingProvider: { video: HTMLVideoElement; value: MediaProvider } | null = null
+let historyHooked = false
 
 type FsSession = {
   video: HTMLVideoElement
@@ -885,12 +955,13 @@ function scheduleSpeed(rate: number): void {
   }, LIGHT_APPLY_DELAY_MS)
 }
 
-function cancelPopClose(which: "volume" | "speed"): void {
+function cancelPopClose(which: "volume" | "speed" | "quality"): void {
   if (which === "volume") window.clearTimeout(volumeCloseTimer)
+  else if (which === "quality") window.clearTimeout(qualityCloseTimer)
   else window.clearTimeout(speedCloseTimer)
 }
 
-function armPopClose(which: "volume" | "speed"): void {
+function armPopClose(which: "volume" | "speed" | "quality"): void {
   cancelPopClose(which)
   const timer = window.setTimeout(() => {
     if (which === "volume") {
@@ -902,6 +973,11 @@ function armPopClose(which: "volume" | "speed"): void {
       if (volumePop) delete volumePop.dataset.open
       return
     }
+    if (which === "quality") {
+      if (qualityAnchor?.matches(":hover")) return
+      if (qualityPop) delete qualityPop.dataset.open
+      return
+    }
     if (speedDrag) {
       armPopClose("speed")
       return
@@ -910,13 +986,16 @@ function armPopClose(which: "volume" | "speed"): void {
     if (speedPop) delete speedPop.dataset.open
   }, POP_CLOSE_MS)
   if (which === "volume") volumeCloseTimer = timer
+  else if (which === "quality") qualityCloseTimer = timer
   else speedCloseTimer = timer
 }
 
 function closePops(): void {
   cancelPopClose("volume")
   cancelPopClose("speed")
+  cancelPopClose("quality")
   if (volumePop) delete volumePop.dataset.open
+  if (qualityPop) delete qualityPop.dataset.open
   if (speedDrag) return
   if (speedPop) delete speedPop.dataset.open
 }
@@ -1326,6 +1405,8 @@ function paintControls(): void {
     fullBtn.setAttribute("aria-label", fullOn ? "Exit full screen" : "Full screen")
     fullBtn.setAttribute("aria-pressed", String(fullOn))
   }
+  rememberDirect(video)
+  paintQuality(video)
   if (!volumeDrag && !speedDrag) applyBarLayout(settings)
 }
 
@@ -1385,9 +1466,455 @@ function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
       return settings.dockLoop
     case "pip":
       return settings.dockPip && document.pictureInPictureEnabled
+    case "download":
+      return settings.dockDownload && fileForDownload(boundVideo) != null
+    case "quality":
+      return settings.dockQuality && qualityReady(boundVideo)
     case "fullscreen":
       return settings.dockFullscreen
   }
+}
+
+function rememberDirect(video: HTMLVideoElement): void {
+  const url = directMediaUrl(video)
+  if (url) rememberedSrc.set(video, url)
+}
+
+function sizeNear(known: number, live: number): boolean {
+  if (known < 2 || live < 2) return false
+  return Math.abs(known - live) <= Math.max(8, live * 0.04)
+}
+
+function groupContainingPath(path: string): Rendition[] | null {
+  if (!path) return null
+  const name = path.split("/").pop() || ""
+  let nameHit: Rendition[] | null = null
+  for (let index = renditionGroups.length - 1; index >= 0; index -= 1) {
+    const group = renditionGroups[index]
+    for (const item of group) {
+      const itemPath = mediaPath(item.url)
+      const aliasHit =
+        item.aliases?.some((alias) => mediaPath(alias) === path || (name.length > 12 && mediaPath(alias).endsWith(`/${name}`))) ===
+        true
+      if (itemPath === path || aliasHit || (item.audioUrl && mediaPath(item.audioUrl) === path)) return group
+      if (name.length > 12 && (itemPath.endsWith(`/${name}`) || itemPath === name)) nameHit = group
+    }
+  }
+  return nameHit
+}
+
+function recentPaths(): string[] {
+  const found: string[] = []
+  const seen = new Set<string>()
+  const add = (value: string) => {
+    if (!value || seen.has(value)) return
+    const path = value.startsWith("http") ? mediaPath(value) : value
+    if (!/\.(mp4|webm|m4v|mov)$/i.test(path) || seen.has(path)) return
+    seen.add(path)
+    found.push(path)
+  }
+  for (const path of playedPaths) add(path)
+  try {
+    const entries = performance.getEntriesByType("resource")
+    for (let index = entries.length - 1; index >= 0 && found.length < 16; index -= 1) add(entries[index].name)
+  } catch {
+    /* Resource timing can be unavailable in this frame. */
+  }
+  return found
+}
+
+function durationFits(group: readonly Rendition[], video: HTMLVideoElement): boolean {
+  const known = group.find((item) => item.duration && item.duration > 0)?.duration
+  const live = video.duration
+  if (!known || !Number.isFinite(live) || live <= 0) return true
+  return Math.abs(known - live) < 1.25
+}
+
+function sizeKnown(video: HTMLVideoElement): boolean {
+  return video.videoWidth >= 2 && video.videoHeight >= 2
+}
+
+function sizeFits(group: readonly Rendition[], video: HTMLVideoElement): boolean {
+  if (!sizeKnown(video)) return true
+  const measured = group.filter((item) => item.measured !== false)
+  if (!measured.length) return true
+  return measured.some((item) => sizeNear(item.width, video.videoWidth) && sizeNear(item.height, video.videoHeight))
+}
+
+function pinGroup(video: HTMLVideoElement, group: Rendition[]): Rendition[] {
+  pinnedGroup.set(video, group)
+  return group
+}
+
+function matchedGroup(video: HTMLVideoElement | null): Rendition[] {
+  if (!video) return []
+  const src = directMediaUrl(video) || rememberedSrc.get(video) || ""
+  if (src) {
+    const group = groupContainingPath(mediaPath(src))
+    if (group && durationFits(group, video)) return pinGroup(video, group)
+  }
+  const started = startedPath.get(video)
+  if (started) {
+    const group = groupContainingPath(started)
+    if (group && durationFits(group, video) && (!sizeKnown(video) || sizeFits(group, video))) return pinGroup(video, group)
+    if (sizeKnown(video)) startedPath.delete(video)
+  }
+  if (!sizeKnown(video)) return []
+  for (const path of recentPaths()) {
+    const group = groupContainingPath(path)
+    if (!group || !durationFits(group, video) || !sizeFits(group, video)) continue
+    startedPath.set(video, path)
+    return pinGroup(video, group)
+  }
+  const pinned = pinnedGroup.get(video)
+  if (pinned && durationFits(pinned, video) && (pinned.length > 1 || src)) return pinned
+  if (
+    latestBatch.length === 1 &&
+    latestBatch[0].length > 1 &&
+    performance.now() - latestAt < 8000 &&
+    durationFits(latestBatch[0], video) &&
+    sizeFits(latestBatch[0], video)
+  ) {
+    return pinGroup(video, latestBatch[0])
+  }
+  const sized = renditionGroups.filter(
+    (group) => group.length > 1 && durationFits(group, video) && sizeFits(group, video) && group.some((item) => item.measured !== false)
+  )
+  if (sized.length === 1) return pinGroup(video, sized[0])
+  return []
+}
+
+function qualityReady(video: HTMLVideoElement | null): boolean {
+  return matchedGroup(video).length > 1
+}
+
+function choicesFor(video: HTMLVideoElement): Rendition[] {
+  return sortRenditions(matchedGroup(video))
+}
+
+function mentionsPath(item: Rendition, path: string): boolean {
+  if (!path) return false
+  if (mediaPath(item.url) === path) return true
+  return item.aliases?.some((alias) => mediaPath(alias) === path) === true
+}
+
+function activeRendition(video: HTMLVideoElement, choices: readonly Rendition[]): Rendition | undefined {
+  const src = directMediaUrl(video) || rememberedSrc.get(video) || ""
+  if (src) {
+    const hit = choices.find((item) => mentionsPath(item, mediaPath(src)))
+    if (hit) return hit
+  }
+  const started = startedPath.get(video)
+  if (started) {
+    const hit = choices.find((item) => mentionsPath(item, started))
+    if (hit) return hit
+  }
+  return choices.find(
+    (item) => item.measured !== false && sizeNear(item.width, video.videoWidth) && sizeNear(item.height, video.videoHeight)
+  )
+}
+
+function fileForDownload(video: HTMLVideoElement | null): string | null {
+  if (!video) return null
+  const direct = directMediaUrl(video)
+  if (direct) return direct
+  const group = matchedGroup(video)
+  if (!group.length) return null
+  const active = activeRendition(video, group)
+  if (active && !active.audioUrl) return active.url
+  const muxed = sortRenditions(group.filter((item) => item.url && !item.audioUrl))
+  if (muxed.length) {
+    const near = active ? muxed.find((item) => sizeNear(item.height, active.height)) : undefined
+    return (near || muxed[0]).url
+  }
+  return active?.url || null
+}
+
+function paintQuality(video: HTMLVideoElement): void {
+  const choices = choicesFor(video)
+  const active = activeRendition(video, choices)
+  const currentPath = active ? mediaPath(active.url) : ""
+  if (qualityBtn) {
+    const label = active ? qualityLabel(active, choices) : "Resolution"
+    qualityBtn.setAttribute("aria-label", active ? `Resolution ${label}` : "Resolution")
+  }
+  const stamp = `${choices.map((item) => `${item.height}:${item.width}:${item.url}:${item.audioUrl || ""}`).join("|")}#${currentPath}`
+  if (!qualityList || stamp === qualityStamp) return
+  qualityStamp = stamp
+  qualityList.replaceChildren()
+  for (const item of choices) {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.dataset.url = item.url
+    if (item.audioUrl) button.dataset.audio = item.audioUrl
+    button.textContent = qualityLabel(item, choices)
+    button.dataset.on = String(mediaPath(item.url) === currentPath)
+    qualityList.appendChild(button)
+  }
+}
+
+function mediaCode(video: HTMLVideoElement): string {
+  const fromPath = location.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/)
+  if (fromPath) return fromPath[1]
+  const root = video.closest("article") || video.parentElement
+  const link = root?.querySelector("a[href*='/reel/'], a[href*='/reels/'], a[href*='/p/'], a[href*='/tv/']")
+  if (!(link instanceof HTMLAnchorElement)) return ""
+  const match = link.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/)
+  return match ? match[1] : ""
+}
+
+function holding(video: HTMLVideoElement): boolean {
+  return lockedVideo === video && lockedUrl !== ""
+}
+
+function movedAway(video: HTMLVideoElement): boolean {
+  if (!lockedCode) return false
+  const code = mediaCode(video)
+  return code !== "" && code !== lockedCode
+}
+
+function guardVideo(video: HTMLVideoElement): void {
+  if (video.dataset.veeGuard === "1") return
+  const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src")
+  const objDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")
+  if (!srcDesc?.get || !srcDesc.set || !objDesc?.get || !objDesc.set) return
+  try {
+    Object.defineProperty(video, "src", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return srcDesc.get!.call(this)
+      },
+      set(value: string) {
+        if (holding(video) && typeof value === "string" && (value === "" || value.startsWith("blob:"))) return
+        srcDesc.set!.call(this, value)
+      }
+    })
+    Object.defineProperty(video, "srcObject", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return objDesc.get!.call(this)
+      },
+      set(value: MediaProvider | null) {
+        if (passingMedia) {
+          objDesc.set!.call(this, value)
+          return
+        }
+        if (holding(video) && value && !movedAway(video)) {
+          pendingProvider = { video, value }
+          return
+        }
+        objDesc.set!.call(this, value)
+      }
+    })
+    video.dataset.veeGuard = "1"
+  } catch {
+    /* The player can already own these properties. */
+  }
+}
+
+function releaseQuality(video: HTMLVideoElement | null, applyPending: boolean): void {
+  const pending = pendingProvider
+  pendingProvider = null
+  const was = lockedVideo
+  lockedUrl = ""
+  lockedAudio = ""
+  lockedCode = ""
+  if (!video || lockedVideo === video) lockedVideo = null
+  clearSidecar(video || was)
+  if (!applyPending || !pending) return
+  if (video && pending.video !== video) return
+  passingMedia = true
+  try {
+    pending.video.srcObject = pending.value
+  } catch {
+    /* The player can drop a source that is no longer current. */
+  } finally {
+    passingMedia = false
+  }
+}
+
+function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
+  const existing = sidecars.get(video)
+  if (existing) return existing
+  const audio = document.createElement("audio")
+  audio.preload = "auto"
+  audio.setAttribute("data-vee-audio", "1")
+  sidecars.set(video, audio)
+  const follow = () => {
+    if (!lockedAudio || lockedVideo !== video) return
+    audio.muted = video.muted
+    audio.volume = video.volume
+    audio.playbackRate = video.playbackRate || 1
+  }
+  video.addEventListener("play", () => {
+    follow()
+    if (lockedAudio) void audio.play().catch(() => undefined)
+  })
+  video.addEventListener("pause", () => audio.pause())
+  video.addEventListener("volumechange", follow)
+  video.addEventListener("ratechange", follow)
+  video.addEventListener("seeked", () => {
+    if (!lockedAudio || lockedVideo !== video) return
+    try {
+      audio.currentTime = video.currentTime
+    } catch {
+      /* The soundtrack can reject a seek until it has metadata. */
+    }
+  })
+  video.addEventListener("ended", () => audio.pause())
+  video.addEventListener("timeupdate", () => {
+    if (!lockedAudio || lockedVideo !== video || video.paused) return
+    if (Math.abs((audio.currentTime || 0) - (video.currentTime || 0)) > 0.35) {
+      try {
+        audio.currentTime = video.currentTime
+      } catch {
+        /* Ignore a seek the soundtrack is not ready for. */
+      }
+    }
+  })
+  return audio
+}
+
+function setSidecar(video: HTMLVideoElement, audioUrl: string): void {
+  const audio = ensureSidecar(video)
+  lockedAudio = audioUrl
+  if (!audio.src || mediaPath(audio.src) !== mediaPath(audioUrl)) audio.src = audioUrl
+  audio.muted = video.muted
+  audio.volume = video.volume
+  audio.playbackRate = video.playbackRate || 1
+  try {
+    if ((video.currentTime || 0) > 0) audio.currentTime = video.currentTime
+  } catch {
+    /* Metadata for the soundtrack may arrive after the picture. */
+  }
+  if (!video.paused && !video.ended) void audio.play().catch(() => undefined)
+}
+
+function clearSidecar(video: HTMLVideoElement | null): void {
+  lockedAudio = ""
+  if (!video) return
+  const audio = sidecars.get(video)
+  if (!audio) return
+  audio.pause()
+  audio.removeAttribute("src")
+  try {
+    audio.load()
+  } catch {
+    /* Detaching the soundtrack can throw if the element is gone. */
+  }
+}
+
+function hookHistory(): void {
+  if (historyHooked) return
+  historyHooked = true
+  const wrap = (original: typeof history.pushState) =>
+    function (this: History, ...args: Parameters<typeof history.pushState>) {
+      const before = location.pathname
+      const result = original.apply(this, args)
+      if (location.pathname !== before) releaseQuality(lockedVideo, true)
+      return result
+    }
+  history.pushState = wrap(history.pushState)
+  history.replaceState = wrap(history.replaceState)
+  window.addEventListener("popstate", () => releaseQuality(lockedVideo, true))
+}
+
+function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void {
+  const live = video.currentSrc || video.src
+  if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl) return
+  const time = video.currentTime || 0
+  const paused = video.paused
+  const ended = video.ended
+  const rate = video.playbackRate || 1
+  const muted = video.muted
+  const volume = video.volume
+  const token = ++qualityToken
+  const detach = () => {
+    video.removeEventListener("loadedmetadata", resume)
+    video.removeEventListener("error", fail)
+  }
+  function resume(): void {
+    if (token !== qualityToken) return
+    detach()
+    applyingQuality = false
+    try {
+      if (time > 0) {
+        const duration = video.duration
+        const next =
+          Number.isFinite(duration) && duration > 0 ? Math.min(time, Math.max(0, duration - 0.05)) : time
+        video.currentTime = next
+      }
+    } catch {
+      /* The player can reject a seek until the new file is ready. */
+    }
+    video.playbackRate = rate
+    video.muted = muted
+    video.volume = volume
+    rememberedSrc.set(video, url)
+    if (audioUrl) setSidecar(video, audioUrl)
+    else clearSidecar(video)
+    if (!paused && !ended) void video.play().catch(() => undefined)
+    paintControls()
+  }
+  function fail(): void {
+    if (token !== qualityToken) return
+    detach()
+    applyingQuality = false
+  }
+  video.addEventListener("loadedmetadata", resume)
+  video.addEventListener("error", fail)
+  rememberedSrc.set(video, url)
+  startedPath.set(video, mediaPath(url))
+  lockedVideo = video
+  lockedUrl = url
+  lockedCode = mediaCode(video)
+  pendingProvider = null
+  guardVideo(video)
+  applyingQuality = true
+  try {
+    video.srcObject = null
+  } catch {
+    /* Some players reject clearing the media source. */
+  }
+  video.src = url
+  if (audioUrl) setSidecar(video, audioUrl)
+  else clearSidecar(video)
+}
+
+async function downloadCurrent(): Promise<void> {
+  if (downloadBusy) return
+  const url = fileForDownload(boundVideo)
+  if (!url || !downloadBtn) return
+  downloadBusy = true
+  downloadBtn.title = "Downloading"
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: DOWNLOAD_MESSAGE,
+      url,
+      title: readPageTitle()
+    })
+    downloadBtn.title = response?.ok ? "Download started" : "Could not save this video"
+  } catch {
+    downloadBtn.title = "Could not save this video"
+  } finally {
+    downloadBusy = false
+  }
+}
+
+function onRenditionMessage(event: MessageEvent): void {
+  if (event.source !== window) return
+  const message = readRenditionMessage(event.data)
+  if (!message || message.kind !== "list") return
+  renditionGroups = message.groups ?? []
+  if (message.played && message.played.length > 0) playedPaths = message.played
+  if (message.batch && message.batch.length > 0) {
+    latestBatch = message.batch
+    latestAt = performance.now()
+  }
+  qualityStamp = ""
+  paintControls()
 }
 
 function popDirection(place: DockPlacement): "up" | "down" | "left" | "right" {
@@ -1841,19 +2368,53 @@ function pinPresetAnchor(video: HTMLVideoElement | null): void {
   if (!root || !video) return
   const skin = root.dataset.skin || ""
   const shape = root.dataset.shape || ""
-  if (skin === "facebook" && shape === "vertical") {
-    pinFacebookReel(video)
-    return
+  if (skin === "facebook" && shape === "vertical") pinFacebookReel(video)
+  else if (skin === "instagram") pinInstagram(video)
+  else if (skin === "prime") pinPrime(video)
+  else if (skin === "hotstar" || skin === "netflix" || skin === "facebook") pinBottomRightCluster(video)
+  for (const node of packNodes.values()) {
+    if (!node.hidden) keepPackInside(node)
   }
-  if (skin === "instagram") {
-    pinInstagram(video)
-    return
-  }
-  if (skin === "prime") {
-    pinPrime(video)
-    return
-  }
-  if (skin === "hotstar" || skin === "netflix" || skin === "facebook") pinBottomRightCluster(video)
+}
+
+function nudgePack(pack: HTMLElement, prop: "top" | "bottom" | "left" | "right", delta: number): void {
+  if (!delta) return
+  const value = parseFloat(pack.style[prop])
+  if (!Number.isFinite(value)) return
+  pack.style[prop] = `${Math.round(value + delta)}px`
+}
+
+function keepPackInside(pack: HTMLElement): void {
+  const bar = root?.getBoundingClientRect()
+  if (!bar) return
+  const box = pack.getBoundingClientRect()
+  const pad = 8
+  let shiftX = 0
+  let shiftY = 0
+  if (box.left < bar.left + pad) shiftX = bar.left + pad - box.left
+  else if (box.right > bar.right - pad) shiftX = bar.right - pad - box.right
+  if (box.top < bar.top + pad) shiftY = bar.top + pad - box.top
+  else if (box.bottom > bar.bottom - pad) shiftY = bar.bottom - pad - box.bottom
+  if (!shiftX && !shiftY) return
+  nudgePack(pack, "top", shiftY)
+  nudgePack(pack, "bottom", -shiftY)
+  nudgePack(pack, "left", shiftX)
+  nudgePack(pack, "right", -shiftX)
+}
+
+function fitQualityPop(): void {
+  if (!qualityPop || !qualityAnchor || !root || qualityPop.dataset.open !== "true") return
+  const bar = root.getBoundingClientRect()
+  const pad = 6
+  const box = qualityPop.getBoundingClientRect()
+  if (box.left < bar.left + pad && qualityAnchor.dataset.out === "left") qualityAnchor.dataset.out = "down"
+  else if (box.right > bar.right - pad && qualityAnchor.dataset.out === "right") qualityAnchor.dataset.out = "down"
+  const placed = qualityPop.getBoundingClientRect()
+  if (placed.bottom > bar.bottom - pad && qualityAnchor.dataset.out !== "up") qualityAnchor.dataset.out = "up"
+  else if (placed.top < bar.top + pad && qualityAnchor.dataset.out !== "down") qualityAnchor.dataset.out = "down"
+  const next = qualityPop.getBoundingClientRect()
+  if (next.right > bar.right - pad) qualityAnchor.dataset.align = "end"
+  else if (next.left < bar.left + pad) qualityAnchor.dataset.align = "start"
 }
 
 function layoutControls(settings: EffectSettings): void {
@@ -1892,7 +2453,7 @@ function applyBarLayout(settings: EffectSettings): void {
   applyChromeSkin(boundVideo)
   root.dataset.progress = settings.dockProgress ? "true" : "false"
   root.dataset.buttons = hasDockButtons(settings) ? "true" : "false"
-  if (speedPop?.dataset.open === "true" || speedDrag) {
+  if (speedPop?.dataset.open === "true" || speedDrag || qualityPop?.dataset.open === "true") {
     alignSpeedCard()
     return
   }
@@ -1960,12 +2521,50 @@ function setIcon(button: HTMLButtonElement, name: string, html: string): void {
   button.innerHTML = html
 }
 
+function onEmptied(): void {
+  const video = boundVideo
+  if (!video || applyingQuality || holding(video)) return
+  if (directMediaUrl(video)) return
+  const remembered = rememberedSrc.get(video)
+  const assigned = video.src || ""
+  if (remembered && assigned && mediaPath(assigned) === mediaPath(remembered)) return
+  rememberedSrc.delete(video)
+  pinnedGroup.delete(video)
+  startedPath.delete(video)
+  paintControls()
+}
+
+function refreshStarted(video: HTMLVideoElement): void {
+  if ((video.currentTime || 0) > 0.45) return
+  const existing = startedPath.get(video)
+  const newest = recentPaths()[0]
+  if (!existing || !newest || newest === existing) return
+  const next = groupContainingPath(newest)
+  const prev = groupContainingPath(existing)
+  if (!next || next === prev) return
+  startedPath.delete(video)
+  pinnedGroup.delete(video)
+  qualityStamp = ""
+}
+
 function onTime(): void {
   updateFill()
   const video = boundVideo
   if (!video) return
   paintTime(video)
-  if (rateSource?.(video) === "hold") paintControls()
+  if (holding(video) && movedAway(video)) releaseQuality(video, true)
+  else refreshStarted(video)
+  if (rateSource?.(video) === "hold" || fileControlsChanged(video)) paintControls()
+}
+
+function fileControlsChanged(video: HTMLVideoElement): boolean {
+  const settings = readSettings()
+  if (!settings) return false
+  const downloadEl = controlNodes.get("download")
+  const qualityEl = controlNodes.get("quality")
+  const downloadOn = settings.dockDownload && fileForDownload(video) != null
+  const qualityOn = settings.dockQuality && qualityReady(video)
+  return (!!downloadEl && downloadEl.hidden === downloadOn) || (!!qualityEl && qualityEl.hidden === qualityOn)
 }
 
 function onMediaSignal(): void {
@@ -2027,6 +2626,17 @@ function ensureBar(): HTMLDivElement {
     <div class="vee-control" data-place="pip">
       <button type="button" class="vee-chrome-btn" data-act="pip" aria-label="Picture in picture">${ICON_PIP}</button>
     </div>
+    <div class="vee-control" data-place="download">
+      <button type="button" class="vee-chrome-btn" data-act="download" aria-label="Download">${ICON_DOWNLOAD}</button>
+    </div>
+    <div class="vee-control" data-place="quality">
+      <div class="vee-pop-anchor" data-act="quality" data-out="up">
+        <button type="button" class="vee-chrome-btn" data-act="quality-btn" aria-label="Resolution">${ICON_QUALITY}</button>
+        <div class="vee-pop vee-quality-pop" data-pop="quality">
+          <div class="vee-pop-card" data-act="quality-list"></div>
+        </div>
+      </div>
+    </div>
     <div class="vee-control" data-place="fullscreen">
       <button type="button" class="vee-chrome-btn" data-act="full" aria-label="Full screen">${ICON_FULL}</button>
     </div>
@@ -2059,6 +2669,11 @@ function ensureBar(): HTMLDivElement {
   volumeInput = node.querySelector(".vee-volume-pop input")
   loopBtn = node.querySelector("[data-act='loop']")
   pipBtn = node.querySelector("[data-act='pip']")
+  downloadBtn = node.querySelector("[data-act='download']")
+  qualityAnchor = node.querySelector("[data-act='quality']")
+  qualityBtn = node.querySelector("[data-act='quality-btn']")
+  qualityPop = node.querySelector("[data-pop='quality']")
+  qualityList = node.querySelector("[data-act='quality-list']")
   fullBtn = node.querySelector("[data-act='full']")
   for (const id of DOCK_ICON_ORDER) {
     const el = node.querySelector(`.vee-control[data-place='${id}']`)
@@ -2208,6 +2823,38 @@ function ensureBar(): HTMLDivElement {
     const video = boundVideo
     if (!video) return
     void togglePictureInPicture(video).catch(() => undefined)
+  })
+  downloadBtn?.addEventListener("click", (event) => {
+    stopAct(event)
+    void downloadCurrent()
+  })
+  const openQuality = () => {
+    cancelPopClose("quality")
+    if (qualityPop) qualityPop.dataset.open = "true"
+    showChrome()
+    requestAnimationFrame(fitQualityPop)
+  }
+  qualityAnchor?.addEventListener("pointerenter", openQuality)
+  qualityAnchor?.addEventListener("pointerleave", (event) => {
+    const next = event.relatedTarget
+    if (next instanceof Node && qualityAnchor?.contains(next)) return
+    armPopClose("quality")
+  })
+  qualityAnchor?.addEventListener("focusin", openQuality)
+  qualityAnchor?.addEventListener("focusout", () => armPopClose("quality"))
+  qualityBtn?.addEventListener("click", (event) => {
+    stopAct(event)
+    openQuality()
+  })
+  qualityList?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button") : null
+    if (!(button instanceof HTMLButtonElement)) return
+    stopAct(event)
+    const url = button.dataset.url
+    const video = boundVideo
+    if (!url || !video || !fileUrl(url)) return
+    applyQuality(video, url, button.dataset.audio || "")
+    if (qualityPop) delete qualityPop.dataset.open
   })
   fullBtn?.addEventListener("click", (event) => {
     event.stopPropagation()
@@ -2435,11 +3082,15 @@ function onPresentationChange(): void {
 
 function unbindVideo(video: HTMLVideoElement | null): void {
   if (!video) return
+  if (lockedVideo === video) releaseQuality(video, false)
+  startedPath.delete(video)
+  pinnedGroup.delete(video)
   video.removeEventListener("timeupdate", onTime)
   video.removeEventListener("progress", onTime)
   video.removeEventListener("durationchange", onTime)
   video.removeEventListener("loadedmetadata", onTime)
   video.removeEventListener("emptied", onTime)
+  video.removeEventListener("emptied", onEmptied)
   video.removeEventListener("volumechange", onMediaSignal)
   video.removeEventListener("ratechange", onMediaSignal)
   video.removeEventListener("play", onMediaSignal)
@@ -2452,6 +3103,7 @@ function bindVideo(video: HTMLVideoElement): void {
   video.addEventListener("durationchange", onTime)
   video.addEventListener("loadedmetadata", onTime)
   video.addEventListener("emptied", onTime)
+  video.addEventListener("emptied", onEmptied)
   video.addEventListener("volumechange", onMediaSignal)
   video.addEventListener("ratechange", onMediaSignal)
   video.addEventListener("play", onMediaSignal)
@@ -2596,9 +3248,11 @@ export function stopSeekBar(): void {
   document.removeEventListener("leavepictureinpicture", onPresentationChange)
   document.removeEventListener("fullscreenchange", onFullscreenCapture, true)
   document.removeEventListener("fullscreenchange", onPresentationChange)
+  window.removeEventListener("message", onRenditionMessage)
   window.clearTimeout(hotTimer)
   cancelPopClose("volume")
   cancelPopClose("speed")
+  cancelPopClose("quality")
   cancelVolumeApply()
   window.clearTimeout(speedApplyTimer)
   speedApplyTimer = 0
@@ -2639,7 +3293,20 @@ export function stopSeekBar(): void {
   volumeInput = null
   loopBtn = null
   pipBtn = null
+  downloadBtn = null
+  qualityAnchor = null
+  qualityBtn = null
+  qualityPop = null
+  qualityList = null
   fullBtn = null
+  downloadBusy = false
+  qualityToken = 0
+  qualityStamp = ""
+  renditionGroups = []
+  playedPaths = []
+  latestBatch = []
+  latestAt = 0
+  releaseQuality(lockedVideo, false)
   controlNodes.clear()
   packNodes.clear()
 }
@@ -2675,6 +3342,9 @@ export function startSeekBar(options: {
   document.addEventListener("leavepictureinpicture", onPresentationChange)
   document.addEventListener("fullscreenchange", onFullscreenCapture, true)
   document.addEventListener("fullscreenchange", onPresentationChange)
+  window.addEventListener("message", onRenditionMessage)
+  hookHistory()
+  postRenditionAsk()
   return {
     sync(video) {
       const read = getUiSettings ?? getSettings

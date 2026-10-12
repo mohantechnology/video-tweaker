@@ -1,3 +1,4 @@
+import { DOWNLOAD_MESSAGE, downloadFilename, fileUrl } from "~lib/media-file"
 import {
   AD_BLOCK_CANCELLED,
   AD_BLOCK_CHECK,
@@ -74,6 +75,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (type === AD_BLOCK_DISMISS) {
     void handleDismiss(host).then(sendResponse)
+    return true
+  }
+  if (type === DOWNLOAD_MESSAGE) {
+    const url = fileUrl(String((message as { url?: string }).url ?? ""))
+    const title = String((message as { title?: string }).title ?? "")
+    if (!url) {
+      sendResponse({ ok: false })
+      return
+    }
+    chrome.downloads.download(
+      { url, filename: downloadFilename(title, url), conflictAction: "uniquify" },
+      () => {
+        sendResponse({ ok: !chrome.runtime.lastError })
+      }
+    )
     return true
   }
   return

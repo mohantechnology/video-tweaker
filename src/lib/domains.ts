@@ -95,35 +95,43 @@ const INSTAGRAM_DOCK: DomainDockPreset = {
     dockTime: true,
     dockSpeed: true,
     dockSkip: true,
-    dockFullscreen: true
+    dockFullscreen: true,
+    dockDownload: true,
+    dockQuality: true
   },
   layout: {
     progress: PROGRESS_BOTTOM,
     time: at("bottom", "start"),
     speed: at("bottom", "start"),
     skip: at("bottom", "start"),
+    download: at("top", "end"),
+    quality: at("top", "end"),
     fullscreen: at("top", "end")
   },
-  order: ["time", "speed", "skip", "fullscreen"]
+  order: ["time", "speed", "skip", "download", "quality", "fullscreen"]
 }
 
 const FACEBOOK_LONG: DomainDockPreset = {
-  controls: { dockSpeed: true, dockLoop: true },
+  controls: { dockSpeed: true, dockLoop: true, dockDownload: true, dockQuality: true },
   layout: {
     speed: at("bottom", "end"),
-    loop: at("bottom", "end")
+    loop: at("bottom", "end"),
+    quality: at("bottom", "end"),
+    download: at("bottom", "end")
   },
-  order: ["speed", "loop"]
+  order: ["speed", "loop", "quality", "download"]
 }
 
 const FACEBOOK_VERTICAL: DomainDockPreset = {
-  controls: { dockTime: true, dockSpeed: true, dockFullscreen: true },
+  controls: { dockTime: true, dockSpeed: true, dockFullscreen: true, dockDownload: true, dockQuality: true },
   layout: {
     time: at("top", "center"),
     speed: at("right", "end"),
-    fullscreen: at("right", "end")
+    quality: at("right", "end"),
+    fullscreen: at("right", "end"),
+    download: at("right", "end")
   },
-  order: ["speed", "fullscreen", "time"],
+  order: ["speed", "quality", "fullscreen", "download", "time"],
   anchor: "facebook-search"
 }
 

@@ -8,6 +8,7 @@ import {
   ChevronsRight,
   Clock,
   Crop,
+  Download,
   FastForward,
   FlipHorizontal2,
   FlipVertical2,
@@ -20,6 +21,7 @@ import {
   Link2,
   Maximize2,
   Minus,
+  Monitor,
   Power,
   RotateCcw,
   SkipBack,
@@ -239,6 +241,18 @@ const DOCK_PICKS: {
     icon: PictureInPicture2
   },
   { key: "dockFullscreen", label: "Full", title: "Full screen on the video", icon: Maximize2 },
+  {
+    key: "dockDownload",
+    label: "Download",
+    title: "Save the video when its address is a normal file link",
+    icon: Download
+  },
+  {
+    key: "dockQuality",
+    label: "Resolution",
+    title: "Choose a resolution when the page already lists more than one",
+    icon: Monitor
+  },
   { key: "dockSkip", label: "Skip", title: "Skip back and forward 10 seconds on the video", icon: ChevronsRight }
 ]
 
@@ -253,6 +267,8 @@ const DOCK_PLACE_BY_KEY: Record<DockPickKey, DockPlaceId> = {
   dockLoop: "loop",
   dockPip: "pip",
   dockFullscreen: "fullscreen",
+  dockDownload: "download",
+  dockQuality: "quality",
   dockSkip: "skip"
 }
 
