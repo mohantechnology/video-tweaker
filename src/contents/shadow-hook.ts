@@ -7,7 +7,10 @@ import {
   postRenditionResult,
   QUALITY_MARK,
   readRenditionMessage,
+  RENDITION_PENDING_ATTR,
   RENDITION_SOURCE,
+  RENDITION_USE_EVENT,
+  USER_PAUSE_MARK,
   type Rendition,
   type RenditionMessage
 } from "~lib/renditions"
@@ -187,18 +190,28 @@ function absorbRenditions(found: Rendition[][]): void {
     if (!key) continue
     const previous = renditionCatalog.get(key)
     if (previous) {
+      const incomingTrack = group.find((item) => item.soundtrack || item.audioUrl)
+      const keptTrack = previous.find((item) => item.soundtrack || item.audioUrl)
+      const track = incomingTrack?.soundtrack || incomingTrack?.audioUrl || keptTrack?.soundtrack || keptTrack?.audioUrl
+      if (track) {
+        for (const item of group) if (!item.soundtrack) item.soundtrack = track
+        for (const item of previous) if (!item.soundtrack) item.soundtrack = track
+      }
       const richer =
         group.length > previous.length ||
         group.reduce((sum, item) => sum + (item.aliases?.length || 0), 0) >
           previous.reduce((sum, item) => sum + (item.aliases?.length || 0), 0)
       const incomingTitle = group.find((item) => item.title)?.title
       const keptTitle = previous.find((item) => item.title)?.title
+      const gainedTrack = Boolean(track) && !keptTrack
       if (richer) {
         if (keptTitle) for (const item of group) if (!item.title) item.title = keptTitle
         renditionCatalog.set(key, group)
         batch.push(group)
       } else if (incomingTitle && !keptTitle) {
         for (const item of previous) if (!item.title) item.title = incomingTitle
+        batch.push(previous)
+      } else if (gainedTrack) {
         batch.push(previous)
       }
       continue
@@ -262,8 +275,11 @@ function noteXhr(xhr: XMLHttpRequest): void {
   }
 }
 
-const PAINT_WAIT_MS = 2500
+const PAINT_WAIT_MS = 8000
 const REVEAL_HOLD_MS = 1200
+const nativePlay = HTMLMediaElement.prototype.play
+const nativePause = HTMLMediaElement.prototype.pause
+const nativeLoad = HTMLMediaElement.prototype.load
 
 type InlineStyle = { value: string; priority: string }
 
@@ -293,6 +309,14 @@ type QualityHold = {
   savedVisibility: InlineStyle
   onReady: () => void
   onError: () => void
+  guarding: boolean
+  armedAt: number
+  guardTimer: number
+  resumeTries: number
+  levelTries: number
+  onPause: () => void
+  onLevel: () => void
+  onPlaying: () => void
 }
 
 let hold: QualityHold | null = null
@@ -477,10 +501,88 @@ function placePlayback(next: QualityHold): void {
   } catch {
     /* Ignore a volume the element rejects. */
   }
-  if (!next.paused && !next.ended) void video.play().catch(() => undefined)
+  if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
+}
+
+function userPaused(next: QualityHold): boolean {
+  return next.video.getAttribute(USER_PAUSE_MARK) === "1"
+}
+
+function disarmPlaybackGuard(next: QualityHold): void {
+  if (!next.guarding && next.guardTimer === 0) return
+  next.guarding = false
+  window.clearTimeout(next.guardTimer)
+  next.guardTimer = 0
+  const video = next.video
+  video.removeEventListener("pause", next.onPause)
+  video.removeEventListener("volumechange", next.onLevel)
+  video.removeEventListener("playing", next.onPlaying)
+  if (video.dataset.veePauseGuard === "1") {
+    delete video.dataset.veePauseGuard
+    Reflect.deleteProperty(video, "pause")
+    Reflect.deleteProperty(video, "load")
+  }
+}
+
+/**
+ * Instagram pauses and mutes the element after a source change.
+ * Hold the chosen playback until the new file is actually playing.
+ */
+function armPlaybackGuard(next: QualityHold): void {
+  disarmPlaybackGuard(next)
+  const video = next.video
+  next.guarding = true
+  next.armedAt = performance.now()
+  next.resumeTries = 0
+  next.levelTries = 0
+  next.onPause = () => {
+    if (!next.guarding || next.paused || next.ended || userPaused(next)) return
+    if (next.resumeTries > 8) return
+    next.resumeTries += 1
+    void nativePlay.call(video).catch(() => undefined)
+  }
+  next.onLevel = () => {
+    if (!next.guarding || performance.now() - next.armedAt > 3000 || next.levelTries > 24) return
+    const mutedChanged = video.muted !== next.muted
+    const volumeChanged = Math.abs(video.volume - next.volume) > 0.02
+    if (!mutedChanged && !volumeChanged) return
+    next.levelTries += 1
+    video.muted = next.muted
+    try {
+      video.volume = next.volume
+    } catch {
+      /* Ignore a volume the element rejects. */
+    }
+  }
+  next.onPlaying = () => {
+    window.setTimeout(() => {
+      if (hold === next) disarmPlaybackGuard(next)
+    }, 2000)
+  }
+  video.addEventListener("pause", next.onPause)
+  video.addEventListener("volumechange", next.onLevel)
+  video.addEventListener("playing", next.onPlaying)
+  next.guardTimer = window.setTimeout(() => disarmPlaybackGuard(next), 8000)
+  if (video.dataset.veePauseGuard === "1") return
+  try {
+    video.pause = () => {
+      const active = hold?.video === video ? hold : null
+      if (active?.guarding && !active.paused && !active.ended && !userPaused(active)) return
+      nativePause.call(video)
+    }
+    video.load = () => {
+      const active = hold?.video === video ? hold : null
+      if (active?.guarding) return
+      nativeLoad.call(video)
+    }
+    video.dataset.veePauseGuard = "1"
+  } catch {
+    /* The player can already own these methods. The pause listener still resumes. */
+  }
 }
 
 function restoreSource(next: QualityHold, preferPending: boolean): void {
+  disarmPlaybackGuard(next)
   stopWatch(next)
   if (hold === next) hold = null
   next.video.removeAttribute(QUALITY_MARK)
@@ -499,7 +601,7 @@ function restoreSource(next: QualityHold, preferPending: boolean): void {
   } catch {
     /* The player can drop a source that is no longer current. */
   }
-  if (!next.paused && !next.ended) void video.play().catch(() => undefined)
+  if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
   const epoch = ++revealEpoch
   window.setTimeout(() => {
     if (epoch !== revealEpoch || hold) return
@@ -549,6 +651,14 @@ function useRendition(message: RenditionMessage): void {
     return
   }
   const audioUrl = message.audioUrl || ""
+  if (
+    hold?.video === video &&
+    !hold.settled &&
+    mediaPath(hold.url) === mediaPath(url) &&
+    hold.audioUrl === audioUrl
+  ) {
+    return
+  }
   if (hold?.video === video && hold.played && mediaPath(hold.url) === mediaPath(url) && hold.audioUrl === audioUrl) {
     postRenditionResult("used", token, url, audioUrl)
     return
@@ -562,9 +672,11 @@ function useRendition(message: RenditionMessage): void {
   if (previous) {
     previous.settled = true
     detachLoad(previous)
+    disarmPlaybackGuard(previous)
     stopWatch(previous)
     if (hold === previous) hold = null
   }
+  video.removeAttribute(USER_PAUSE_MARK)
   const next: QualityHold = {
     video,
     token,
@@ -590,7 +702,15 @@ function useRendition(message: RenditionMessage): void {
     savedOpacity: previous?.forcedOpacity ? previous.savedOpacity : inlineStyle(video, "opacity"),
     savedVisibility: previous?.forcedVisibility ? previous.savedVisibility : inlineStyle(video, "visibility"),
     onReady: () => undefined,
-    onError: () => undefined
+    onError: () => undefined,
+    guarding: false,
+    armedAt: 0,
+    guardTimer: 0,
+    resumeTries: 0,
+    levelTries: 0,
+    onPause: () => undefined,
+    onLevel: () => undefined,
+    onPlaying: () => undefined
   }
   let assigned = false
   next.onReady = () => {
@@ -617,6 +737,8 @@ function useRendition(message: RenditionMessage): void {
     assigned = true
     if (mediaSrc?.set) mediaSrc.set.call(video, url)
     else video.src = url
+    if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
+    armPlaybackGuard(next)
   } catch {
     settle(next, false)
   }
@@ -629,6 +751,7 @@ function dropRendition(message: RenditionMessage): void {
   detachLoad(next)
   const movedOn = pageMovedOn(next)
   if (message.restore === false || movedOn) {
+    disarmPlaybackGuard(next)
     stopWatch(next)
     hold = null
     next.video.removeAttribute(QUALITY_MARK)
@@ -663,6 +786,24 @@ function installRenditionWatch(): void {
 }
 
 installRenditionWatch()
+
+function readPendingRendition(): RenditionMessage | null {
+  const root = document.documentElement
+  if (!root) return null
+  const raw = root.getAttribute(RENDITION_PENDING_ATTR)
+  if (!raw) return null
+  root.removeAttribute(RENDITION_PENDING_ATTR)
+  try {
+    return readRenditionMessage(JSON.parse(raw) as unknown)
+  } catch {
+    return null
+  }
+}
+
+window.addEventListener(RENDITION_USE_EVENT, () => {
+  const message = readPendingRendition()
+  if (message?.kind === "use") useRendition(message)
+})
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return

@@ -14,6 +14,7 @@ import {
   qualityLabel,
   readRenditionMessage,
   sortRenditions,
+  USER_PAUSE_MARK,
   type Rendition,
   type RenditionMessage
 } from "./renditions"
@@ -43,6 +44,7 @@ const POP_CLOSE_MS = 220
 const SPEED_STEP = 0.01
 const SPEED_CHIPS = [1, 1.25, 1.5, 2, 3, 4] as const
 const FS_SHELL_ID = "vee-fs-shell"
+const QUALITY_WAIT_ID = "vee-quality-wait"
 const DOCK_HOST_ID = "vee-csui"
 const SKIP_SECONDS = 10
 
@@ -718,12 +720,47 @@ const BAR_STYLE = `
   right: 176px;
   bottom: 14px;
 }
+#${QUALITY_WAIT_ID} {
+  position: fixed;
+  z-index: ${Z_INDEX - 1};
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+#${QUALITY_WAIT_ID} .vee-wait-spin {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.28);
+  border-top-color: #fff;
+  animation: vee-wait-spin 0.7s linear infinite;
+}
+@keyframes vee-wait-spin {
+  to { transform: rotate(360deg); }
+}
 @media (prefers-reduced-motion: reduce) {
   #${SEEK_BAR_ID},
   #${SEEK_BAR_ID} .vee-seek-track,
   #${SEEK_BAR_ID} .vee-seek-tip,
   #${SEEK_BAR_ID} .vee-pop {
     transition: none;
+  }
+  #${QUALITY_WAIT_ID} .vee-wait-spin {
+    animation: none;
+    border-color: rgba(255, 255, 255, 0.85);
   }
 }
 `
@@ -846,6 +883,15 @@ let lockedAudio = ""
 let lockedCode = ""
 let applyingQuality = false
 let historyHooked = false
+let audioEpoch = 0
+let audioClean: (() => void) | null = null
+let soundtrackLevel = { muted: false, volume: 1 }
+let soundtrackReady = true
+let waitEpoch = 0
+let waitFrame = 0
+let waitTimer = 0
+let waitClose: (() => void) | null = null
+let waitClean: (() => void) | null = null
 
 type FsSession = {
   video: HTMLVideoElement
@@ -1662,7 +1708,7 @@ function paintQuality(video: HTMLVideoElement): void {
     const label = active ? qualityLabel(active, choices) : "Resolution"
     qualityBtn.setAttribute("aria-label", active ? `Resolution ${label}` : "Resolution")
   }
-  const stamp = `${choices.map((item) => `${item.height}:${item.width}:${item.url}:${item.audioUrl || ""}`).join("|")}#${currentPath}`
+  const stamp = `${choices.map((item) => `${item.height}:${item.width}:${item.url}:${item.audioUrl || ""}:${item.soundtrack || ""}`).join("|")}#${currentPath}`
   if (!qualityList || stamp === qualityStamp) return
   qualityStamp = stamp
   qualityList.replaceChildren()
@@ -1670,7 +1716,8 @@ function paintQuality(video: HTMLVideoElement): void {
     const button = document.createElement("button")
     button.type = "button"
     button.dataset.url = item.url
-    if (item.audioUrl) button.dataset.audio = item.audioUrl
+    const audio = item.audioUrl || item.soundtrack || ""
+    if (audio) button.dataset.audio = audio
     button.textContent = qualityLabel(item, choices)
     button.dataset.on = String(mediaPath(item.url) === currentPath)
     qualityList.appendChild(button)
@@ -1707,6 +1754,7 @@ function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void 
   lockedCode = ""
   lockedVideo = null
   applyingQuality = false
+  hideQualityWait()
   clearSidecar(video || was)
   const node = video || was
   if (node) node.removeAttribute(QUALITY_MARK)
@@ -1719,12 +1767,16 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   const audio = document.createElement("audio")
   audio.preload = "auto"
   audio.setAttribute("data-vee-audio", "1")
+  audio.setAttribute("aria-hidden", "true")
+  audio.style.cssText = "position:fixed;width:0;height:0;opacity:0;pointer-events:none"
+  document.documentElement.appendChild(audio)
   sidecars.set(video, audio)
   const follow = () => {
     if (!lockedAudio || lockedVideo !== video) return
+    audio.playbackRate = video.playbackRate || 1
+    if (audio.dataset.veeHoldMute === "1") return
     audio.muted = video.muted
     audio.volume = video.volume
-    audio.playbackRate = video.playbackRate || 1
   }
   video.addEventListener("play", () => {
     follow()
@@ -1742,6 +1794,15 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
     }
   })
   video.addEventListener("ended", () => audio.pause())
+  audio.addEventListener("loadedmetadata", () => {
+    if (lockedVideo !== video || !lockedAudio) return
+    try {
+      const at = video.currentTime || 0
+      if (at > 0) audio.currentTime = at
+    } catch {
+      /* The soundtrack can reject a seek until it has metadata. */
+    }
+  })
   video.addEventListener("timeupdate", () => {
     if (!lockedAudio || lockedVideo !== video || video.paused) return
     if (Math.abs((audio.currentTime || 0) - (video.currentTime || 0)) > 0.35) {
@@ -1755,26 +1816,15 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   return audio
 }
 
-function setSidecar(video: HTMLVideoElement, audioUrl: string): void {
-  const audio = ensureSidecar(video)
-  lockedAudio = audioUrl
-  if (!audio.src || mediaPath(audio.src) !== mediaPath(audioUrl)) audio.src = audioUrl
-  audio.muted = video.muted
-  audio.volume = video.volume
-  audio.playbackRate = video.playbackRate || 1
-  try {
-    if ((video.currentTime || 0) > 0) audio.currentTime = video.currentTime
-  } catch {
-    /* Metadata for the soundtrack may arrive after the picture. */
-  }
-  if (!video.paused && !video.ended) void audio.play().catch(() => undefined)
-}
-
 function clearSidecar(video: HTMLVideoElement | null): void {
+  audioEpoch += 1
+  audioClean?.()
+  audioClean = null
   lockedAudio = ""
   if (!video) return
   const audio = sidecars.get(video)
   if (!audio) return
+  delete audio.dataset.veeHoldMute
   audio.pause()
   audio.removeAttribute("src")
   try {
@@ -1782,6 +1832,257 @@ function clearSidecar(video: HTMLVideoElement | null): void {
   } catch {
     /* Detaching the soundtrack can throw if the element is gone. */
   }
+}
+
+type ProbedVideo = HTMLVideoElement & {
+  mozHasAudio?: boolean
+  webkitAudioDecodedByteCount?: number
+  audioTracks?: { length: number }
+}
+
+function noteAudioReady(): void {
+  soundtrackReady = true
+  waitClose?.()
+}
+
+/**
+ * Instagram's quality files are often video-only. Play the separate soundtrack
+ * with the picture, and drop it if this file already contains audio.
+ */
+function beginSoundtrack(
+  video: HTMLVideoElement,
+  audioUrl: string,
+  wantPlay: boolean,
+  at: number,
+  muted = video.muted,
+  volume = video.volume
+): void {
+  soundtrackLevel = { muted, volume }
+  const audio = ensureSidecar(video)
+  const same =
+    lockedAudio === audioUrl &&
+    Boolean(audio.src) &&
+    mediaPath(audio.src) === mediaPath(audioUrl) &&
+    audio.dataset.veeHoldMute !== "1"
+  lockedAudio = audioUrl
+  if (same) {
+    try {
+      if (at > 0) audio.currentTime = at
+    } catch {
+      /* Metadata for the soundtrack may arrive after the picture. */
+    }
+    audio.muted = muted
+    audio.volume = volume
+    audio.playbackRate = video.playbackRate || 1
+    if (wantPlay) void audio.play().catch(() => undefined)
+    noteAudioReady()
+    return
+  }
+  const epoch = ++audioEpoch
+  soundtrackReady = false
+  if (!audio.src || mediaPath(audio.src) !== mediaPath(audioUrl)) audio.src = audioUrl
+  audio.playbackRate = video.playbackRate || 1
+  audio.volume = volume
+  const audible = !muted && volume > 0.001
+  audio.muted = !audible
+  try {
+    if (at > 0) audio.currentTime = at
+  } catch {
+    /* Metadata for the soundtrack may arrive after the picture. */
+  }
+  if (wantPlay) void audio.play().catch(() => undefined)
+  audio.dataset.veeHoldMute = "1"
+  if (audible) {
+    queueMicrotask(() => {
+      if (epoch !== audioEpoch || audio.dataset.veeHoldMute !== "1") return
+      audio.muted = true
+    })
+  }
+  const alive = () => epoch === audioEpoch && lockedVideo === video && lockedAudio === audioUrl
+  let baseBytes = 0
+  let sawMetadata = false
+  let metaEvent = false
+  let sawPlaying = false
+  const bytes = () => {
+    const count = (video as ProbedVideo).webkitAudioDecodedByteCount
+    return typeof count === "number" ? count : 0
+  }
+  const pictureAudio = (): boolean | null => {
+    if (!sawMetadata) return null
+    if (metaEvent) {
+      const moz = (video as ProbedVideo).mozHasAudio
+      if (typeof moz === "boolean") return moz
+    }
+    const tracks = (video as ProbedVideo).audioTracks
+    if (tracks && tracks.length > 0) return true
+    const now = bytes()
+    if (now > baseBytes) return true
+    if (baseBytes > 0 && now > 0 && now < baseBytes) return true
+    return null
+  }
+  const finish = (hasPictureAudio: boolean) => {
+    if (!alive()) return
+    audioEpoch += 1
+    cleanup()
+    delete audio.dataset.veeHoldMute
+    if (hasPictureAudio) {
+      clearSidecar(video)
+      noteAudioReady()
+      return
+    }
+    if (video.muted !== muted) video.muted = muted
+    try {
+      if (Math.abs(video.volume - volume) > 0.02) video.volume = volume
+    } catch {
+      /* Ignore a volume the element rejects. */
+    }
+    audio.muted = muted
+    audio.volume = volume
+    try {
+      const time = video.currentTime || 0
+      if (time > 0) audio.currentTime = time
+    } catch {
+      /* The soundtrack can reject a seek until it has metadata. */
+    }
+    if (video.getAttribute(USER_PAUSE_MARK) !== "1" && !video.ended && (wantPlay || !video.paused)) {
+      void audio.play().catch(() => undefined)
+    }
+    noteAudioReady()
+  }
+  const consider = (force: boolean) => {
+    if (!alive()) return
+    const known = pictureAudio()
+    if (known === true) {
+      finish(true)
+      return
+    }
+    const playingNow = !video.paused && !video.ended && video.readyState >= 2
+    if (known === false || (force && sawMetadata && (sawPlaying || playingNow))) finish(false)
+  }
+  const onMeta = () => {
+    if (!alive()) return
+    const live = video.currentSrc || video.src || ""
+    if (lockedUrl && mediaPath(live) !== mediaPath(lockedUrl)) return
+    metaEvent = true
+    sawMetadata = true
+    baseBytes = bytes()
+    consider(false)
+  }
+  let playingTimer = 0
+  const onPlaying = () => {
+    if (!alive()) return
+    sawPlaying = true
+    playingTimer = window.setTimeout(() => consider(true), 450)
+  }
+  const onError = () => {
+    if (!alive() || audio.error?.code === MediaError.MEDIA_ERR_ABORTED) return
+    clearSidecar(video)
+    noteAudioReady()
+  }
+  let cleaned = false
+  const probeTimer = window.setTimeout(() => consider(true), 2500)
+  function cleanup(): void {
+    if (cleaned) return
+    cleaned = true
+    window.clearTimeout(probeTimer)
+    window.clearTimeout(playingTimer)
+    video.removeEventListener("loadedmetadata", onMeta)
+    video.removeEventListener("playing", onPlaying)
+    audio.removeEventListener("error", onError)
+    if (audioClean === cleanup) audioClean = null
+  }
+  audioClean = cleanup
+  video.addEventListener("loadedmetadata", onMeta)
+  video.addEventListener("playing", onPlaying)
+  audio.addEventListener("error", onError)
+  const liveNow = video.currentSrc || video.src || ""
+  if (video.readyState >= 1 && (!lockedUrl || mediaPath(liveNow) === mediaPath(lockedUrl))) {
+    sawMetadata = true
+    baseBytes = bytes()
+  }
+  if (!video.paused && !video.ended && video.readyState >= 2) {
+    sawPlaying = true
+    playingTimer = window.setTimeout(() => consider(true), 450)
+  }
+}
+
+function hideQualityWait(): void {
+  waitEpoch += 1
+  waitClose = null
+  waitClean?.()
+  waitClean = null
+  if (waitFrame) cancelAnimationFrame(waitFrame)
+  waitFrame = 0
+  if (waitTimer) window.clearTimeout(waitTimer)
+  waitTimer = 0
+  document.getElementById(QUALITY_WAIT_ID)?.remove()
+}
+
+function showQualityWait(video: HTMLVideoElement, wantPlay: boolean, waitForAudio: boolean): void {
+  hideQualityWait()
+  if (!waitForAudio) soundtrackReady = true
+  const epoch = waitEpoch
+  ensureStyle()
+  const node = document.createElement("div")
+  node.id = QUALITY_WAIT_ID
+  node.setAttribute("role", "status")
+  node.setAttribute("aria-live", "polite")
+  node.setAttribute("aria-label", "Loading")
+  node.innerHTML = '<div class="vee-wait-spin"></div><span>Loading</span>'
+  document.documentElement.appendChild(node)
+  const place = () => {
+    if (epoch !== waitEpoch) return
+    const overlay = document.getElementById(QUALITY_WAIT_ID)
+    if (!overlay || !video.isConnected) {
+      hideQualityWait()
+      return
+    }
+    const rect = video.getBoundingClientRect()
+    overlay.style.left = `${rect.left}px`
+    overlay.style.top = `${rect.top}px`
+    overlay.style.width = `${rect.width}px`
+    overlay.style.height = `${rect.height}px`
+    waitFrame = requestAnimationFrame(place)
+  }
+  place()
+  let pictureReady = false
+  const close = () => {
+    if (epoch !== waitEpoch || !soundtrackReady || !pictureReady) return
+    hideQualityWait()
+  }
+  waitClose = close
+  const markReady = () => {
+    if (epoch !== waitEpoch) return
+    const live = video.currentSrc || video.src || ""
+    if (!lockedUrl || mediaPath(live) !== mediaPath(lockedUrl)) return
+    const userPaused = video.getAttribute(USER_PAUSE_MARK) === "1"
+    if (video.readyState < 2) return
+    if (wantPlay && !userPaused && (video.paused || video.ended)) return
+    pictureReady = true
+    close()
+  }
+  video.addEventListener("playing", markReady)
+  video.addEventListener("canplay", markReady)
+  video.addEventListener("seeked", markReady)
+  waitClean = () => {
+    video.removeEventListener("playing", markReady)
+    video.removeEventListener("canplay", markReady)
+    video.removeEventListener("seeked", markReady)
+  }
+  waitTimer = window.setTimeout(() => {
+    if (epoch !== waitEpoch) return
+    const audio = sidecars.get(video)
+    if (audio?.dataset.veeHoldMute === "1" && lockedAudio) {
+      delete audio.dataset.veeHoldMute
+      audio.muted = soundtrackLevel.muted
+      audio.volume = soundtrackLevel.volume
+      if (wantPlay) void audio.play().catch(() => undefined)
+    }
+    soundtrackReady = true
+    pictureReady = true
+    hideQualityWait()
+  }, 12000)
+  markReady()
 }
 
 function hookHistory(): void {
@@ -1802,27 +2103,36 @@ function hookHistory(): void {
 function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void {
   const live = video.currentSrc || video.src
   if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl && lockedVideo === video) return
+  const wantPlay = !video.paused && !video.ended
+  const time = video.currentTime || 0
+  const muted = video.muted
+  const volume = video.volume
+  const rate = video.playbackRate || 1
   const token = String(++qualityToken)
   qualityNonce = token
   video.setAttribute(QUALITY_MARK, token)
+  video.removeAttribute(USER_PAUSE_MARK)
   rememberedSrc.set(video, url)
   startedPath.set(video, mediaPath(url))
   lockedVideo = video
   lockedUrl = url
   lockedCode = mediaCode(video)
   applyingQuality = true
-  clearSidecar(video)
   postRenditionUse({
     token,
     url,
     audioUrl,
-    time: video.currentTime || 0,
-    paused: video.paused,
+    time,
+    paused: !wantPlay,
     ended: video.ended,
-    rate: video.playbackRate || 1,
-    muted: video.muted,
-    volume: video.volume
+    rate,
+    muted,
+    volume
   })
+  if (wantPlay) void video.play().catch(() => undefined)
+  if (audioUrl) beginSoundtrack(video, audioUrl, wantPlay, time, muted, volume)
+  else clearSidecar(video)
+  showQualityWait(video, wantPlay, Boolean(audioUrl) && wantPlay)
 }
 
 function onQualityResult(message: RenditionMessage): void {
@@ -1839,12 +2149,14 @@ function onQualityResult(message: RenditionMessage): void {
     lockedAudio = ""
     lockedCode = ""
     lockedVideo = null
+    hideQualityWait()
     clearSidecar(video)
     paintControls()
     return
   }
-  if (video && message.audioUrl) setSidecar(video, message.audioUrl)
-  else clearSidecar(video)
+  if (video && message.audioUrl && lockedAudio !== message.audioUrl) {
+    beginSoundtrack(video, message.audioUrl, !video.paused && !video.ended, video.currentTime || 0)
+  }
   paintControls()
 }
 
@@ -2722,8 +3034,13 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     const video = boundVideo
     if (!video) return
-    if (video.paused || video.ended) void video.play().catch(() => undefined)
-    else video.pause()
+    if (video.paused || video.ended) {
+      video.removeAttribute(USER_PAUSE_MARK)
+      void video.play().catch(() => undefined)
+    } else {
+      video.setAttribute(USER_PAUSE_MARK, "1")
+      video.pause()
+    }
   })
   backBtn?.addEventListener("click", (event) => {
     stopAct(event)

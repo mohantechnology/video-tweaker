@@ -3,6 +3,15 @@ import { fileUrl, mediaPath } from "./media-file"
 /** Page event carrying renditions Instagram already loaded. */
 export const RENDITION_SOURCE = "vee-renditions"
 
+/** Synchronous swap. postMessage runs too late to start playback in the click. */
+export const RENDITION_USE_EVENT = "vee-rendition-use"
+
+/** Attribute holding the swap the synchronous event should apply. */
+export const RENDITION_PENDING_ATTR = "data-vee-rendition"
+
+/** Set before a user pause so a resolution swap does not resume over it. */
+export const USER_PAUSE_MARK = "data-vee-user-pause"
+
 /** Marks the video element a resolution swap should use. */
 export const QUALITY_MARK = "data-vee-quality"
 
@@ -16,6 +25,11 @@ export type Rendition = {
   measured?: boolean
   /** Soundtrack file when `url` is a video-only rendition. */
   audioUrl?: string
+  /**
+   * Shared soundtrack for this picture.
+   * Present even when `url` might already include audio, so playback can probe.
+   */
+  soundtrack?: string
   /** Other addresses for this same picture, such as a video-only DASH file. */
   aliases?: string[]
   /** Length in seconds, used to tell one post from another. */
@@ -109,22 +123,25 @@ export function postRenditionUse(body: {
   muted: boolean
   volume: number
 }): void {
-  window.postMessage(
-    {
-      source: RENDITION_SOURCE,
-      kind: "use",
-      token: body.token,
-      url: body.url,
-      audioUrl: body.audioUrl || undefined,
-      time: body.time,
-      paused: body.paused,
-      ended: body.ended,
-      rate: body.rate,
-      muted: body.muted,
-      volume: body.volume
-    } satisfies RenditionMessage,
-    "*"
-  )
+  const message = {
+    source: RENDITION_SOURCE,
+    kind: "use",
+    token: body.token,
+    url: body.url,
+    audioUrl: body.audioUrl || undefined,
+    time: body.time,
+    paused: body.paused,
+    ended: body.ended,
+    rate: body.rate,
+    muted: body.muted,
+    volume: body.volume
+  } satisfies RenditionMessage
+  const root = document.documentElement
+  if (root) {
+    root.setAttribute(RENDITION_PENDING_ATTR, JSON.stringify(message))
+    window.dispatchEvent(new Event(RENDITION_USE_EVENT))
+  }
+  window.postMessage(message, "*")
 }
 
 export function postRenditionDrop(token: string, restore: boolean): void {
@@ -173,6 +190,7 @@ export function sanitizeGroups(value: unknown): Rendition[][] {
       if (rendition) items.push(rendition)
     }
     const unique = dedupe(items)
+    shareSoundtrack(unique)
     if (unique.length) groups.push(unique)
   }
   return groups
@@ -235,6 +253,7 @@ function asRendition(value: unknown): Rendition | null {
   const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : undefined
   const measured = raw.measured === false ? false : raw.measured === true || (label == null && width > 0 && height > 0)
   const audio = fileUrl(typeof raw.audioUrl === "string" ? raw.audioUrl : "")
+  const soundtrack = fileUrl(typeof raw.soundtrack === "string" ? raw.soundtrack : "")
   const duration = dimension(raw.duration)
   const aliases = Array.isArray(raw.aliases)
     ? raw.aliases
@@ -249,6 +268,7 @@ function asRendition(value: unknown): Rendition | null {
     label,
     measured,
     audioUrl: audio || undefined,
+    soundtrack: soundtrack || audio || undefined,
     aliases: aliases && aliases.length ? aliases : undefined,
     duration: duration > 0 ? duration : undefined,
     title: cleanTitle(raw.title)
@@ -294,15 +314,36 @@ function facebookGroups(text: string): Rendition[][] {
 }
 
 function dedupe(items: Rendition[]): Rendition[] {
-  const seen = new Set<string>()
+  const seen = new Map<string, Rendition>()
   const next: Rendition[] = []
   for (const item of items) {
+    if (item.audioUrl && !item.soundtrack) item.soundtrack = item.audioUrl
     const key = `${item.width}x${item.height}:${mediaPath(item.url)}`
-    if (seen.has(key)) continue
-    seen.add(key)
+    const existing = seen.get(key)
+    if (existing) {
+      if (item.audioUrl && !existing.audioUrl) existing.audioUrl = item.audioUrl
+      if (item.soundtrack && !existing.soundtrack) existing.soundtrack = item.soundtrack
+      continue
+    }
+    seen.set(key, item)
     next.push(item)
   }
   return next
+}
+
+function soundtrackOf(items: readonly Rendition[]): string {
+  for (const item of items) {
+    if (item.soundtrack) return item.soundtrack
+    if (item.audioUrl) return item.audioUrl
+  }
+  return ""
+}
+
+/** One soundtrack covers every quality of the same picture. */
+function shareSoundtrack(items: Rendition[]): void {
+  const track = soundtrackOf(items)
+  if (!track) return
+  for (const item of items) if (!item.soundtrack) item.soundtrack = track
 }
 
 function matchBracket(text: string, start: number): number {
@@ -542,7 +583,9 @@ function renditionsOn(record: Record<string, unknown>): Rendition[] {
     for (const item of merged) if (!item.duration) item.duration = duration
   }
   stampTitle(merged, captionOn(record))
-  return dedupe(merged)
+  const unique = dedupe(merged)
+  shareSoundtrack(unique)
+  return unique
 }
 
 function progressiveRendition(value: unknown): Rendition | null {
@@ -606,6 +649,9 @@ function rememberAlias(item: Rendition, url: string): void {
 
 /** Keep a muxed progressive file ahead of a video-only DASH address for the same picture. */
 function preferPlayable(same: Rendition, item: Rendition): void {
+  const track = item.soundtrack || item.audioUrl
+  if (track && !same.soundtrack) same.soundtrack = track
+  if (same.audioUrl && !same.soundtrack) same.soundtrack = same.audioUrl
   if (mediaPath(same.url) === mediaPath(item.url)) {
     if (item.audioUrl && !same.audioUrl) same.audioUrl = item.audioUrl
     for (const alias of item.aliases || []) rememberAlias(same, alias)
@@ -633,7 +679,9 @@ function mergeRenditions(muxed: Rendition[], dashed: Rendition[]): Rendition[] {
     }
     preferPlayable(same, item)
   }
-  return dedupe(next)
+  const unique = dedupe(next)
+  shareSoundtrack(unique)
+  return unique
 }
 
 function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
@@ -653,10 +701,8 @@ function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
     for (const block of set.split(/<Representation\b/i).slice(1)) {
       const close = block.search(/<\/Representation>/i)
       const body = close >= 0 ? block.slice(0, close) : block.slice(0, 4000)
-      if (/<SegmentTemplate\b/i.test(body) || /<SegmentList\b/i.test(body)) continue
-      const base = /<BaseURL[^>]*>\s*(?:<!\[CDATA\[)?\s*([^<]+?)\s*(?:\]\]>)?\s*<\/BaseURL>/i.exec(body)
-      if (!base) continue
-      const url = fileUrl(decodeXml(base[1].trim()))
+      if (/<SegmentList\b/i.test(body)) continue
+      const url = representationUrl(body)
       if (!url) continue
       const tagEnd = body.indexOf(">")
       const tag = tagEnd >= 0 ? body.slice(0, tagEnd) : body.slice(0, 500)
@@ -696,6 +742,16 @@ function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
   return { videos: dedupe(videos), audioUrl }
 }
 
+function representationUrl(body: string): string {
+  const base = /<BaseURL[^>]*>\s*(?:<!\[CDATA\[)?\s*([^<]+?)\s*(?:\]\]>)?\s*<\/BaseURL>/i.exec(body)
+  if (base) return fileUrl(decodeXml(base[1].trim())) || ""
+  const template = /<SegmentTemplate\b([^>]*)>/i.exec(body)
+  if (!template) return ""
+  const media = attr(template[1], "media") || attr(template[1], "initialization")
+  if (!media || media.includes("$")) return ""
+  return fileUrl(decodeXml(media)) || ""
+}
+
 function attr(tag: string, name: string): string {
   const match = new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, "i").exec(tag)
   return match ? decodeXml(match[2]) : ""
@@ -716,7 +772,9 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
     const paths = new Set(group.map((item) => mediaPath(item.url)))
     const host = found.find((existing) => existing.some((item) => paths.has(mediaPath(item.url))))
     if (!host) {
-      found.push(dedupe(group))
+      const unique = dedupe(group)
+      shareSoundtrack(unique)
+      found.push(unique)
       continue
     }
     stampTitle(host, group.find((item) => item.title)?.title)
@@ -728,6 +786,7 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
       }
       host.push(item)
     }
+    shareSoundtrack(host)
   }
 }
 
