@@ -18,10 +18,13 @@ import {
   type PresetSnapshot,
   type UserPreset
 } from "./presets"
+import { domainDockDefaults } from "./domains"
 import {
   DOCK_CONTROL_KEYS,
   clampHoldPlaybackRate,
+  clampResumeLead,
   defaultSettings,
+  resolveDockLayout,
   type DockAlign,
   type EffectSettings
 } from "./types"
@@ -60,11 +63,12 @@ function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
 }
 
-export function normalizeSettings(value: unknown): EffectSettings {
+export function normalizeSettings(value: unknown, hostname = ""): EffectSettings {
   const defaults = defaultSettings()
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
   const next: EffectSettings = { ...defaults }
   for (const key of Object.keys(defaults) as (keyof EffectSettings)[]) {
+    if (key === "dockLayout") continue
     const field = raw[key]
     if (typeof field !== typeof defaults[key]) continue
     if (typeof field === "number" && !Number.isFinite(field)) continue
@@ -94,8 +98,16 @@ export function normalizeSettings(value: unknown): EffectSettings {
       next.muted !== defaults.muted || Math.abs(next.volume - defaults.volume) > 0.005
   }
   if (!isDockAlign(raw.dockAlign)) next.dockAlign = "left"
+  next.resumeLeadSeconds = clampResumeLead(next.resumeLeadSeconds)
+  next.dockLayout = resolveDockLayout(
+    raw.dockLayout,
+    next.dockAlign,
+    hostname ? domainDockDefaults(hostname) : {}
+  )
   // Older saves used one switch for the whole bar. On kept the button picks.
   // Off meant nothing was on the video, so the picks match that.
+  // Missing means the on-video controls stay available.
+  if (typeof raw.dockEnabled !== "boolean") next.dockEnabled = true
   if (typeof raw.dockProgress !== "boolean") {
     const barOn = raw.showNativeControls === true
     next.dockProgress = barOn
@@ -110,10 +122,16 @@ function isDockAlign(value: unknown): value is DockAlign {
   return value === "left" || value === "center" || value === "right"
 }
 
+export function defaultSettingsFor(hostname: string): EffectSettings {
+  const next = defaultSettings()
+  next.dockLayout = resolveDockLayout(undefined, next.dockAlign, domainDockDefaults(hostname))
+  return next
+}
+
 export async function loadSiteSettings(hostname: string): Promise<EffectSettings> {
   const key = siteStorageKey(hostname)
   const bag = await chrome.storage.local.get(key)
-  return normalizeSettings(bag[key])
+  return normalizeSettings(bag[key], hostname)
 }
 
 /** Saved site record, or null when this domain has never been edited. */
@@ -121,7 +139,7 @@ export async function loadStoredSiteSettings(hostname: string): Promise<EffectSe
   const key = siteStorageKey(hostname)
   const bag = await chrome.storage.local.get(key)
   if (bag[key] == null) return null
-  return normalizeSettings(bag[key])
+  return normalizeSettings(bag[key], hostname)
 }
 
 export async function saveSiteSettings(
@@ -154,21 +172,28 @@ export async function loadGlobalPreset(): Promise<GlobalPreset | null> {
 }
 
 /** Defaults, with the global preset applied when one is stored. Does not write storage. */
-export function settingsFromGlobalPreset(preset: GlobalPreset | null): EffectSettings {
-  if (!preset) return normalizeSettings({ ...defaultSettings(), presetId: "" })
-  return normalizeSettings({
-    ...defaultSettings(),
-    ...preset.snapshot,
-    presetId: preset.presetId,
-    playbackTouched: true
-  })
+export function settingsFromGlobalPreset(
+  preset: GlobalPreset | null,
+  hostname = ""
+): EffectSettings {
+  const base = hostname ? defaultSettingsFor(hostname) : defaultSettings()
+  if (!preset) return normalizeSettings({ ...base, presetId: "" }, hostname)
+  return normalizeSettings(
+    {
+      ...base,
+      ...preset.snapshot,
+      presetId: preset.presetId,
+      playbackTouched: true
+    },
+    hostname
+  )
 }
 
 /** Stored site settings, or the in-memory global preset when this domain has no record. */
 export async function loadEffectiveSiteSettings(hostname: string): Promise<EffectSettings> {
   const stored = await loadStoredSiteSettings(hostname)
   if (stored) return stored
-  return settingsFromGlobalPreset(await loadGlobalPreset())
+  return settingsFromGlobalPreset(await loadGlobalPreset(), hostname)
 }
 
 /**
@@ -193,13 +218,17 @@ export async function saveGlobalPreset(preset: GlobalPreset): Promise<void> {
   const updates: Record<string, unknown> = { [GLOBAL_PRESET_KEY]: stored }
   for (const [key, value] of Object.entries(bag)) {
     if (!key.startsWith(SITE_KEY_PREFIX)) continue
-    const current = normalizeSettings(value)
-    updates[key] = normalizeSettings({
-      ...current,
-      ...stored.snapshot,
-      presetId: stored.presetId,
-      playbackTouched: true
-    })
+    const hostname = key.slice(SITE_KEY_PREFIX.length)
+    const current = normalizeSettings(value, hostname)
+    updates[key] = normalizeSettings(
+      {
+        ...current,
+        ...stored.snapshot,
+        presetId: stored.presetId,
+        playbackTouched: true
+      },
+      hostname
+    )
   }
   await chrome.storage.local.set(updates)
 }

@@ -1,4 +1,5 @@
 import { registrableDomain } from "./host"
+import type { ControlLayout, DockPlaceId } from "./types"
 
 export type DomainProfile = {
   domains: string[]
@@ -12,6 +13,8 @@ export type DomainProfile = {
    * and the extension will not save or seek a timestamp there.
    */
   skipResume?: boolean
+  /** Placement used until this site saves its own position for that control. */
+  dock?: Partial<ControlLayout>
 }
 
 /**
@@ -27,6 +30,14 @@ export const DOMAIN_PROFILES: DomainProfile[] = [
   {
     domains: ["hotstar.com"]
     // skipResume: later — Hotstar saves the resume point itself.
+  },
+  {
+    domains: ["instagram.com"],
+    dock: {
+      fullscreen: { edge: "right", slot: "center", x: 92, y: 50 },
+      progress: { edge: "bottom", slot: "start", x: 0, y: 100 },
+      time: { edge: "bottom", slot: "start", x: 8, y: 90 }
+    }
   }
 ]
 
@@ -54,4 +65,8 @@ export function readPageTitle(): string {
 
 export function siteSkipsResume(hostname = location.hostname): boolean {
   return domainProfile(hostname)?.skipResume === true
+}
+
+export function domainDockDefaults(hostname: string): Partial<ControlLayout> {
+  return domainProfile(hostname)?.dock ?? {}
 }

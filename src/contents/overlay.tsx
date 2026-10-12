@@ -11,9 +11,6 @@ import {
   FastForward,
   FlipHorizontal2,
   FlipVertical2,
-  AlignCenter,
-  AlignLeft,
-  AlignRight,
   Gauge,
   Layers,
   RectangleHorizontal,
@@ -57,7 +54,7 @@ import {
   type VideoBridge
 } from "~lib/bridge"
 import { postEngineActive } from "~lib/engine"
-import { readPageTitle } from "~lib/domains"
+import { domainDockDefaults, readPageTitle } from "~lib/domains"
 import {
   BLUR_MAX,
   OPACITY_MIN,
@@ -117,6 +114,7 @@ import {
   type DockMode,
   type Viewport,
   clampDockBox,
+  defaultSettingsFor,
   loadDockLayout,
   loadGlobalEnabled,
   loadGlobalPreset,
@@ -139,13 +137,20 @@ import {
   HOLD_RATE_MIN,
   HOLD_RATE_STEP,
   DOCK_CONTROL_KEYS,
+  DOCK_ICON_ORDER,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   clampHoldPlaybackRate,
+  customAnchor,
+  defaultDockPlacement,
   defaultSettings,
   settingsEqual,
   type ColorSettings,
-  type DockAlign,
+  type ControlLayout,
+  type DockEdge,
+  type DockPlaceId,
+  type DockPlacement,
+  type DockSlot,
   type EffectSettings
 } from "~lib/types"
 
@@ -215,7 +220,7 @@ const DOCK_PICKS: {
   {
     key: "dockProgress",
     label: "Progress",
-    title: "Seek track on the bottom of the video. The other buttons stay when this is off.",
+    title: "Seek track on the video. The other controls stay when this is off.",
     icon: RectangleHorizontal
   },
   { key: "dockPlay", label: "Play", title: "Play and pause on the video", icon: Play },
@@ -233,15 +238,25 @@ const DOCK_PICKS: {
   { key: "dockSkip", label: "Skip", title: "Skip back and forward 10 seconds on the video", icon: ChevronsRight }
 ]
 
-const ALIGN_PICKS: {
-  align: DockAlign
-  label: string
-  title: string
-  icon: typeof AlignLeft
-}[] = [
-  { align: "left", label: "Left", title: "Place the on-video buttons on the left", icon: AlignLeft },
-  { align: "center", label: "Center", title: "Place the on-video buttons in the center", icon: AlignCenter },
-  { align: "right", label: "Right", title: "Place the on-video buttons on the right", icon: AlignRight }
+type DockPickKey = (typeof DOCK_PICKS)[number]["key"]
+
+const DOCK_PLACE_BY_KEY: Record<DockPickKey, DockPlaceId> = {
+  dockProgress: "progress",
+  dockPlay: "play",
+  dockTime: "time",
+  dockVolume: "volume",
+  dockSpeed: "speed",
+  dockLoop: "loop",
+  dockPip: "pip",
+  dockFullscreen: "fullscreen",
+  dockSkip: "skip"
+}
+
+const DOCK_SIDES: { edge: DockEdge; label: string }[] = [
+  { edge: "top", label: "Top" },
+  { edge: "right", label: "Right" },
+  { edge: "bottom", label: "Bottom" },
+  { edge: "left", label: "Left" }
 ]
 
 type ApplyTiming = "now" | "light" | "heavy"
@@ -353,8 +368,11 @@ const PLAYBACK_RESET_KEYS = [
   "advancedPlaybackOn",
   "rememberProgress",
   "showNativeControls",
+  "dockEnabled",
   "dockProgress",
   "dockAlign",
+  "dockLayout",
+  "resumeLeadSeconds",
   ...DOCK_CONTROL_KEYS,
   "skipAdsEnabled",
   "skipAds",
@@ -415,7 +433,7 @@ function hostsMatch(messageHost: string | undefined, pageHost: string): boolean 
 function Overlay() {
   const hostname = location.hostname
   const [settings, setSettings] = useState<EffectSettings>(() => ({
-    ...defaultSettings(),
+    ...defaultSettingsFor(location.hostname),
     presetId: ""
   }))
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
@@ -436,6 +454,7 @@ function Overlay() {
   const [layout, setLayout] = useState<DockLayout | null>(null)
   const [dragging, setDragging] = useState(false)
   const [barIdle, setBarIdle] = useState(false)
+  const [placePick, setPlacePick] = useState<DockPickKey | null>(null)
   const [viewport, setViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight
@@ -462,6 +481,8 @@ function Overlay() {
   const dockRef = useRef<HTMLDivElement>(null)
   const presetMenuRef = useRef<HTMLDivElement>(null)
   const presetButtonRef = useRef<HTMLButtonElement>(null)
+  const placePopRef = useRef<HTMLDivElement>(null)
+  const placeAnchorRef = useRef<HTMLButtonElement>(null)
   const presetOpenRef = useRef(false)
   const draggingRef = useRef(false)
   const barIdleRef = useRef(false)
@@ -542,7 +563,7 @@ function Overlay() {
       }
       if (!settingsSynced.current) {
         settingsSynced.current = true
-        const loaded = stored ?? settingsFromGlobalPreset(globalPreset)
+        const loaded = stored ?? settingsFromGlobalPreset(globalPreset, hostname)
         siteOverrideRef.current = stored != null
         settingsRef.current = loaded
         appliedRef.current = loaded
@@ -717,7 +738,7 @@ function Overlay() {
       if (siteChange?.newValue != null) {
         settingsSynced.current = true
         siteOverrideRef.current = true
-        const incoming = normalizeSettings(siteChange.newValue)
+        const incoming = normalizeSettings(siteChange.newValue, hostname)
         const pending = inflightSaves.current
         const index = pending.findIndex((item) => settingsEqual(item, incoming))
         if (index >= 0) {
@@ -731,7 +752,8 @@ function Overlay() {
       ) {
         settingsSynced.current = true
         const incoming = settingsFromGlobalPreset(
-          readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue)
+          readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue),
+          hostname
         )
         if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming)
       }
@@ -813,6 +835,67 @@ function Overlay() {
       document.removeEventListener("keydown", onKey)
     }
   }, [presetOpen])
+
+  useEffect(() => {
+    if (tab !== "playback" || openSections["playback-player"] === false || layout?.mode !== "max") {
+      setPlacePick(null)
+    }
+  }, [tab, openSections, layout?.mode])
+
+  useLayoutEffect(() => {
+    if (!placePick) return
+    const pin = () => {
+      const anchor = placeAnchorRef.current
+      const dock = dockRef.current
+      const pop = placePopRef.current
+      if (!anchor || !dock || !pop) return
+      const dockRect = dock.getBoundingClientRect()
+      const icon = anchor.getBoundingClientRect()
+      const width = pop.offsetWidth
+      const height = pop.offsetHeight
+      const gap = 8
+      let top = icon.bottom - dockRect.top + gap
+      const above = icon.top - dockRect.top - height - gap
+      if (top + height > dockRect.height - 8 && above < top) top = above
+      let left = icon.left - dockRect.left + (icon.width - width) / 2
+      const maxLeft = Math.max(8, dockRect.width - width - 8)
+      left = Math.min(Math.max(8, left), maxLeft)
+      pop.style.top = `${Math.round(top)}px`
+      pop.style.left = `${Math.round(left)}px`
+      const body = dock.querySelector(".vee-body")
+      const bodyRect = body?.getBoundingClientRect()
+      const visible =
+        !bodyRect || (icon.bottom > bodyRect.top + 4 && icon.top < bodyRect.bottom - 4)
+      pop.dataset.ready = visible ? "true" : "false"
+    }
+    pin()
+    const body = dockRef.current?.querySelector(".vee-body")
+    body?.addEventListener("scroll", pin, { passive: true })
+    window.addEventListener("resize", pin)
+    return () => {
+      body?.removeEventListener("scroll", pin)
+      window.removeEventListener("resize", pin)
+    }
+  }, [placePick, settings.dockLayout, viewport])
+
+  useEffect(() => {
+    if (!placePick) return
+    const onPointerDown = (event: PointerEvent) => {
+      const path = event.composedPath()
+      if (placePopRef.current && path.includes(placePopRef.current)) return
+      if (placeAnchorRef.current && path.includes(placeAnchorRef.current)) return
+      setPlacePick(null)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPlacePick(null)
+    }
+    document.addEventListener("pointerdown", onPointerDown, true)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [placePick])
 
   useEffect(() => {
     if (layout?.mode !== "min") {
@@ -957,7 +1040,7 @@ function Overlay() {
   }
 
   const resetCurrentTab = () => {
-    const defaults = defaultSettings()
+    const defaults = defaultSettingsFor(hostname)
     const next: Partial<EffectSettings> = {}
     for (const key of resetKeys(tab)) next[key] = defaults[key] as never
     next.presetId = ""
@@ -965,7 +1048,7 @@ function Overlay() {
   }
 
   const resetAllTabs = () => {
-    const defaults = defaultSettings()
+    const defaults = defaultSettingsFor(hostname)
     const next: Partial<EffectSettings> = {}
     for (const key of [...VIDEO_RESET_KEYS, ...AUDIO_RESET_KEYS, ...PLAYBACK_RESET_KEYS]) {
       next[key] = defaults[key] as never
@@ -1182,6 +1265,8 @@ function Overlay() {
   const tabOn = settings[tabFlag(tab)]
   const actions = tabActions(tab, tabOn)
   const miniIdle = layout.mode === "min" && barIdle
+  const placeChoice = placePick ? (DOCK_PICKS.find((item) => item.key === placePick) ?? null) : null
+  const placeId = placeChoice ? DOCK_PLACE_BY_KEY[placeChoice.key] : null
 
   return (
     <div
@@ -1988,47 +2073,60 @@ function Overlay() {
                     onDeleteDomain={deleteProgressForDomain}
                   />
                 </Group>
-                <p className="vee-hint">
-                  Each button is its own switch. Progress is only the seek track.
-                </p>
-                <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
-                  {DOCK_PICKS.map((pick) => {
-                    const Icon = pick.icon
-                    const on = settings[pick.key]
-                    return (
-                      <button
-                        key={pick.key}
-                        type="button"
-                        className="vee-dock-pick"
-                        aria-pressed={on}
-                        data-on={String(on)}
-                        title={pick.title}
-                        onClick={() => patch({ [pick.key]: !settings[pick.key] })}>
-                        <Icon size={15} strokeWidth={1.75} />
-                        <span>{pick.label}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-                <div className="vee-dock-align" role="group" aria-label="Control alignment">
-                  {ALIGN_PICKS.map((pick) => {
-                    const Icon = pick.icon
-                    const on = settings.dockAlign === pick.align
-                    return (
-                      <button
-                        key={pick.align}
-                        type="button"
-                        className="vee-dock-pick"
-                        aria-pressed={on}
-                        data-on={String(on)}
-                        title={pick.title}
-                        onClick={() => patch({ dockAlign: pick.align })}>
-                        <Icon size={15} strokeWidth={1.75} />
-                        <span>{pick.label}</span>
-                      </button>
-                    )
-                  })}
-                </div>
+                <Group
+                  id="playback-player"
+                  title="Video player controls"
+                  icon={SlidersHorizontal}
+                  open={sectionOpen("playback-player")}
+                  onToggle={() => toggleSection("playback-player")}
+                  tools={
+                    <button
+                      className="vee-switch"
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.dockEnabled}
+                      aria-label="Video player controls"
+                      title="Turns the controls on the video on or off. Each control keeps its own setting."
+                      data-on={String(settings.dockEnabled)}
+                      onClick={() => patch({ dockEnabled: !settings.dockEnabled })}>
+                      <i />
+                    </button>
+                  }>
+                  <p className="vee-hint">
+                    Turn this on to show the controls on the video. Click an icon to turn that
+                    control on and choose where it sits. Controls that share a side line up together.
+                  </p>
+                  <div className="vee-dock-picks" role="group" aria-label="Controls on the video">
+                    {DOCK_PICKS.map((pick) => {
+                      const Icon = pick.icon
+                      const on = settings[pick.key]
+                      const open = placePick === pick.key
+                      return (
+                        <button
+                          key={pick.key}
+                          ref={open ? placeAnchorRef : undefined}
+                          type="button"
+                          className="vee-dock-pick"
+                          aria-pressed={on}
+                          aria-expanded={open}
+                          data-on={String(on)}
+                          title={pick.title}
+                          onClick={() =>
+                            setPlacePick((current) => (current === pick.key ? null : pick.key))
+                          }>
+                          <Icon size={15} strokeWidth={1.75} />
+                          <span>{pick.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <PlayerPreview
+                    layout={settings.dockLayout}
+                    enabled={DOCK_PICKS.filter((pick) => settings[pick.key]).map(
+                      (pick) => DOCK_PLACE_BY_KEY[pick.key]
+                    )}
+                  />
+                </Group>
               </>
             ) : null}
 
@@ -2052,6 +2150,43 @@ function Overlay() {
             </button>
           </div>
         </section>
+      ) : null}
+
+      {placeChoice &&
+      placeId &&
+      layout.mode === "max" &&
+      tab === "playback" &&
+      sectionOpen("playback-player") ? (
+        <div
+          className="vee-place-pop"
+          ref={placePopRef}
+          role="dialog"
+          aria-label={`${placeChoice.label} placement`}
+          onPointerDown={stopEvent}>
+          <PlaceCard
+            id={placeId}
+            label={placeChoice.label}
+            icon={placeChoice.icon}
+            place={settings.dockLayout[placeId]}
+            enabled={settings[placeChoice.key]}
+            onEnabled={() =>
+              patch({ [placeChoice.key]: !settingsRef.current[placeChoice.key] })
+            }
+            onReset={() =>
+              patch({
+                dockLayout: {
+                  ...settingsRef.current.dockLayout,
+                  [placeId]: defaultPlacementFor(hostname, placeId)
+                }
+              })
+            }
+            onChange={(change) =>
+              patch({
+                dockLayout: nextPlacement(settingsRef.current.dockLayout, placeId, change)
+              })
+            }
+          />
+        </div>
       ) : null}
 
       {layout.mode === "max"
@@ -2197,6 +2332,221 @@ function ProgressList({
           </section>
         )
       })}
+    </div>
+  )
+}
+
+function slotChoices(edge: DockEdge): { slot: DockSlot; label: string }[] {
+  const vertical = edge === "left" || edge === "right"
+  return [
+    { slot: "start", label: vertical ? "Top" : "Left" },
+    { slot: "center", label: "Center" },
+    { slot: "end", label: vertical ? "Bottom" : "Right" },
+    { slot: "custom", label: "Custom" }
+  ]
+}
+
+function defaultPlacementFor(hostname: string, id: DockPlaceId): DockPlacement {
+  const site = domainDockDefaults(hostname)[id]
+  return site ? { ...defaultDockPlacement(id), ...site } : defaultDockPlacement(id)
+}
+
+function nextPlacement(
+  layout: ControlLayout,
+  id: DockPlaceId,
+  change: Partial<DockPlacement>
+): ControlLayout {
+  const current = layout[id]
+  let next: DockPlacement = { ...current, ...change }
+  if (change.slot === "custom" && current.slot !== "custom") {
+    next = { ...next, slot: "custom", ...customAnchor(id, current.edge, current.slot) }
+  } else if (change.edge && change.edge !== current.edge && next.slot === "custom") {
+    const along: DockSlot = change.edge === "left" || change.edge === "right" ? "center" : "start"
+    next = { ...next, edge: change.edge, ...customAnchor(id, change.edge, along) }
+  }
+  return { ...layout, [id]: next }
+}
+
+function previewMarks(layout: ControlLayout, enabled: readonly DockPlaceId[]) {
+  const marks: { id: DockPlaceId; x: number; y: number; w: number; h: number; bar: boolean }[] = []
+  const groups = new Map<string, DockPlaceId[]>()
+  for (const id of DOCK_ICON_ORDER) {
+    if (!enabled.includes(id)) continue
+    const place = layout[id]
+    if (!place) continue
+    if (place.slot === "custom") {
+      marks.push({ id, x: place.x, y: place.y, w: 0, h: 0, bar: false })
+      continue
+    }
+    const key = `${place.edge}:${place.slot}`
+    const list = groups.get(key) ?? []
+    list.push(id)
+    groups.set(key, list)
+  }
+  const lift =
+    enabled.includes("progress") && layout.progress?.slot !== "custom" ? layout.progress.edge : ""
+  for (const [key, ids] of groups) {
+    const [edge, slot] = key.split(":") as [DockEdge, DockSlot]
+    const vertical = edge === "left" || edge === "right"
+    ids.forEach((id, index) => {
+      const count = ids.length
+      if (vertical) {
+        const step = 14
+        const start = slot === "center" ? 50 - ((count - 1) * step) / 2 : slot === "end" ? 86 - (count - 1) * step : 16
+        const x = edge === "left" ? (lift === "left" ? 16 : 8) : lift === "right" ? 84 : 92
+        marks.push({ id, x, y: start + index * step, w: 0, h: 0, bar: false })
+      } else {
+        const step = 12
+        const start = slot === "center" ? 50 - ((count - 1) * step) / 2 : slot === "end" ? 90 - (count - 1) * step : 10
+        const y = edge === "top" ? (lift === "top" ? 18 : 12) : lift === "bottom" ? 82 : 88
+        marks.push({ id, x: start + index * step, y, w: 0, h: 0, bar: false })
+      }
+    })
+  }
+  if (enabled.includes("progress") && layout.progress) {
+    const place = layout.progress
+    const custom = place.slot === "custom"
+    if (place.edge === "left" || place.edge === "right") {
+      const x = custom ? place.x : place.edge === "left" ? 0 : 98.5
+      const y = custom ? place.y : 0
+      marks.push({
+        id: "progress",
+        x,
+        y,
+        w: 1.5,
+        h: custom ? Math.max(24, 100 - y) : 100,
+        bar: true
+      })
+    } else {
+      const x = custom ? place.x : 0
+      const y = custom ? place.y : place.edge === "top" ? 0 : 98
+      marks.push({
+        id: "progress",
+        x,
+        y,
+        w: custom ? Math.max(24, 100 - x) : 100,
+        h: 2,
+        bar: true
+      })
+    }
+  }
+  return marks
+}
+
+function PlayerPreview({ layout, enabled }: { layout: ControlLayout; enabled: readonly DockPlaceId[] }) {
+  return (
+    <div className="vee-stage" aria-hidden="true">
+      {previewMarks(layout, enabled).map((mark) => (
+        <i
+          key={mark.id}
+          data-kind={mark.bar ? "progress" : "icon"}
+          style={
+            mark.bar
+              ? { left: `${mark.x}%`, top: `${mark.y}%`, width: `${mark.w}%`, height: `${mark.h}%` }
+              : { left: `${mark.x}%`, top: `${mark.y}%` }
+          }
+        />
+      ))}
+    </div>
+  )
+}
+
+function PlaceCard({
+  id,
+  label,
+  icon: Icon,
+  place,
+  enabled,
+  onEnabled,
+  onReset,
+  onChange
+}: {
+  id: DockPlaceId
+  label: string
+  icon: typeof Play
+  place: DockPlacement
+  enabled: boolean
+  onEnabled: () => void
+  onReset: () => void
+  onChange: (change: Partial<DockPlacement>) => void
+}) {
+  return (
+    <div className="vee-place-card" data-place={id}>
+      <h4>
+        <Icon size={14} strokeWidth={1.75} />
+        {label}
+      </h4>
+      <div className="vee-switch-row">
+        <div>
+          <span>Show on video</span>
+        </div>
+        <button
+          className="vee-switch"
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={`Show ${label} on the video`}
+          title={enabled ? `${label} is on the video` : `${label} is off`}
+          data-on={String(enabled)}
+          onClick={onEnabled}>
+          <i />
+        </button>
+      </div>
+      <p className="vee-place-label">Side</p>
+      <div className="vee-seg" role="group" aria-label={`${label} side`}>
+        {DOCK_SIDES.map((side) => (
+          <button
+            key={side.edge}
+            type="button"
+            aria-pressed={place.edge === side.edge}
+            data-on={String(place.edge === side.edge)}
+            onClick={() => onChange({ edge: side.edge })}>
+            {side.label}
+          </button>
+        ))}
+      </div>
+      <p className="vee-place-label">Align</p>
+      <div className="vee-seg" role="group" aria-label={`${label} align`}>
+        {slotChoices(place.edge).map((choice) => (
+          <button
+            key={choice.slot}
+            type="button"
+            aria-pressed={place.slot === choice.slot}
+            data-on={String(place.slot === choice.slot)}
+            onClick={() => onChange({ slot: choice.slot })}>
+            {choice.label}
+          </button>
+        ))}
+      </div>
+      {place.slot === "custom" ? (
+        <>
+          <Slider
+            label="Horizontal"
+            min={0}
+            max={100}
+            step={1}
+            value={place.x}
+            display={`${place.x}%`}
+            onChange={(value) => onChange({ x: readRange(String(value), 0) })}
+          />
+          <Slider
+            label="Vertical"
+            min={0}
+            max={100}
+            step={1}
+            value={place.y}
+            display={`${place.y}%`}
+            onChange={(value) => onChange({ y: readRange(String(value), 0) })}
+          />
+        </>
+      ) : null}
+      <button
+        type="button"
+        className="vee-reset vee-place-reset"
+        title="Reset this control to its default place"
+        onClick={onReset}>
+        Reset
+      </button>
     </div>
   )
 }

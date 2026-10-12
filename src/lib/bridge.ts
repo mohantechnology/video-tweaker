@@ -13,7 +13,7 @@ import { isHoldBoosting, maintainHold, releaseHold, startHoldSpeed } from "./hol
 import { createProgressTracker } from "./progress"
 import { startSeekBar, type DockControl, type DockMedia } from "./seek-bar"
 import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
-import type { EffectSettings } from "./types"
+import { dockLayoutStamp, type EffectSettings } from "./types"
 
 /** How often to rescan while a main video is already selected. */
 const PRESENT_POLL_MS = 700
@@ -76,8 +76,9 @@ function playbackStamp(settings: EffectSettings): string {
     settings.audioEnabled,
     settings.playbackEnabled,
     settings.showNativeControls,
+    settings.dockEnabled,
     settings.dockProgress,
-    settings.dockAlign,
+    dockLayoutStamp(settings.dockLayout),
     settings.dockPlay,
     settings.dockTime,
     settings.dockVolume,

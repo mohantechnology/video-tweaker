@@ -1008,11 +1008,141 @@ a.vee-progress-link:hover {
   color: #fff;
 }
 
-.vee-dock-align {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.vee-dock-pick[aria-expanded="true"] {
+  box-shadow: inset 0 0 0 1px rgba(216, 204, 255, 0.9);
+}
+
+.vee-stage {
+  position: relative;
+  height: 96px;
+  margin: 2px 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    #14121c;
+  overflow: hidden;
+}
+
+.vee-stage i {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(141, 115, 255, 0.35);
+}
+
+.vee-stage i[data-kind="progress"] {
+  margin: 0;
+  border-radius: 999px;
+  background: #8d73ff;
+  box-shadow: none;
+}
+
+.vee-place-card {
+  margin: 0 0 8px;
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vee-place-card h4 {
+  display: flex;
+  align-items: center;
   gap: 6px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.vee-place-card h4 svg {
+  display: block;
+  flex: none;
+}
+
+.vee-place-label {
+  margin: 0 0 4px;
+  color: rgba(246, 243, 255, 0.46);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.vee-seg {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin: 0 0 8px;
+}
+
+.vee-seg button {
+  margin: 0;
+  padding: 6px 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: rgba(246, 243, 255, 0.72);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.vee-seg button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.vee-seg button[data-on="true"] {
+  background: rgba(141, 115, 255, 0.28);
+  border-color: rgba(141, 115, 255, 0.75);
+  color: #fff;
+}
+
+.vee-place-card .vee-row:last-child {
+  margin-bottom: 0;
+}
+
+.vee-place-pop {
+  position: absolute;
+  z-index: 8;
+  width: min(280px, calc(100% - 16px));
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(20, 18, 30, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  visibility: hidden;
+}
+
+.vee-place-pop[data-ready="true"] {
+  visibility: visible;
+}
+
+.vee-place-pop .vee-place-card {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.vee-place-pop .vee-switch-row {
   margin: 0 0 10px;
+}
+
+.vee-place-pop button:focus-visible,
+.vee-place-pop input:focus-visible {
+  outline: 2px solid #d8ccff;
+  outline-offset: 2px;
+}
+
+.vee-place-reset {
+  margin-top: 2px;
 }
 
 .vee-switch-row {

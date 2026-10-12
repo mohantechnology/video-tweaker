@@ -1,4 +1,4 @@
-import { PROGRESS_SAVE_INTERVAL_MS } from "../settings"
+import { PROGRESS_SAVE_INTERVAL_MS, RESUME_LEAD_SECONDS } from "../settings"
 import { readPageTitle, siteSkipsResume } from "./domains"
 import { registrableDomain } from "./host"
 import type { EffectSettings } from "./types"
@@ -300,7 +300,12 @@ export function clearProgress(): void {
   })
 }
 
-function startRestore(video: HTMLVideoElement, time: number, onDone: () => void): () => void {
+function startRestore(
+  video: HTMLVideoElement,
+  savedTime: number,
+  target: number,
+  onDone: () => void
+): () => void {
   let tries = 0
   let waits = 0
   let stopped = false
@@ -318,15 +323,15 @@ function startRestore(video: HTMLVideoElement, time: number, onDone: () => void)
     if (stopped || isLikelyAd(video)) return
     const duration = video.duration
     if (!Number.isFinite(duration) || duration <= 0) return
-    if (time < MIN_TIME || time > duration - 0.4 || duration - time < END_MARGIN) {
+    if (savedTime < MIN_TIME || savedTime > duration - 0.4 || duration - savedTime < END_MARGIN) {
       stop()
       return
     }
-    if (Math.abs(video.currentTime - time) <= 1.25) {
+    if (Math.abs(video.currentTime - target) <= 1.25) {
       if (tries >= 2) stop()
       return
     }
-    if (video.currentTime > time + 1.25) {
+    if (video.currentTime > savedTime + 1.25) {
       stop()
       return
     }
@@ -335,8 +340,9 @@ function startRestore(video: HTMLVideoElement, time: number, onDone: () => void)
       return
     }
     guardUntil = performance.now() + 900
+    const seekTo = Math.min(Math.max(0, target), Math.max(0, duration - 0.35))
     try {
-      video.currentTime = Math.min(time, Math.max(0, duration - 0.35))
+      video.currentTime = seekTo
     } catch {
       stop()
     }
@@ -510,7 +516,9 @@ export function createProgressTracker(getSettings: () => EffectSettings): {
         holdSaves = false
         return
       }
-      cancelRestore = startRestore(next, saved.time, () => {
+      const lead = Number.isFinite(RESUME_LEAD_SECONDS) ? Math.max(0, RESUME_LEAD_SECONDS) : 0
+      const target = Math.max(0, saved.time - lead)
+      cancelRestore = startRestore(next, saved.time, target, () => {
         if (ticket === ticketId) holdSaves = false
       })
     })

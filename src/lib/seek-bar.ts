@@ -1,10 +1,15 @@
 import { seekBy, togglePictureInPicture } from "./effects"
 import { formatClock } from "./progress"
-import { PLAYER_CHROME_HIDE_MS } from "../settings"
+import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
 import {
   DOCK_CONTROL_KEYS,
+  DOCK_ICON_ORDER,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
+  type DockEdge,
+  type DockPlaceId,
+  type DockPlacement,
+  type DockSlot,
   type EffectSettings
 } from "./types"
 
@@ -14,9 +19,10 @@ const STYLE_ID = "vee-seek-bar-style"
 const Z_INDEX = 2147483646
 const TRACK_HEIGHT_PX = 4
 const HIT_HEIGHT_PX = 20
-const CHROME_HEIGHT_PX = 44
-const STACK_HEIGHT_PX = 76
 const WRITE_GUARD_MS = 280
+const POP_CLOSE_MS = 220
+const SPEED_STEP = 0.01
+const SPEED_CHIPS = [1, 1.25, 1.5, 2, 3, 4] as const
 const FS_SHELL_ID = "vee-fs-shell"
 const DOCK_HOST_ID = "vee-csui"
 const SKIP_SECONDS = 10
@@ -64,51 +70,62 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID}:not([data-hot="true"]) .vee-seek-hit {
   pointer-events: none !important;
 }
-#${SEEK_BAR_ID} .vee-chrome {
+#${SEEK_BAR_ID} .vee-pack,
+#${SEEK_BAR_ID} > .vee-control {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 16px;
-  height: 36px;
-  opacity: 0;
-  visibility: hidden;
-  transform: translateY(6px);
-  pointer-events: none;
-  transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
-}
-#${SEEK_BAR_ID}[data-progress="false"] .vee-chrome {
-  bottom: 4px;
-}
-#${SEEK_BAR_ID}[data-hot="true"] .vee-chrome {
-  opacity: 1;
-  visibility: visible;
-  transform: none;
-  pointer-events: none;
-  transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 0s;
-}
-#${SEEK_BAR_ID} .vee-chrome-row {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 2px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
+  z-index: 2;
   pointer-events: none;
 }
-#${SEEK_BAR_ID}[data-align="center"] .vee-chrome-row {
-  justify-content: center;
-}
-#${SEEK_BAR_ID}[data-align="right"] .vee-chrome-row {
-  justify-content: flex-end;
-}
-#${SEEK_BAR_ID} .vee-chrome-cluster {
+#${SEEK_BAR_ID} .vee-pack {
   display: flex;
   align-items: center;
   gap: 2px;
-  min-width: 0;
+}
+#${SEEK_BAR_ID} .vee-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   pointer-events: none;
+}
+#${SEEK_BAR_ID} .vee-pack[data-edge="bottom"][data-slot="start"] { left: 8px; bottom: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="bottom"][data-slot="center"] {
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+}
+#${SEEK_BAR_ID} .vee-pack[data-edge="bottom"][data-slot="end"] { right: 8px; bottom: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="top"][data-slot="start"] { left: 8px; top: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="top"][data-slot="center"] {
+  left: 50%;
+  top: 8px;
+  transform: translateX(-50%);
+}
+#${SEEK_BAR_ID} .vee-pack[data-edge="top"][data-slot="end"] { right: 8px; top: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="left"] { flex-direction: column; left: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="left"][data-slot="start"] { top: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="left"][data-slot="center"] {
+  top: 50%;
+  transform: translateY(-50%);
+}
+#${SEEK_BAR_ID} .vee-pack[data-edge="left"][data-slot="end"] { bottom: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="right"] { flex-direction: column; right: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="right"][data-slot="start"] { top: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-edge="right"][data-slot="center"] {
+  top: 50%;
+  transform: translateY(-50%);
+}
+#${SEEK_BAR_ID} .vee-pack[data-edge="right"][data-slot="end"] { bottom: 8px; }
+#${SEEK_BAR_ID} .vee-pack[data-lift="true"][data-edge="bottom"] { bottom: 22px; }
+#${SEEK_BAR_ID} .vee-pack[data-lift="true"][data-edge="top"] { top: 22px; }
+#${SEEK_BAR_ID} .vee-pack[data-lift="true"][data-edge="left"] { left: 22px; }
+#${SEEK_BAR_ID} .vee-pack[data-lift="true"][data-edge="right"] { right: 22px; }
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-pack,
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-control,
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-pop,
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-chrome-btn,
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-rate-btn,
+#${SEEK_BAR_ID}:not([data-hot="true"]):not([data-drag="true"]) .vee-chrome-time {
+  pointer-events: none !important;
 }
 #${SEEK_BAR_ID} [hidden] {
   display: none !important;
@@ -152,7 +169,7 @@ const BAR_STYLE = `
   display: block;
 }
 #${SEEK_BAR_ID} .vee-chrome-time {
-  margin-left: 4px;
+  padding: 0 4px;
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
@@ -162,82 +179,18 @@ const BAR_STYLE = `
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
 }
-#${SEEK_BAR_ID} .vee-pop-anchor,
-#${SEEK_BAR_ID} .vee-speed-anchor {
+#${SEEK_BAR_ID} .vee-pop-anchor {
   position: relative;
   display: flex;
   align-items: center;
 }
-#${SEEK_BAR_ID} .vee-speed-slider {
-  width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: width 140ms ease, opacity 140ms ease;
-}
-#${SEEK_BAR_ID} .vee-speed-slider input {
-  pointer-events: none;
-}
-#${SEEK_BAR_ID} .vee-speed-anchor:hover .vee-speed-slider,
-#${SEEK_BAR_ID} .vee-speed-anchor:focus-within .vee-speed-slider,
-#${SEEK_BAR_ID} .vee-speed-slider[data-open="true"] {
-  width: 84px;
-  opacity: 1;
-  pointer-events: auto;
-}
-#${SEEK_BAR_ID} .vee-speed-anchor:hover .vee-speed-slider input,
-#${SEEK_BAR_ID} .vee-speed-anchor:focus-within .vee-speed-slider input,
-#${SEEK_BAR_ID} .vee-speed-slider[data-open="true"] input {
-  pointer-events: auto;
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 72px;
-  height: 28px;
-  margin: 0 6px 0 2px;
-  background: transparent;
-  cursor: pointer;
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"]::-webkit-slider-runnable-track {
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    #fff var(--p, 0%),
-    rgba(255, 255, 255, 0.35) var(--p, 0%)
-  );
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -4.5px;
-  border: 0;
-  border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"]::-moz-range-track {
-  height: 3px;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.35);
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"]::-moz-range-progress {
-  height: 3px;
-  border-radius: 999px;
-  background: #fff;
-}
-#${SEEK_BAR_ID} .vee-speed-slider input[type="range"]::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border: 0;
-  border-radius: 999px;
-  background: #fff;
+#${SEEK_BAR_ID} .vee-pop-anchor > .vee-chrome-btn,
+#${SEEK_BAR_ID} .vee-pop-anchor > .vee-rate-btn {
+  position: relative;
+  z-index: 6;
 }
 #${SEEK_BAR_ID} .vee-rate-btn {
-  min-width: 36px;
+  min-width: 52px;
   height: 28px;
   padding: 0 8px;
   border: 0;
@@ -245,26 +198,52 @@ const BAR_STYLE = `
   background: rgba(255, 255, 255, 0.16);
   color: #fff;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 650;
   line-height: 1;
   letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 #${SEEK_BAR_ID} .vee-rate-btn[data-on="true"] {
-  color: #e4dcff;
-  background: rgba(141, 115, 255, 0.42);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.28);
 }
 #${SEEK_BAR_ID} .vee-pop {
   position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  border-radius: 12px;
-  background: rgba(18, 16, 24, 0.94);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  z-index: 5;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+  background: transparent;
   transition: opacity 120ms ease;
+}
+#${SEEK_BAR_ID} .vee-pop-anchor[data-out="up"] .vee-pop {
+  left: 50%;
+  bottom: calc(100% - 16px);
+  padding-bottom: 16px;
+  transform: translateX(-50%);
+}
+#${SEEK_BAR_ID} .vee-pop-anchor[data-out="down"] .vee-pop {
+  left: 50%;
+  top: calc(100% - 16px);
+  padding-top: 16px;
+  transform: translateX(-50%);
+}
+#${SEEK_BAR_ID} .vee-pop-anchor[data-out="left"] .vee-pop {
+  right: calc(100% - 16px);
+  top: 50%;
+  padding-right: 16px;
+  transform: translateY(-50%);
+}
+#${SEEK_BAR_ID} .vee-pop-anchor[data-out="right"] .vee-pop {
+  left: calc(100% - 16px);
+  top: 50%;
+  padding-left: 16px;
+  transform: translateY(-50%);
+}
+#${SEEK_BAR_ID} .vee-pop-card {
+  border-radius: 16px;
+  background: rgba(12, 12, 14, 0.72);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
 }
 #${SEEK_BAR_ID} .vee-pop[data-open="true"] {
   opacity: 1;
@@ -274,10 +253,11 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-pop input {
   pointer-events: none;
 }
-#${SEEK_BAR_ID} .vee-pop[data-open="true"] input {
+#${SEEK_BAR_ID} .vee-pop[data-open="true"] input,
+#${SEEK_BAR_ID} .vee-pop[data-open="true"] button {
   pointer-events: auto;
 }
-#${SEEK_BAR_ID} .vee-volume-pop {
+#${SEEK_BAR_ID} .vee-volume-pop .vee-pop-card {
   padding: 10px 8px;
 }
 #${SEEK_BAR_ID} .vee-volume-pop input[type="range"] {
@@ -286,8 +266,125 @@ const BAR_STYLE = `
   width: 22px;
   height: 84px;
   margin: 0;
-  accent-color: #8d73ff;
+  accent-color: #fff;
   cursor: pointer;
+}
+#${SEEK_BAR_ID} .vee-speed-pop .vee-pop-card {
+  width: 280px;
+  padding: 14px 16px 10px;
+  box-sizing: border-box;
+}
+#${SEEK_BAR_ID} .vee-speed-readout {
+  margin: 0 0 8px;
+  text-align: center;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+}
+#${SEEK_BAR_ID} .vee-speed-adjust {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#${SEEK_BAR_ID} .vee-speed-step {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+}
+#${SEEK_BAR_ID} .vee-speed-step:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 28px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #fff var(--p, 0%),
+    rgba(255, 255, 255, 0.35) var(--p, 0%)
+  );
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"]::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.35);
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-adjust input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-chips {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+#${SEEK_BAR_ID} .vee-speed-chips button {
+  margin: 0;
+  padding: 7px 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+}
+#${SEEK_BAR_ID} .vee-speed-chips button[data-on="true"] {
+  background: rgba(255, 255, 255, 0.34);
+  color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-caption {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  min-height: 14px;
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.72);
+  text-align: center;
 }
 #${SEEK_BAR_ID} .vee-seek-hit {
   position: absolute;
@@ -310,10 +407,33 @@ const BAR_STYLE = `
   background: rgba(255, 255, 255, 0.28);
   transition: height 120ms ease;
 }
-#${SEEK_BAR_ID}:hover .vee-seek-track,
-#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-track,
-#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-track {
+#${SEEK_BAR_ID} .vee-seek-hit[data-axis="y"] .vee-seek-track {
+  left: 50%;
+  right: auto;
+  top: 0;
+  bottom: 0;
+  width: ${TRACK_HEIGHT_PX}px;
+  height: auto;
+  transform: translateX(-50%);
+}
+#${SEEK_BAR_ID} .vee-seek-hit[data-axis="y"] .vee-seek-played,
+#${SEEK_BAR_ID} .vee-seek-hit[data-axis="y"] .vee-seek-buffered {
+  width: 100%;
+  height: 0%;
+}
+#${SEEK_BAR_ID}:hover .vee-seek-hit[data-axis="x"] .vee-seek-track,
+#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit[data-axis="x"] .vee-seek-track,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit[data-axis="x"] .vee-seek-track,
+#${SEEK_BAR_ID}:hover .vee-seek-hit:not([data-axis="y"]) .vee-seek-track,
+#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit:not([data-axis="y"]) .vee-seek-track,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit:not([data-axis="y"]) .vee-seek-track {
   height: 6px;
+}
+#${SEEK_BAR_ID}:hover .vee-seek-hit[data-axis="y"] .vee-seek-track,
+#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit[data-axis="y"] .vee-seek-track,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit[data-axis="y"] .vee-seek-track {
+  width: 6px;
+  height: auto;
 }
 #${SEEK_BAR_ID} .vee-seek-buffered {
   position: absolute;
@@ -354,9 +474,6 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID}[data-drag="true"] .vee-seek-tip {
   opacity: 1;
 }
-#${SEEK_BAR_ID}[data-hot="true"][data-buttons="true"] .vee-seek-tip {
-  bottom: 62px;
-}
 #${FS_SHELL_ID} {
   position: fixed !important;
   inset: 0 !important;
@@ -384,11 +501,9 @@ const BAR_STYLE = `
 }
 @media (prefers-reduced-motion: reduce) {
   #${SEEK_BAR_ID},
-  #${SEEK_BAR_ID} .vee-chrome,
   #${SEEK_BAR_ID} .vee-seek-track,
   #${SEEK_BAR_ID} .vee-seek-tip,
-  #${SEEK_BAR_ID} .vee-pop,
-  #${SEEK_BAR_ID} .vee-speed-slider {
+  #${SEEK_BAR_ID} .vee-pop {
     transition: none;
   }
 }
@@ -432,11 +547,13 @@ let playBtn: HTMLButtonElement | null = null
 let timeEl: HTMLSpanElement | null = null
 let backBtn: HTMLButtonElement | null = null
 let forwardBtn: HTMLButtonElement | null = null
-let chromeEl: HTMLDivElement | null = null
 let speedAnchor: HTMLDivElement | null = null
 let speedBtn: HTMLButtonElement | null = null
-let speedSlider: HTMLDivElement | null = null
+let speedPop: HTMLDivElement | null = null
+let speedReadout: HTMLDivElement | null = null
+let speedCaption: HTMLDivElement | null = null
 let speedInput: HTMLInputElement | null = null
+let speedChips: HTMLButtonElement[] = []
 let volumeAnchor: HTMLDivElement | null = null
 let muteBtn: HTMLButtonElement | null = null
 let volumePop: HTMLDivElement | null = null
@@ -444,13 +561,20 @@ let volumeInput: HTMLInputElement | null = null
 let loopBtn: HTMLButtonElement | null = null
 let pipBtn: HTMLButtonElement | null = null
 let fullBtn: HTMLButtonElement | null = null
-let cluster: HTMLDivElement | null = null
+const controlNodes = new Map<DockPlaceId, HTMLDivElement>()
+const packNodes = new Map<string, HTMLDivElement>()
 
 let boundVideo: HTMLVideoElement | null = null
 let dragging = false
 let dragPointerId = -1
 let volumeDrag = false
 let speedDrag = false
+let volumeCloseTimer = 0
+let speedCloseTimer = 0
+let volumeApplyTimer = 0
+let speedApplyTimer = 0
+let pendingVolume: { volume: number; muted: boolean } | null = null
+let pendingRate: number | null = null
 let hotTimer = 0
 let ignoreUntil = 0
 let lastAudible = 1
@@ -496,18 +620,95 @@ function readSettings(): EffectSettings | null {
 }
 
 function formatRate(value: number): string {
-  const rounded = Math.round(value * 100) / 100
-  return `${rounded.toFixed(2).replace(/\.?0+$/, "")}×`
+  return `${(Math.round(value * 100) / 100).toFixed(2)}x`
+}
+
+function formatChip(value: number): string {
+  return value.toFixed(value === 1.25 ? 2 : 1)
 }
 
 function noteWrite(): void {
   ignoreUntil = performance.now() + WRITE_GUARD_MS
 }
 
+function flushVolume(): void {
+  const next = pendingVolume
+  pendingVolume = null
+  window.clearTimeout(volumeApplyTimer)
+  volumeApplyTimer = 0
+  if (!next) return
+  noteWrite()
+  onControl?.({ type: "audio", volume: next.volume, muted: next.muted })
+}
+
+function scheduleVolume(volume: number, muted: boolean): void {
+  pendingVolume = { volume, muted }
+  window.clearTimeout(volumeApplyTimer)
+  volumeApplyTimer = window.setTimeout(() => {
+    volumeApplyTimer = 0
+    flushVolume()
+  }, LIGHT_APPLY_DELAY_MS)
+}
+
+function cancelVolumeApply(): void {
+  window.clearTimeout(volumeApplyTimer)
+  volumeApplyTimer = 0
+  pendingVolume = null
+}
+
+function flushSpeed(): void {
+  const next = pendingRate
+  pendingRate = null
+  window.clearTimeout(speedApplyTimer)
+  speedApplyTimer = 0
+  if (next === null) return
+  noteWrite()
+  onControl?.({ type: "rate", playbackRate: next })
+}
+
+function scheduleSpeed(rate: number): void {
+  pendingRate = rate
+  window.clearTimeout(speedApplyTimer)
+  speedApplyTimer = window.setTimeout(() => {
+    speedApplyTimer = 0
+    flushSpeed()
+  }, LIGHT_APPLY_DELAY_MS)
+}
+
+function cancelPopClose(which: "volume" | "speed"): void {
+  if (which === "volume") window.clearTimeout(volumeCloseTimer)
+  else window.clearTimeout(speedCloseTimer)
+}
+
+function armPopClose(which: "volume" | "speed"): void {
+  cancelPopClose(which)
+  const timer = window.setTimeout(() => {
+    if (which === "volume") {
+      if (volumeDrag) {
+        armPopClose("volume")
+        return
+      }
+      if (volumeAnchor?.matches(":hover")) return
+      if (volumePop) delete volumePop.dataset.open
+      return
+    }
+    if (speedDrag) {
+      armPopClose("speed")
+      return
+    }
+    if (speedAnchor?.matches(":hover")) return
+    if (speedPop) delete speedPop.dataset.open
+  }, POP_CLOSE_MS)
+  if (which === "volume") volumeCloseTimer = timer
+  else speedCloseTimer = timer
+}
+
 function closePops(): void {
+  cancelPopClose("volume")
+  cancelPopClose("speed")
   if (volumePop) delete volumePop.dataset.open
   if (speedDrag) return
-  if (speedSlider) delete speedSlider.dataset.open
+  if (speedPop) delete speedPop.dataset.open
 }
 
 function armChromeHide(): void {
@@ -755,66 +956,50 @@ function paintControls(): void {
   if (!video || !settings || !root) return
   const pipOn = document.pictureInPictureElement === video
   const fullOn = videoIsFullscreen(video)
-  const silent = settings.muted || settings.volume <= 0.001
+  const volumeNow = pendingVolume?.volume ?? settings.volume
+  const mutedNow = pendingVolume?.muted ?? settings.muted
+  const silent = mutedNow || volumeNow <= 0.001
   const rate = shownRate(video, settings)
-  if (settings.volume > 0.001) lastAudible = settings.volume
+  if (volumeNow > 0.001) lastAudible = volumeNow
 
   if (playBtn) {
-    playBtn.hidden = !settings.dockPlay
     const paused = video.paused || video.ended
     setIcon(playBtn, paused ? "play" : "pause", paused ? ICON_PLAY : ICON_PAUSE)
     playBtn.setAttribute("aria-label", paused ? "Play" : "Pause")
   }
-  if (timeEl) {
-    timeEl.hidden = !settings.dockTime
-    paintTime(video)
-  }
-  if (backBtn) backBtn.hidden = !settings.dockSkip
-  if (forwardBtn) forwardBtn.hidden = !settings.dockSkip
-  if (speedAnchor) speedAnchor.hidden = !settings.dockSpeed
+  if (timeEl) paintTime(video)
   paintSpeed(rate)
-  if (volumeAnchor) volumeAnchor.hidden = !settings.dockVolume
   if (muteBtn) {
-    const volumeIcon = silent ? "muted" : settings.volume < 0.5 ? "low" : "high"
+    const volumeIcon = silent ? "muted" : volumeNow < 0.5 ? "low" : "high"
     setIcon(
       muteBtn,
       volumeIcon,
-      silent ? ICON_MUTED : settings.volume < 0.5 ? ICON_VOLUME_LOW : ICON_VOLUME
+      silent ? ICON_MUTED : volumeNow < 0.5 ? ICON_VOLUME_LOW : ICON_VOLUME
     )
     muteBtn.dataset.on = String(silent)
     muteBtn.setAttribute("aria-label", silent ? "Unmute" : "Mute")
     muteBtn.setAttribute("aria-pressed", String(silent))
   }
-  if (volumeInput && !volumeDrag) volumeInput.value = String(settings.volume)
+  if (volumeInput && !volumeDrag) volumeInput.value = String(volumeNow)
   if (loopBtn) {
-    loopBtn.hidden = !settings.dockLoop
     loopBtn.dataset.on = String(settings.loop)
     loopBtn.setAttribute("aria-pressed", String(settings.loop))
   }
   if (pipBtn) {
-    pipBtn.hidden = !settings.dockPip || !document.pictureInPictureEnabled
     pipBtn.dataset.on = String(pipOn)
     pipBtn.setAttribute("aria-pressed", String(pipOn))
   }
   if (fullBtn) {
-    fullBtn.hidden = !settings.dockFullscreen
     setIcon(fullBtn, fullOn ? "exit" : "full", fullOn ? ICON_EXIT_FULL : ICON_FULL)
     fullBtn.dataset.on = String(fullOn)
     fullBtn.setAttribute("aria-label", fullOn ? "Exit full screen" : "Full screen")
     fullBtn.setAttribute("aria-pressed", String(fullOn))
   }
-  applyBarLayout(settings)
+  if (!volumeDrag && !speedDrag) applyBarLayout(settings)
 }
 
 function hasDockButtons(settings: EffectSettings): boolean {
   return DOCK_CONTROL_KEYS.some((key) => settings[key])
-}
-
-function barHeight(settings: EffectSettings): number {
-  const buttons = hasDockButtons(settings)
-  if (buttons && settings.dockProgress) return STACK_HEIGHT_PX
-  if (buttons) return CHROME_HEIGHT_PX
-  return HIT_HEIGHT_PX
 }
 
 function clampRate(value: number): number {
@@ -830,38 +1015,193 @@ function ratePortion(rate: number): string {
 }
 
 function paintSpeed(rate: number): void {
-  const shown = clampRate(rate)
+  const shown = clampRate(pendingRate ?? rate)
+  const label = formatRate(shown)
   if (speedBtn) {
-    speedBtn.textContent = formatRate(shown)
+    speedBtn.textContent = label
     speedBtn.dataset.on = String(Math.abs(shown - 1) > 0.001)
-    speedBtn.setAttribute("aria-label", `Playback speed ${formatRate(shown)}`)
+    speedBtn.setAttribute("aria-label", `Playback speed ${label}`)
   }
-  if (!speedInput || speedDrag) return
-  speedInput.value = String(shown)
+  if (speedReadout) speedReadout.textContent = label
+  if (speedCaption) {
+    const label = speedCaption.querySelector("span")
+    if (label) label.textContent = Math.abs(shown - 1) < 0.001 ? "Normal" : ""
+  }
+  for (const chip of speedChips) {
+    const chipRate = Number(chip.dataset.rate)
+    chip.dataset.on = String(Math.abs(shown - chipRate) < 0.005)
+  }
+  if (!speedInput) return
   speedInput.style.setProperty("--p", ratePortion(shown))
+  if (!speedDrag) speedInput.value = String(shown)
+}
+
+function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
+  switch (id) {
+    case "progress":
+      return settings.dockProgress
+    case "play":
+      return settings.dockPlay
+    case "time":
+      return settings.dockTime
+    case "skip":
+      return settings.dockSkip
+    case "speed":
+      return settings.dockSpeed
+    case "volume":
+      return settings.dockVolume
+    case "loop":
+      return settings.dockLoop
+    case "pip":
+      return settings.dockPip && document.pictureInPictureEnabled
+    case "fullscreen":
+      return settings.dockFullscreen
+  }
+}
+
+function popDirection(place: DockPlacement): "up" | "down" | "left" | "right" {
+  if (place.slot === "custom") {
+    if (place.x < 22) return "right"
+    if (place.x > 78) return "left"
+    return place.y < 40 ? "down" : "up"
+  }
+  if (place.edge === "top") return "down"
+  if (place.edge === "left") return "right"
+  if (place.edge === "right") return "left"
+  return "up"
+}
+
+function packFor(edge: DockEdge, slot: DockSlot): HTMLDivElement {
+  const key = `${edge}:${slot}`
+  let node = packNodes.get(key)
+  if (!node) {
+    node = document.createElement("div")
+    node.className = "vee-pack"
+    node.dataset.edge = edge
+    node.dataset.slot = slot
+    packNodes.set(key, node)
+  }
+  if (root && node.parentElement !== root) root.appendChild(node)
+  return node
+}
+
+function clearPin(el: HTMLElement): void {
+  el.style.left = ""
+  el.style.top = ""
+  el.style.right = ""
+  el.style.bottom = ""
+  el.style.transform = ""
+}
+
+function pinCustom(el: HTMLElement, place: DockPlacement): void {
+  if (root && el.parentElement !== root) root.appendChild(el)
+  el.style.left = `${place.x}%`
+  el.style.top = `${place.y}%`
+  el.style.right = "auto"
+  el.style.bottom = "auto"
+  el.style.transform = "translate(-50%, -50%)"
+}
+
+function placeTrack(place: DockPlacement, shown: boolean): void {
+  if (!hit) return
+  hit.hidden = !shown
+  if (tipEl) {
+    tipEl.hidden = !shown
+    if (!shown) tipEl.textContent = ""
+  }
+  const horizontal = place.edge === "top" || place.edge === "bottom"
+  hit.dataset.axis = horizontal ? "x" : "y"
+  hit.style.left = "auto"
+  hit.style.right = "auto"
+  hit.style.top = "auto"
+  hit.style.bottom = "auto"
+  hit.style.width = ""
+  hit.style.height = ""
+  hit.style.transform = ""
+  if (!shown) return
+  const custom = place.slot === "custom"
+  if (horizontal) {
+    const size = custom ? Math.max(24, 100 - place.x) : 100
+    const x = custom ? Math.min(place.x, 100 - size) : 0
+    hit.style.left = `${x}%`
+    hit.style.width = `${size}%`
+    hit.style.height = `${HIT_HEIGHT_PX}px`
+    if (place.edge === "bottom") {
+      hit.style.top = `${custom ? place.y : 100}%`
+      hit.style.transform = "translateY(-100%)"
+    } else {
+      hit.style.top = `${custom ? place.y : 0}%`
+    }
+    return
+  }
+  const size = custom ? Math.max(24, 100 - place.y) : 100
+  const y = custom ? Math.min(place.y, 100 - size) : 0
+  hit.style.top = `${y}%`
+  hit.style.height = `${size}%`
+  hit.style.width = `${HIT_HEIGHT_PX}px`
+  if (!custom && place.edge === "right") {
+    hit.style.left = "auto"
+    hit.style.right = "0"
+    return
+  }
+  if (!custom) {
+    hit.style.left = "0"
+    return
+  }
+  hit.style.left = `${place.x}%`
+  hit.style.transform = "translateX(-50%)"
+}
+
+function layoutControls(settings: EffectSettings): void {
+  if (!root) return
+  for (const node of packNodes.values()) node.replaceChildren()
+  const progress = settings.dockLayout.progress
+  const liftEdge = settings.dockProgress && progress.slot !== "custom" ? progress.edge : ""
+  for (const id of DOCK_ICON_ORDER) {
+    const el = controlNodes.get(id)
+    if (!el) continue
+    const shown = controlShown(id, settings)
+    el.hidden = !shown
+    if (!shown) continue
+    const place = settings.dockLayout[id]
+    const anchor = el.querySelector(".vee-pop-anchor")
+    if (anchor instanceof HTMLElement) anchor.dataset.out = popDirection(place)
+    if (place.slot === "custom") {
+      pinCustom(el, place)
+      continue
+    }
+    clearPin(el)
+    packFor(place.edge, place.slot).appendChild(el)
+  }
+  for (const node of packNodes.values()) {
+    const empty = node.childElementCount === 0
+    node.hidden = empty
+    if (empty) continue
+    node.dataset.lift = node.dataset.edge === liftEdge ? "true" : "false"
+  }
+  placeTrack(progress, settings.dockProgress)
 }
 
 function applyBarLayout(settings: EffectSettings): void {
   if (!root) return
-  const buttons = hasDockButtons(settings)
-  root.dataset.align =
-    settings.dockAlign === "center" || settings.dockAlign === "right" ? settings.dockAlign : "left"
   root.dataset.progress = settings.dockProgress ? "true" : "false"
-  root.dataset.buttons = buttons ? "true" : "false"
-  if (hit) hit.hidden = !settings.dockProgress
-  if (tipEl) {
-    tipEl.hidden = !settings.dockProgress
-    if (!settings.dockProgress) tipEl.textContent = ""
-  }
-  if (chromeEl) chromeEl.hidden = !buttons
-  if (cluster) cluster.hidden = !buttons
+  root.dataset.buttons = hasDockButtons(settings) ? "true" : "false"
+  layoutControls(settings)
 }
 
 function endSpeedDrag(): void {
+  flushSpeed()
   speedDrag = false
-  if (!speedSlider) return
+  if (!speedPop) return
   if (speedAnchor?.matches(":hover") || speedAnchor?.contains(document.activeElement)) return
-  delete speedSlider.dataset.open
+  armPopClose("speed")
+}
+
+function setPlaybackRate(rate: number): void {
+  const next = clampRate(rate)
+  pendingRate = next
+  paintSpeed(next)
+  scheduleSpeed(next)
 }
 
 function reportLoop(): void {
@@ -917,39 +1257,64 @@ function ensureBar(): HTMLDivElement {
   ensureStyle()
   const node = document.createElement("div")
   node.id = SEEK_BAR_ID
+  const chips = SPEED_CHIPS.map(
+    (rate) =>
+      `<button type="button" data-rate="${rate}" aria-label="${formatChip(rate)} times">${formatChip(rate)}</button>`
+  ).join("")
   node.innerHTML = `
-    <div class="vee-chrome">
-      <div class="vee-chrome-row">
-        <div class="vee-chrome-cluster">
-          <button type="button" class="vee-chrome-btn" data-act="play" aria-label="Play">${ICON_PLAY}</button>
-          <span class="vee-chrome-time" data-act="time"></span>
-          <button type="button" class="vee-chrome-btn" data-act="back" aria-label="Back 10 seconds" hidden>${ICON_BACK}</button>
-          <button type="button" class="vee-chrome-btn" data-act="forward" aria-label="Forward 10 seconds" hidden>${ICON_FORWARD}</button>
-          <div class="vee-speed-anchor" data-act="speed">
-            <button type="button" class="vee-rate-btn" data-act="speed-btn" aria-label="Playback speed">1×</button>
-            <div class="vee-speed-slider" data-pop="speed">
+    <div class="vee-control" data-place="play">
+      <button type="button" class="vee-chrome-btn" data-act="play" aria-label="Play">${ICON_PLAY}</button>
+    </div>
+    <div class="vee-control" data-place="time">
+      <span class="vee-chrome-time" data-act="time"></span>
+    </div>
+    <div class="vee-control" data-place="skip">
+      <button type="button" class="vee-chrome-btn" data-act="back" aria-label="Back 10 seconds">${ICON_BACK}</button>
+      <button type="button" class="vee-chrome-btn" data-act="forward" aria-label="Forward 10 seconds">${ICON_FORWARD}</button>
+    </div>
+    <div class="vee-control" data-place="speed">
+      <div class="vee-pop-anchor" data-act="speed" data-out="up">
+        <button type="button" class="vee-rate-btn" data-act="speed-btn" aria-label="Playback speed">1.00x</button>
+        <div class="vee-pop vee-speed-pop" data-pop="speed">
+          <div class="vee-pop-card">
+            <div class="vee-speed-readout">1.00x</div>
+            <div class="vee-speed-adjust">
+              <button type="button" class="vee-speed-step" data-act="speed-minus" aria-label="Slower">−</button>
               <input type="range" min="${PLAYBACK_RATE_MIN}" max="${PLAYBACK_RATE_MAX}" step="0.01" value="1" aria-label="Playback speed" />
+              <button type="button" class="vee-speed-step" data-act="speed-plus" aria-label="Faster">+</button>
             </div>
+            <div class="vee-speed-chips">${chips}</div>
+            <div class="vee-speed-caption"><span>Normal</span></div>
           </div>
-          <div class="vee-pop-anchor" data-act="volume">
-            <button type="button" class="vee-chrome-btn" data-act="mute" aria-label="Mute">${ICON_VOLUME}</button>
-            <div class="vee-pop vee-volume-pop" data-pop="volume">
-              <input type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
-            </div>
-          </div>
-          <button type="button" class="vee-chrome-btn" data-act="loop" aria-label="Loop" aria-pressed="false" hidden>${ICON_LOOP}</button>
-          <button type="button" class="vee-chrome-btn" data-act="pip" aria-label="Picture in picture" hidden>${ICON_PIP}</button>
-          <button type="button" class="vee-chrome-btn" data-act="full" aria-label="Full screen" hidden>${ICON_FULL}</button>
         </div>
       </div>
     </div>
-    <div class="vee-seek-hit" role="slider" aria-label="Video progress">
+    <div class="vee-control" data-place="volume">
+      <div class="vee-pop-anchor" data-act="volume" data-out="up">
+        <button type="button" class="vee-chrome-btn" data-act="mute" aria-label="Mute">${ICON_VOLUME}</button>
+        <div class="vee-pop vee-volume-pop" data-pop="volume">
+          <div class="vee-pop-card">
+            <input type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="vee-control" data-place="loop">
+      <button type="button" class="vee-chrome-btn" data-act="loop" aria-label="Loop" aria-pressed="false">${ICON_LOOP}</button>
+    </div>
+    <div class="vee-control" data-place="pip">
+      <button type="button" class="vee-chrome-btn" data-act="pip" aria-label="Picture in picture">${ICON_PIP}</button>
+    </div>
+    <div class="vee-control" data-place="fullscreen">
+      <button type="button" class="vee-chrome-btn" data-act="full" aria-label="Full screen">${ICON_FULL}</button>
+    </div>
+    <div class="vee-seek-hit" data-axis="x" role="slider" aria-label="Video progress">
       <div class="vee-seek-track">
         <div class="vee-seek-buffered"></div>
         <div class="vee-seek-played"></div>
       </div>
+      <span class="vee-seek-tip" aria-hidden="true"></span>
     </div>
-    <span class="vee-seek-tip" aria-hidden="true"></span>
   `
   hit = node.querySelector(".vee-seek-hit")
   bufferedEl = node.querySelector(".vee-seek-buffered")
@@ -959,11 +1324,13 @@ function ensureBar(): HTMLDivElement {
   timeEl = node.querySelector("[data-act='time']")
   backBtn = node.querySelector("[data-act='back']")
   forwardBtn = node.querySelector("[data-act='forward']")
-  chromeEl = node.querySelector(".vee-chrome")
   speedAnchor = node.querySelector("[data-act='speed']")
   speedBtn = node.querySelector("[data-act='speed-btn']")
-  speedSlider = node.querySelector(".vee-speed-slider")
-  speedInput = node.querySelector(".vee-speed-slider input")
+  speedPop = node.querySelector("[data-pop='speed']")
+  speedReadout = node.querySelector(".vee-speed-readout")
+  speedCaption = node.querySelector(".vee-speed-caption")
+  speedInput = node.querySelector(".vee-speed-adjust input")
+  speedChips = [...node.querySelectorAll<HTMLButtonElement>(".vee-speed-chips button")]
   volumeAnchor = node.querySelector("[data-act='volume']")
   muteBtn = node.querySelector("[data-act='mute']")
   volumePop = node.querySelector("[data-pop='volume']")
@@ -971,29 +1338,60 @@ function ensureBar(): HTMLDivElement {
   loopBtn = node.querySelector("[data-act='loop']")
   pipBtn = node.querySelector("[data-act='pip']")
   fullBtn = node.querySelector("[data-act='full']")
-  cluster = node.querySelector(".vee-chrome-cluster")
+  for (const id of DOCK_ICON_ORDER) {
+    const el = node.querySelector(`.vee-control[data-place='${id}']`)
+    if (el instanceof HTMLDivElement) controlNodes.set(id, el)
+  }
 
+  const openSpeed = () => {
+    cancelPopClose("speed")
+    if (speedPop) speedPop.dataset.open = "true"
+    showChrome()
+  }
+  speedAnchor?.addEventListener("pointerenter", openSpeed)
+  speedAnchor?.addEventListener("pointerleave", (event) => {
+    const next = event.relatedTarget
+    if (next instanceof Node && speedAnchor?.contains(next)) return
+    armPopClose("speed")
+  })
+  speedAnchor?.addEventListener("focusin", openSpeed)
+  speedAnchor?.addEventListener("focusout", () => armPopClose("speed"))
   speedBtn?.addEventListener("click", (event) => {
     stopAct(event)
-    if (speedSlider) speedSlider.dataset.open = "true"
-    speedInput?.focus()
-    showChrome()
+    openSpeed()
   })
+  node.querySelector("[data-act='speed-minus']")?.addEventListener("click", (event) => {
+    stopAct(event)
+    const settings = readSettings()
+    const video = boundVideo
+    if (!settings || !video) return
+    const base = pendingRate ?? shownRate(video, settings)
+    setPlaybackRate(base - SPEED_STEP)
+  })
+  node.querySelector("[data-act='speed-plus']")?.addEventListener("click", (event) => {
+    stopAct(event)
+    const settings = readSettings()
+    const video = boundVideo
+    if (!settings || !video) return
+    const base = pendingRate ?? shownRate(video, settings)
+    setPlaybackRate(base + SPEED_STEP)
+  })
+  for (const chip of speedChips) {
+    chip.addEventListener("click", (event) => {
+      stopAct(event)
+      setPlaybackRate(Number(chip.dataset.rate))
+    })
+  }
   speedInput?.addEventListener("pointerdown", (event) => {
     event.stopPropagation()
     speedDrag = true
-    if (speedSlider) speedSlider.dataset.open = "true"
-    showChrome()
+    openSpeed()
   })
   speedInput?.addEventListener("input", (event) => {
     event.stopPropagation()
     if (!speedInput) return
     speedDrag = true
-    noteWrite()
-    const rate = clampRate(Number(speedInput.value))
-    speedInput.style.setProperty("--p", ratePortion(rate))
-    if (speedBtn) speedBtn.textContent = formatRate(rate)
-    onControl?.({ type: "rate", playbackRate: rate })
+    setPlaybackRate(Number(speedInput.value))
   })
   speedInput?.addEventListener("change", () => {
     endSpeedDrag()
@@ -1028,6 +1426,7 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     const settings = readSettings()
     if (!settings) return
+    cancelVolumeApply()
     noteWrite()
     const silent = settings.muted || settings.volume <= 0.001
     if (silent) {
@@ -1038,41 +1437,47 @@ function ensureBar(): HTMLDivElement {
     }
     paintControls()
   })
-  volumeAnchor?.addEventListener("pointerenter", () => {
+  const openVolume = () => {
+    cancelPopClose("volume")
     if (volumePop) volumePop.dataset.open = "true"
     showChrome()
-  })
+  }
+  volumeAnchor?.addEventListener("pointerenter", openVolume)
   volumeAnchor?.addEventListener("pointerleave", (event) => {
     const next = event.relatedTarget
     if (next instanceof Node && volumeAnchor?.contains(next)) return
-    if (volumeAnchor?.contains(document.activeElement)) return
-    if (volumePop) delete volumePop.dataset.open
+    armPopClose("volume")
   })
-  volumeAnchor?.addEventListener("focusin", () => {
-    if (volumePop) volumePop.dataset.open = "true"
-  })
-  volumeAnchor?.addEventListener("focusout", () => {
-    window.setTimeout(() => {
-      if (volumeAnchor?.contains(document.activeElement)) return
-      if (volumePop) delete volumePop.dataset.open
-    }, 0)
+  volumeAnchor?.addEventListener("focusin", openVolume)
+  volumeAnchor?.addEventListener("focusout", () => armPopClose("volume"))
+  volumeInput?.addEventListener("pointerdown", (event) => {
+    event.stopPropagation()
+    volumeDrag = true
+    openVolume()
   })
   volumeInput?.addEventListener("input", () => {
     if (!volumeInput) return
     volumeDrag = true
-    noteWrite()
     const volume = Math.min(1, Math.max(0, Number(volumeInput.value)))
-    onControl?.({ type: "audio", volume, muted: volume <= 0.001 ? true : false })
+    const muted = volume <= 0.001
+    pendingVolume = { volume, muted }
+    paintControls()
+    scheduleVolume(volume, muted)
   })
   volumeInput?.addEventListener("change", () => {
+    flushVolume()
     volumeDrag = false
     paintControls()
   })
   volumeInput?.addEventListener("pointerup", () => {
+    flushVolume()
     volumeDrag = false
+    if (!volumeAnchor?.matches(":hover")) armPopClose("volume")
   })
   volumeInput?.addEventListener("pointercancel", () => {
+    flushVolume()
     volumeDrag = false
+    armPopClose("volume")
   })
   loopBtn?.addEventListener("click", (event) => {
     stopAct(event)
@@ -1101,7 +1506,7 @@ function ensureBar(): HTMLDivElement {
 
   hit?.addEventListener("pointerdown", onPointerDown)
   hit?.addEventListener("pointermove", (event) => {
-    if (!dragging) updateTip(event.clientX)
+    if (!dragging) updateTip(event.clientX, event.clientY)
   })
   hit?.addEventListener("pointerleave", () => {
     if (!dragging && tipEl) tipEl.textContent = ""
@@ -1158,15 +1563,19 @@ function bufferedFraction(video: HTMLVideoElement, timeline: Timeline): number {
   return Math.min(1, Math.max(0, (maxEnd - timeline.start) / (timeline.end - timeline.start)))
 }
 
-function timeFromClientX(video: HTMLVideoElement, clientX: number): number | null {
-  const bar = root
-  if (!bar || bar.style.display === "none") return null
-  const rect = bar.getBoundingClientRect()
-  if (rect.width < 1) return null
+function timeFromPointer(video: HTMLVideoElement, clientX: number, clientY: number): number | null {
+  if (!hit || hit.hidden || root?.style.display === "none") return null
+  const rect = hit.getBoundingClientRect()
+  const vertical = hit.dataset.axis === "y"
+  const span = vertical ? rect.height : rect.width
+  if (span < 1) return null
   const timeline = timelineRange(video)
   if (!timeline.seekable) return null
-  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
-  return timeline.start + ratio * (timeline.end - timeline.start)
+  const ratio = vertical
+    ? (clientY - rect.top) / rect.height
+    : (clientX - rect.left) / rect.width
+  const clamped = Math.min(1, Math.max(0, ratio))
+  return timeline.start + clamped * (timeline.end - timeline.start)
 }
 
 function seekVideo(video: HTMLVideoElement, time: number): void {
@@ -1186,26 +1595,59 @@ function updateFill(): void {
   const timeline = timelineRange(video)
   const played = fractionAlong(video, timeline)
   const buffered = bufferedFraction(video, timeline)
-  playedEl.style.width = `${played * 100}%`
-  bufferedEl.style.width = `${buffered * 100}%`
+  const vertical = hit.dataset.axis === "y"
+  if (vertical) {
+    playedEl.style.bottom = "auto"
+    bufferedEl.style.bottom = "auto"
+    playedEl.style.width = "100%"
+    bufferedEl.style.width = "100%"
+    playedEl.style.height = `${played * 100}%`
+    bufferedEl.style.height = `${buffered * 100}%`
+  } else {
+    playedEl.style.bottom = "0"
+    bufferedEl.style.bottom = "0"
+    playedEl.style.height = "100%"
+    bufferedEl.style.height = "100%"
+    playedEl.style.width = `${played * 100}%`
+    bufferedEl.style.width = `${buffered * 100}%`
+  }
   hit.setAttribute("aria-valuemin", String(Math.floor(timeline.start)))
   hit.setAttribute("aria-valuemax", String(Math.floor(timeline.end)))
   hit.setAttribute("aria-valuenow", String(Math.floor(video.currentTime)))
   hit.setAttribute("aria-disabled", timeline.seekable ? "false" : "true")
 }
 
-function updateTip(clientX: number): void {
+function updateTip(clientX: number, clientY: number): void {
   const video = boundVideo
-  if (!video || !tipEl || !root) return
-  const time = timeFromClientX(video, clientX)
+  if (!video || !tipEl || !hit) return
+  const time = timeFromPointer(video, clientX, clientY)
   if (time === null) {
     tipEl.textContent = ""
     return
   }
   tipEl.textContent = formatClock(time)
-  const rect = root.getBoundingClientRect()
+  const rect = hit.getBoundingClientRect()
+  if (hit.dataset.axis === "y") {
+    const y = Math.min(rect.height, Math.max(0, clientY - rect.top))
+    tipEl.style.top = `${y}px`
+    tipEl.style.bottom = "auto"
+    tipEl.style.transform = "translateY(-50%)"
+    const openLeft = rect.left > (root?.getBoundingClientRect().left ?? 0) + 40
+    if (openLeft) {
+      tipEl.style.left = "auto"
+      tipEl.style.right = `${rect.width + 8}px`
+    } else {
+      tipEl.style.right = "auto"
+      tipEl.style.left = `${rect.width + 8}px`
+    }
+    return
+  }
   const x = Math.min(rect.width, Math.max(0, clientX - rect.left))
   tipEl.style.left = `${x}px`
+  tipEl.style.right = "auto"
+  tipEl.style.top = "auto"
+  tipEl.style.bottom = `${HIT_HEIGHT_PX + 4}px`
+  tipEl.style.transform = "translateX(-50%)"
 }
 
 function onPointerDown(event: PointerEvent): void {
@@ -1220,9 +1662,9 @@ function onPointerDown(event: PointerEvent): void {
   root.dataset.drag = "true"
   showChrome()
   hit?.setPointerCapture(event.pointerId)
-  const time = timeFromClientX(video, event.clientX)
+  const time = timeFromPointer(video, event.clientX, event.clientY)
   if (time !== null) seekVideo(video, time)
-  updateTip(event.clientX)
+  updateTip(event.clientX, event.clientY)
   updateFill()
 }
 
@@ -1231,13 +1673,14 @@ function onPointerMove(event: PointerEvent): void {
   const video = boundVideo
   if (!video) return
   event.preventDefault()
-  const time = timeFromClientX(video, event.clientX)
+  const time = timeFromPointer(video, event.clientX, event.clientY)
   if (time !== null) seekVideo(video, time)
-  updateTip(event.clientX)
+  updateTip(event.clientX, event.clientY)
   updateFill()
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (volumeDrag) flushVolume()
   volumeDrag = false
   if (speedDrag) endSpeedDrag()
   if (!dragging || event.pointerId !== dragPointerId) return
@@ -1303,6 +1746,7 @@ function shouldShow(settings: EffectSettings): boolean {
   return (
     settings.enabled &&
     settings.playbackEnabled !== false &&
+    settings.dockEnabled !== false &&
     (settings.dockProgress || hasDockButtons(settings))
   )
 }
@@ -1343,10 +1787,11 @@ export function seekBarHitTest(event: Pick<MouseEvent, "clientX" | "clientY">): 
   const seek = bar.querySelector(".vee-seek-hit")
   if (seek instanceof HTMLElement && !seek.hidden && boxHas(seek, event)) return true
   if (bar.dataset.hot === "true") {
-    const chrome = bar.querySelector(".vee-chrome")
-    if (chrome instanceof HTMLElement && !chrome.hidden && boxHas(chrome, event)) return true
+    for (const control of bar.querySelectorAll(".vee-control")) {
+      if (control instanceof HTMLElement && !control.hidden && boxHas(control, event)) return true
+    }
   }
-  for (const pop of bar.querySelectorAll(".vee-pop[data-open='true'], .vee-speed-slider[data-open='true']")) {
+  for (const pop of bar.querySelectorAll(".vee-pop[data-open='true']")) {
     if (boxHas(pop, event)) return true
   }
   return false
@@ -1369,14 +1814,12 @@ export function placeSeekBar(video: HTMLVideoElement | null, attempt = 0): void 
     hideBar()
     return
   }
-  const settings = readSettings()
-  const height = settings ? barHeight(settings) : STACK_HEIGHT_PX
   const parent = barParent(video)
   if (root.parentElement !== parent) parent.appendChild(root)
   root.style.setProperty("left", `${clipped.left}px`, "important")
-  root.style.setProperty("top", `${clipped.bottom - height}px`, "important")
+  root.style.setProperty("top", `${clipped.top}px`, "important")
   root.style.setProperty("width", `${clipped.width}px`, "important")
-  root.style.setProperty("height", `${height}px`, "important")
+  root.style.setProperty("height", `${clipped.height}px`, "important")
   root.style.display = "block"
   root.dataset.visible = "true"
   updateFill()
@@ -1429,6 +1872,12 @@ export function stopSeekBar(): void {
   document.removeEventListener("fullscreenchange", onFullscreenCapture, true)
   document.removeEventListener("fullscreenchange", onPresentationChange)
   window.clearTimeout(hotTimer)
+  cancelPopClose("volume")
+  cancelPopClose("speed")
+  cancelVolumeApply()
+  window.clearTimeout(speedApplyTimer)
+  speedApplyTimer = 0
+  pendingRate = null
   pointerInside = false
   unbindVideo(boundVideo)
   boundVideo = null
@@ -1445,11 +1894,13 @@ export function stopSeekBar(): void {
   timeEl = null
   backBtn = null
   forwardBtn = null
-  chromeEl = null
   speedAnchor = null
   speedBtn = null
-  speedSlider = null
+  speedPop = null
+  speedReadout = null
+  speedCaption = null
   speedInput = null
+  speedChips = []
   volumeAnchor = null
   muteBtn = null
   volumePop = null
@@ -1457,7 +1908,8 @@ export function stopSeekBar(): void {
   loopBtn = null
   pipBtn = null
   fullBtn = null
-  cluster = null
+  controlNodes.clear()
+  packNodes.clear()
 }
 
 export function startSeekBar(options: {
