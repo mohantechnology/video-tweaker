@@ -1,7 +1,16 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 import { readEngineSignal } from "~lib/engine"
-import { groupsFromText, groupsFromValue, readRenditionMessage, RENDITION_SOURCE, type Rendition } from "~lib/renditions"
+import {
+  groupsFromText,
+  groupsFromValue,
+  postRenditionResult,
+  QUALITY_MARK,
+  readRenditionMessage,
+  RENDITION_SOURCE,
+  type Rendition,
+  type RenditionMessage
+} from "~lib/renditions"
 import { fileUrl, mediaPath } from "~lib/media-file"
 
 export const config: PlasmoCSConfig = {
@@ -253,6 +262,387 @@ function noteXhr(xhr: XMLHttpRequest): void {
   }
 }
 
+const PAINT_WAIT_MS = 2500
+const REVEAL_HOLD_MS = 1200
+
+type InlineStyle = { value: string; priority: string }
+
+type QualityHold = {
+  video: HTMLVideoElement
+  token: string
+  url: string
+  audioUrl: string
+  time: number
+  paused: boolean
+  ended: boolean
+  rate: number
+  muted: boolean
+  volume: number
+  savedSrc: string
+  savedObject: MediaProvider | null
+  savedCrossOrigin: string | null
+  pendingObject: MediaProvider | null
+  pendingSrc: string
+  played: boolean
+  settled: boolean
+  timer: number
+  observer: MutationObserver | null
+  forcedOpacity: boolean
+  forcedVisibility: boolean
+  savedOpacity: InlineStyle
+  savedVisibility: InlineStyle
+  onReady: () => void
+  onError: () => void
+}
+
+let hold: QualityHold | null = null
+let revealEpoch = 0
+
+const mediaSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src")
+const mediaObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")
+const mediaOrigin = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "crossOrigin")
+
+function clearCrossOrigin(video: HTMLVideoElement): void {
+  try {
+    mediaOrigin?.set?.call(video, null)
+  } catch {
+    /* The element can reject a cleared origin. */
+  }
+  Element.prototype.removeAttribute.call(video, "crossorigin")
+}
+
+function inlineStyle(video: HTMLVideoElement, name: "opacity" | "visibility"): InlineStyle {
+  return { value: video.style.getPropertyValue(name), priority: video.style.getPropertyPriority(name) }
+}
+
+function videoForToken(token: string): HTMLVideoElement | null {
+  const selector = `[${QUALITY_MARK}="${token}"]`
+  const seen = new Set<ParentNode>()
+  const walk = (root: ParentNode): HTMLVideoElement | null => {
+    if (seen.has(root)) return null
+    seen.add(root)
+    const found = root.querySelector(selector)
+    if (found instanceof HTMLVideoElement) return found
+    for (const node of root.querySelectorAll("*")) {
+      if (!(node instanceof Element) || !node.shadowRoot) continue
+      const nested = walk(node.shadowRoot)
+      if (nested) return nested
+    }
+    return null
+  }
+  return walk(document)
+}
+
+/** Block the page from putting a dead stream back while a chosen file is playing. */
+function guardVideo(video: HTMLVideoElement): void {
+  if (video.dataset.veeGuard === "1") return
+  if (!mediaSrc?.get || !mediaSrc.set || !mediaObject?.get || !mediaObject.set) return
+  try {
+    Object.defineProperty(video, "src", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return mediaSrc.get!.call(this)
+      },
+      set(value: string) {
+        if (hold?.video === video && typeof value === "string" && (value === "" || value.startsWith("blob:"))) {
+          if (value.startsWith("blob:")) hold.pendingSrc = value
+          return
+        }
+        mediaSrc.set!.call(this, value)
+      }
+    })
+    Object.defineProperty(video, "srcObject", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return mediaObject.get!.call(this)
+      },
+      set(value: MediaProvider | null) {
+        if (hold?.video === video) {
+          if (value) hold.pendingObject = value
+          return
+        }
+        mediaObject.set!.call(this, value)
+      }
+    })
+    if (mediaOrigin?.get && mediaOrigin.set) {
+      Object.defineProperty(video, "crossOrigin", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return mediaOrigin.get!.call(this)
+        },
+        set(value: string | null) {
+          if (hold?.video === video) return
+          mediaOrigin.set!.call(this, value)
+        }
+      })
+    }
+    video.setAttribute = (name: string, value: string) => {
+      const key = name.toLowerCase()
+      if (hold?.video === video && key === "crossorigin") return
+      if (hold?.video === video && key === "src" && (value === "" || value.startsWith("blob:"))) {
+        if (value.startsWith("blob:") && hold) hold.pendingSrc = value
+        return
+      }
+      Element.prototype.setAttribute.call(video, name, value)
+    }
+    video.removeAttribute = (name: string) => {
+      const key = name.toLowerCase()
+      if (hold?.video === video && (key === "src" || key === "crossorigin")) return
+      Element.prototype.removeAttribute.call(video, name)
+    }
+    video.dataset.veeGuard = "1"
+  } catch {
+    /* The player can already own these properties. */
+  }
+}
+
+function reveal(next: QualityHold): void {
+  const video = next.video
+  const style = getComputedStyle(video)
+  if (Number(style.opacity) === 0) {
+    if (!next.forcedOpacity) next.savedOpacity = inlineStyle(video, "opacity")
+    next.forcedOpacity = true
+    video.style.setProperty("opacity", "1", "important")
+  }
+  if (style.visibility === "hidden") {
+    if (!next.forcedVisibility) next.savedVisibility = inlineStyle(video, "visibility")
+    next.forcedVisibility = true
+    video.style.setProperty("visibility", "visible", "important")
+  }
+}
+
+function clearReveal(next: QualityHold): void {
+  const video = next.video
+  if (next.forcedOpacity) {
+    if (next.savedOpacity.value) video.style.setProperty("opacity", next.savedOpacity.value, next.savedOpacity.priority)
+    else video.style.removeProperty("opacity")
+    next.forcedOpacity = false
+  }
+  if (next.forcedVisibility) {
+    if (next.savedVisibility.value) video.style.setProperty("visibility", next.savedVisibility.value, next.savedVisibility.priority)
+    else video.style.removeProperty("visibility")
+    next.forcedVisibility = false
+  }
+}
+
+function watchVisibility(next: QualityHold): void {
+  next.observer?.disconnect()
+  reveal(next)
+  const observer = new MutationObserver(() => {
+    if (hold !== next) return
+    reveal(next)
+    if (next.video.hasAttribute("crossorigin")) clearCrossOrigin(next.video)
+  })
+  observer.observe(next.video, { attributes: true, attributeFilter: ["style", "class", "crossorigin"] })
+  next.observer = observer
+}
+
+function stopWatch(next: QualityHold): void {
+  next.observer?.disconnect()
+  next.observer = null
+}
+
+function detachLoad(next: QualityHold): void {
+  window.clearTimeout(next.timer)
+  next.timer = 0
+  next.video.removeEventListener("loadedmetadata", next.onReady)
+  next.video.removeEventListener("loadeddata", next.onReady)
+  next.video.removeEventListener("resize", next.onReady)
+  next.video.removeEventListener("error", next.onError)
+}
+
+function placePlayback(next: QualityHold): void {
+  const video = next.video
+  try {
+    if (next.time > 0) {
+      const duration = video.duration
+      const at =
+        Number.isFinite(duration) && duration > 0 ? Math.min(next.time, Math.max(0, duration - 0.05)) : next.time
+      video.currentTime = at
+    }
+  } catch {
+    /* The player can reject a seek until the new file is ready. */
+  }
+  try {
+    video.playbackRate = next.rate
+  } catch {
+    /* Ignore a rate the element rejects. */
+  }
+  video.muted = next.muted
+  try {
+    video.volume = next.volume
+  } catch {
+    /* Ignore a volume the element rejects. */
+  }
+  if (!next.paused && !next.ended) void video.play().catch(() => undefined)
+}
+
+function restoreSource(next: QualityHold, preferPending: boolean): void {
+  stopWatch(next)
+  if (hold === next) hold = null
+  next.video.removeAttribute(QUALITY_MARK)
+  const video = next.video
+  try {
+    if (next.savedCrossOrigin) mediaOrigin?.set?.call(video, next.savedCrossOrigin)
+    else clearCrossOrigin(video)
+    const progressive = !next.savedObject && Boolean(next.savedSrc) && !next.savedSrc.startsWith("blob:")
+    if (preferPending && next.pendingObject) mediaObject?.set?.call(video, next.pendingObject)
+    else if (preferPending && next.pendingSrc) mediaSrc?.set?.call(video, next.pendingSrc)
+    else if (progressive) mediaSrc?.set?.call(video, next.savedSrc)
+    else if (next.pendingObject) mediaObject?.set?.call(video, next.pendingObject)
+    else if (next.pendingSrc) mediaSrc?.set?.call(video, next.pendingSrc)
+    else if (next.savedObject) mediaObject?.set?.call(video, next.savedObject)
+    else if (next.savedSrc) mediaSrc?.set?.call(video, next.savedSrc)
+  } catch {
+    /* The player can drop a source that is no longer current. */
+  }
+  if (!next.paused && !next.ended) void video.play().catch(() => undefined)
+  const epoch = ++revealEpoch
+  window.setTimeout(() => {
+    if (epoch !== revealEpoch || hold) return
+    clearReveal(next)
+  }, REVEAL_HOLD_MS)
+}
+
+function fileReady(next: QualityHold): boolean {
+  const live = next.video.currentSrc || next.video.src || ""
+  return (
+    Boolean(live) &&
+    mediaPath(live) === mediaPath(next.url) &&
+    next.video.videoWidth >= 2 &&
+    next.video.videoHeight >= 2
+  )
+}
+
+/** The page is already showing some other file, so a restore would replace it. */
+function pageMovedOn(next: QualityHold): boolean {
+  const live = next.video.currentSrc || next.video.src || ""
+  if (!live || live.startsWith("blob:") || mediaPath(live) === mediaPath(next.url)) return false
+  return next.video.videoWidth >= 2 && next.video.readyState >= 2
+}
+
+function settle(next: QualityHold, ok: boolean): void {
+  if (hold !== next || next.settled) return
+  next.settled = true
+  detachLoad(next)
+  if (ok && fileReady(next)) {
+    next.played = true
+    placePlayback(next)
+    if (hold !== next) return
+    reveal(next)
+    postRenditionResult("used", next.token, next.url, next.audioUrl)
+    return
+  }
+  restoreSource(next, false)
+  postRenditionResult("failed", next.token, next.url, next.audioUrl)
+}
+
+function useRendition(message: RenditionMessage): void {
+  const token = message.token || ""
+  const url = message.url || ""
+  const video = videoForToken(token)
+  if (!video || !url) {
+    if (token) postRenditionResult("failed", token, url, message.audioUrl || "")
+    return
+  }
+  const audioUrl = message.audioUrl || ""
+  if (hold?.video === video && hold.played && mediaPath(hold.url) === mediaPath(url) && hold.audioUrl === audioUrl) {
+    postRenditionResult("used", token, url, audioUrl)
+    return
+  }
+  const previous = hold?.video === video ? hold : null
+  if (hold && hold !== previous) {
+    hold.settled = true
+    detachLoad(hold)
+    restoreSource(hold, false)
+  }
+  if (previous) {
+    previous.settled = true
+    detachLoad(previous)
+    stopWatch(previous)
+    if (hold === previous) hold = null
+  }
+  const next: QualityHold = {
+    video,
+    token,
+    url,
+    audioUrl,
+    time: message.time || 0,
+    paused: message.paused === true,
+    ended: message.ended === true,
+    rate: message.rate || 1,
+    muted: message.muted === true,
+    volume: typeof message.volume === "number" ? message.volume : 1,
+    savedSrc: previous && !previous.played ? previous.savedSrc : video.currentSrc || video.src || "",
+    savedObject: previous && !previous.played ? previous.savedObject : video.srcObject,
+    savedCrossOrigin: previous ? previous.savedCrossOrigin : video.crossOrigin,
+    pendingObject: null,
+    pendingSrc: "",
+    played: false,
+    settled: false,
+    timer: 0,
+    observer: null,
+    forcedOpacity: previous?.forcedOpacity === true,
+    forcedVisibility: previous?.forcedVisibility === true,
+    savedOpacity: previous?.forcedOpacity ? previous.savedOpacity : inlineStyle(video, "opacity"),
+    savedVisibility: previous?.forcedVisibility ? previous.savedVisibility : inlineStyle(video, "visibility"),
+    onReady: () => undefined,
+    onError: () => undefined
+  }
+  let assigned = false
+  next.onReady = () => {
+    if (fileReady(next)) settle(next, true)
+  }
+  next.onError = () => {
+    if (!assigned || next.video.error?.code === MediaError.MEDIA_ERR_ABORTED) return
+    const live = next.video.currentSrc || next.video.src || ""
+    if (live && mediaPath(live) !== mediaPath(next.url)) return
+    settle(next, false)
+  }
+  hold = next
+  guardVideo(video)
+  watchVisibility(next)
+  video.addEventListener("loadedmetadata", next.onReady)
+  video.addEventListener("loadeddata", next.onReady)
+  video.addEventListener("resize", next.onReady)
+  video.addEventListener("error", next.onError)
+  next.timer = window.setTimeout(() => settle(next, fileReady(next)), PAINT_WAIT_MS)
+  try {
+    clearCrossOrigin(video)
+    mediaObject?.set?.call(video, null)
+    if (next.settled) return
+    assigned = true
+    if (mediaSrc?.set) mediaSrc.set.call(video, url)
+    else video.src = url
+  } catch {
+    settle(next, false)
+  }
+}
+
+function dropRendition(message: RenditionMessage): void {
+  if (!hold || message.token !== hold.token) return
+  const next = hold
+  next.settled = true
+  detachLoad(next)
+  const movedOn = pageMovedOn(next)
+  if (message.restore === false || movedOn) {
+    stopWatch(next)
+    hold = null
+    next.video.removeAttribute(QUALITY_MARK)
+    if (!movedOn) return
+    const epoch = ++revealEpoch
+    window.setTimeout(() => {
+      if (epoch !== revealEpoch || hold) return
+      clearReveal(next)
+    }, REVEAL_HOLD_MS)
+    return
+  }
+  restoreSource(next, true)
+}
+
 /** Record renditions from responses these pages already load. */
 function installRenditionWatch(): void {
   if (renditionWatchInstalled || !onRenditionHost()) return
@@ -281,6 +671,15 @@ window.addEventListener("message", (event) => {
     publishRenditions([])
     return
   }
+  if (renditions?.kind === "use") {
+    useRendition(renditions)
+    return
+  }
+  if (renditions?.kind === "drop") {
+    dropRendition(renditions)
+    return
+  }
+  if (renditions) return
   const active = readEngineSignal(event.data)
   if (active == null) return
   if (active) install()

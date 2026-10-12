@@ -8,10 +8,14 @@ import {
 import { directMediaUrl, DOWNLOAD_MESSAGE, fileUrl, mediaPath } from "./media-file"
 import {
   postRenditionAsk,
+  postRenditionDrop,
+  postRenditionUse,
+  QUALITY_MARK,
   qualityLabel,
   readRenditionMessage,
   sortRenditions,
-  type Rendition
+  type Rendition,
+  type RenditionMessage
 } from "./renditions"
 import { seekBy, togglePictureInPicture } from "./effects"
 import { formatClock } from "./progress"
@@ -826,6 +830,7 @@ let suppressingControls = false
 let downloadBusy = false
 let layoutStamp = ""
 let qualityToken = 0
+let qualityNonce = ""
 let qualityStamp = ""
 const rememberedSrc = new WeakMap<HTMLVideoElement, string>()
 const pinnedGroup = new WeakMap<HTMLVideoElement, Rendition[]>()
@@ -840,8 +845,6 @@ let lockedUrl = ""
 let lockedAudio = ""
 let lockedCode = ""
 let applyingQuality = false
-let passingMedia = false
-let pendingProvider: { video: HTMLVideoElement; value: MediaProvider } | null = null
 let historyHooked = false
 
 type FsSession = {
@@ -1694,66 +1697,20 @@ function movedAway(video: HTMLVideoElement): boolean {
   return code !== "" && code !== lockedCode
 }
 
-function guardVideo(video: HTMLVideoElement): void {
-  if (video.dataset.veeGuard === "1") return
-  const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src")
-  const objDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")
-  if (!srcDesc?.get || !srcDesc.set || !objDesc?.get || !objDesc.set) return
-  try {
-    Object.defineProperty(video, "src", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        return srcDesc.get!.call(this)
-      },
-      set(value: string) {
-        if (holding(video) && typeof value === "string" && (value === "" || value.startsWith("blob:"))) return
-        srcDesc.set!.call(this, value)
-      }
-    })
-    Object.defineProperty(video, "srcObject", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        return objDesc.get!.call(this)
-      },
-      set(value: MediaProvider | null) {
-        if (passingMedia) {
-          objDesc.set!.call(this, value)
-          return
-        }
-        if (holding(video) && value && !movedAway(video)) {
-          pendingProvider = { video, value }
-          return
-        }
-        objDesc.set!.call(this, value)
-      }
-    })
-    video.dataset.veeGuard = "1"
-  } catch {
-    /* The player can already own these properties. */
-  }
-}
-
-function releaseQuality(video: HTMLVideoElement | null, applyPending: boolean): void {
-  const pending = pendingProvider
-  pendingProvider = null
+function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void {
   const was = lockedVideo
+  if (video && was && was !== video) return
+  const token = qualityNonce
+  qualityNonce = ""
   lockedUrl = ""
   lockedAudio = ""
   lockedCode = ""
-  if (!video || lockedVideo === video) lockedVideo = null
+  lockedVideo = null
+  applyingQuality = false
   clearSidecar(video || was)
-  if (!applyPending || !pending) return
-  if (video && pending.video !== video) return
-  passingMedia = true
-  try {
-    pending.video.srcObject = pending.value
-  } catch {
-    /* The player can drop a source that is no longer current. */
-  } finally {
-    passingMedia = false
-  }
+  const node = video || was
+  if (node) node.removeAttribute(QUALITY_MARK)
+  if (token) postRenditionDrop(token, restore)
 }
 
 function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
@@ -1844,64 +1801,51 @@ function hookHistory(): void {
 
 function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void {
   const live = video.currentSrc || video.src
-  if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl) return
-  const time = video.currentTime || 0
-  const paused = video.paused
-  const ended = video.ended
-  const rate = video.playbackRate || 1
-  const muted = video.muted
-  const volume = video.volume
-  const token = ++qualityToken
-  const detach = () => {
-    video.removeEventListener("loadedmetadata", resume)
-    video.removeEventListener("error", fail)
-  }
-  function resume(): void {
-    if (token !== qualityToken) return
-    detach()
-    applyingQuality = false
-    try {
-      if (time > 0) {
-        const duration = video.duration
-        const next =
-          Number.isFinite(duration) && duration > 0 ? Math.min(time, Math.max(0, duration - 0.05)) : time
-        video.currentTime = next
-      }
-    } catch {
-      /* The player can reject a seek until the new file is ready. */
-    }
-    video.playbackRate = rate
-    video.muted = muted
-    video.volume = volume
-    rememberedSrc.set(video, url)
-    if (audioUrl) setSidecar(video, audioUrl)
-    else clearSidecar(video)
-    if (!paused && !ended) void video.play().catch(() => undefined)
-    paintControls()
-  }
-  function fail(): void {
-    if (token !== qualityToken) return
-    detach()
-    applyingQuality = false
-  }
-  video.addEventListener("loadedmetadata", resume)
-  video.addEventListener("error", fail)
+  if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl && lockedVideo === video) return
+  const token = String(++qualityToken)
+  qualityNonce = token
+  video.setAttribute(QUALITY_MARK, token)
   rememberedSrc.set(video, url)
   startedPath.set(video, mediaPath(url))
   lockedVideo = video
   lockedUrl = url
   lockedCode = mediaCode(video)
-  pendingProvider = null
-  guardVideo(video)
   applyingQuality = true
-  try {
-    video.srcObject = null
-  } catch {
-    /* Some players reject clearing the media source. */
+  clearSidecar(video)
+  postRenditionUse({
+    token,
+    url,
+    audioUrl,
+    time: video.currentTime || 0,
+    paused: video.paused,
+    ended: video.ended,
+    rate: video.playbackRate || 1,
+    muted: video.muted,
+    volume: video.volume
+  })
+}
+
+function onQualityResult(message: RenditionMessage): void {
+  if (!message.token || message.token !== qualityNonce) return
+  const video = lockedVideo
+  applyingQuality = false
+  if (message.kind === "failed") {
+    qualityNonce = ""
+    if (video) {
+      rememberedSrc.delete(video)
+      video.removeAttribute(QUALITY_MARK)
+    }
+    lockedUrl = ""
+    lockedAudio = ""
+    lockedCode = ""
+    lockedVideo = null
+    clearSidecar(video)
+    paintControls()
+    return
   }
-  video.src = url
-  if (audioUrl) setSidecar(video, audioUrl)
+  if (video && message.audioUrl) setSidecar(video, message.audioUrl)
   else clearSidecar(video)
+  paintControls()
 }
 
 async function downloadCurrent(): Promise<void> {
@@ -1928,7 +1872,12 @@ async function downloadCurrent(): Promise<void> {
 function onRenditionMessage(event: MessageEvent): void {
   if (event.source !== window) return
   const message = readRenditionMessage(event.data)
-  if (!message || message.kind !== "list") return
+  if (!message) return
+  if (message.kind === "used" || message.kind === "failed") {
+    onQualityResult(message)
+    return
+  }
+  if (message.kind !== "list") return
   renditionGroups = message.groups ?? []
   if (message.played && message.played.length > 0) playedPaths = message.played
   if (message.batch && message.batch.length > 0) {
@@ -3338,13 +3287,13 @@ export function stopSeekBar(): void {
   fullBtn = null
   downloadBusy = false
   layoutStamp = ""
-  qualityToken = 0
   qualityStamp = ""
   renditionGroups = []
   playedPaths = []
   latestBatch = []
   latestAt = 0
   releaseQuality(lockedVideo, false)
+  qualityToken = 0
   controlNodes.clear()
   packNodes.clear()
 }

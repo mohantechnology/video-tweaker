@@ -3,6 +3,9 @@ import { fileUrl, mediaPath } from "./media-file"
 /** Page event carrying renditions Instagram already loaded. */
 export const RENDITION_SOURCE = "vee-renditions"
 
+/** Marks the video element a resolution swap should use. */
+export const QUALITY_MARK = "data-vee-quality"
+
 export type Rendition = {
   width: number
   height: number
@@ -23,11 +26,23 @@ export type Rendition = {
 
 export type RenditionMessage = {
   source: typeof RENDITION_SOURCE
-  kind: "ask" | "list"
+  kind: "ask" | "list" | "use" | "drop" | "used" | "failed"
   groups?: Rendition[][]
   batch?: Rendition[][]
   /** Pathnames of media files the page just requested, newest first. */
   played?: string[]
+  /** Identifies the video element for a resolution swap. */
+  token?: string
+  url?: string
+  audioUrl?: string
+  time?: number
+  paused?: boolean
+  ended?: boolean
+  rate?: number
+  muted?: boolean
+  volume?: number
+  /** When dropping a swap, put the player's previous source back. */
+  restore?: boolean
 }
 
 const MAX_TEXT = 12_000_000
@@ -38,18 +53,98 @@ export function readRenditionMessage(data: unknown): RenditionMessage | null {
   if (!data || typeof data !== "object") return null
   const message = data as Partial<RenditionMessage>
   if (message.source !== RENDITION_SOURCE) return null
-  if (message.kind !== "ask" && message.kind !== "list") return null
+  if (message.kind === "ask" || message.kind === "list") {
+    return {
+      source: RENDITION_SOURCE,
+      kind: message.kind,
+      groups: message.kind === "list" ? sanitizeGroups(message.groups) : undefined,
+      batch: message.kind === "list" ? sanitizeGroups(message.batch) : undefined,
+      played: message.kind === "list" ? sanitizePlayed(message.played) : undefined
+    }
+  }
+  if (message.kind !== "use" && message.kind !== "drop" && message.kind !== "used" && message.kind !== "failed") {
+    return null
+  }
+  const token = qualityToken(message.token)
+  if (!token) return null
+  const url = fileUrl(typeof message.url === "string" ? message.url : "") || undefined
+  if (message.kind === "use" && !url) return null
+  const audio = fileUrl(typeof message.audioUrl === "string" ? message.audioUrl : "") || undefined
+  const time = typeof message.time === "number" && Number.isFinite(message.time) ? Math.min(86_400, Math.max(0, message.time)) : 0
+  const rate = typeof message.rate === "number" && Number.isFinite(message.rate) ? Math.min(16, Math.max(0.25, message.rate)) : 1
+  const volume = typeof message.volume === "number" && Number.isFinite(message.volume) ? Math.min(1, Math.max(0, message.volume)) : 1
   return {
     source: RENDITION_SOURCE,
     kind: message.kind,
-    groups: message.kind === "list" ? sanitizeGroups(message.groups) : undefined,
-    batch: message.kind === "list" ? sanitizeGroups(message.batch) : undefined,
-    played: message.kind === "list" ? sanitizePlayed(message.played) : undefined
+    token,
+    url,
+    audioUrl: audio,
+    time,
+    paused: message.paused === true,
+    ended: message.ended === true,
+    rate,
+    muted: message.muted === true,
+    volume,
+    restore: message.restore !== false
   }
+}
+
+function qualityToken(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(value)) return ""
+  return value
 }
 
 export function postRenditionAsk(): void {
   window.postMessage({ source: RENDITION_SOURCE, kind: "ask" } satisfies RenditionMessage, "*")
+}
+
+export function postRenditionUse(body: {
+  token: string
+  url: string
+  audioUrl?: string
+  time: number
+  paused: boolean
+  ended: boolean
+  rate: number
+  muted: boolean
+  volume: number
+}): void {
+  window.postMessage(
+    {
+      source: RENDITION_SOURCE,
+      kind: "use",
+      token: body.token,
+      url: body.url,
+      audioUrl: body.audioUrl || undefined,
+      time: body.time,
+      paused: body.paused,
+      ended: body.ended,
+      rate: body.rate,
+      muted: body.muted,
+      volume: body.volume
+    } satisfies RenditionMessage,
+    "*"
+  )
+}
+
+export function postRenditionDrop(token: string, restore: boolean): void {
+  window.postMessage(
+    { source: RENDITION_SOURCE, kind: "drop", token, restore } satisfies RenditionMessage,
+    "*"
+  )
+}
+
+export function postRenditionResult(kind: "used" | "failed", token: string, url: string, audioUrl: string): void {
+  window.postMessage(
+    {
+      source: RENDITION_SOURCE,
+      kind,
+      token,
+      url,
+      audioUrl: audioUrl || undefined
+    } satisfies RenditionMessage,
+    "*"
+  )
 }
 
 export function groupsFromText(text: string): Rendition[][] {
@@ -509,6 +604,25 @@ function rememberAlias(item: Rendition, url: string): void {
   item.aliases = aliases
 }
 
+/** Keep a muxed progressive file ahead of a video-only DASH address for the same picture. */
+function preferPlayable(same: Rendition, item: Rendition): void {
+  if (mediaPath(same.url) === mediaPath(item.url)) {
+    if (item.audioUrl && !same.audioUrl) same.audioUrl = item.audioUrl
+    for (const alias of item.aliases || []) rememberAlias(same, alias)
+    return
+  }
+  const currentMuxed = !same.audioUrl
+  const incomingMuxed = !item.audioUrl
+  if (currentMuxed) rememberAlias(same, item.url)
+  else if (incomingMuxed) {
+    rememberAlias(same, same.url)
+    same.url = item.url
+    same.audioUrl = undefined
+    same.label = same.label || item.label
+  } else rememberAlias(same, item.url)
+  for (const alias of item.aliases || []) rememberAlias(same, alias)
+}
+
 function mergeRenditions(muxed: Rendition[], dashed: Rendition[]): Rendition[] {
   const next = dedupe(muxed)
   for (const item of dashed) {
@@ -517,22 +631,7 @@ function mergeRenditions(muxed: Rendition[], dashed: Rendition[]): Rendition[] {
       next.push(item)
       continue
     }
-    if (mediaPath(same.url) === mediaPath(item.url)) {
-      if (item.audioUrl && !same.audioUrl) same.audioUrl = item.audioUrl
-      for (const alias of item.aliases || []) rememberAlias(same, alias)
-      continue
-    }
-    const incomingMuxed = !item.audioUrl
-    const currentSilent = Boolean(same.audioUrl)
-    if (incomingMuxed && currentSilent) {
-      rememberAlias(same, same.url)
-      same.url = item.url
-      same.audioUrl = undefined
-      same.label = same.label || item.label
-    } else {
-      rememberAlias(same, item.url)
-    }
-    for (const alias of item.aliases || []) rememberAlias(same, alias)
+    preferPlayable(same, item)
   }
   return dedupe(next)
 }
@@ -622,20 +721,11 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
     }
     stampTitle(host, group.find((item) => item.title)?.title)
     for (const item of group) {
-      const existing = host.find((other) => mediaPath(other.url) === mediaPath(item.url))
+      const existing = host.find((other) => mediaPath(other.url) === mediaPath(item.url) || samePicture(other, item))
       if (existing) {
-        for (const alias of item.aliases || []) rememberAlias(existing, alias)
+        preferPlayable(existing, item)
         continue
       }
-      const sameSize = host.some(
-        (other) =>
-          other.measured !== false &&
-          item.measured !== false &&
-          Math.abs(other.height - item.height) <= Math.max(8, item.height * 0.04) &&
-          Math.abs(other.width - item.width) <= Math.max(8, item.width * 0.04)
-      )
-      if (sameSize && !item.audioUrl) continue
-      if (sameSize && item.audioUrl) continue
       host.push(item)
     }
   }
