@@ -3,7 +3,7 @@ import {
   domainIconOrder,
   domainShape,
   domainSkin,
-  readPageTitle
+  readVideoTitle
 } from "./domains"
 import { directMediaUrl, DOWNLOAD_MESSAGE, fileUrl, mediaPath } from "./media-file"
 import {
@@ -824,6 +824,7 @@ let controlsBeforeFullscreen: boolean | null = null
 let controlsObserver: MutationObserver | null = null
 let suppressingControls = false
 let downloadBusy = false
+let layoutStamp = ""
 let qualityToken = 0
 let qualityStamp = ""
 const rememberedSrc = new WeakMap<HTMLVideoElement, string>()
@@ -1127,7 +1128,7 @@ function actFromTarget(target: EventTarget | null): { act: string; node: HTMLEle
   const node = target.closest("[data-act]")
   if (!(node instanceof HTMLElement)) return null
   const act = node.dataset.act || ""
-  if (act === "loop" || act === "speed-btn" || act === "speed-minus" || act === "speed-plus") {
+  if (act === "loop" || act === "speed-btn" || act === "speed-minus" || act === "speed-plus" || act === "download") {
     return { act, node }
   }
   return null
@@ -1136,6 +1137,15 @@ function actFromTarget(target: EventTarget | null): { act: string; node: HTMLEle
 function onWindowActDown(event: PointerEvent): void {
   const hit = actFromTarget(event.target)
   if (!hit) return
+  if (hit.act === "download") {
+    if (event.button !== 0 || !event.isPrimary) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.stopImmediatePropagation()
+    showChrome()
+    void downloadCurrent()
+    return
+  }
   event.preventDefault()
   event.stopPropagation()
   event.stopImmediatePropagation()
@@ -1614,6 +1624,17 @@ function activeRendition(video: HTMLVideoElement, choices: readonly Rendition[])
   )
 }
 
+function downloadTitle(video: HTMLVideoElement | null): string {
+  const group = video ? matchedGroup(video) : []
+  const url = fileForDownload(video)
+  const path = url ? mediaPath(url) : ""
+  const matched = path ? group.find((item) => mentionsPath(item, path) && item.title) : undefined
+  if (matched?.title) return matched.title
+  const shared = group.find((item) => item.title)?.title
+  if (shared) return shared
+  return readVideoTitle(video)
+}
+
 function fileForDownload(video: HTMLVideoElement | null): string | null {
   if (!video) return null
   const direct = directMediaUrl(video)
@@ -1888,12 +1909,13 @@ async function downloadCurrent(): Promise<void> {
   const url = fileForDownload(boundVideo)
   if (!url || !downloadBtn) return
   downloadBusy = true
+  markAct()
   downloadBtn.title = "Downloading"
   try {
     const response = await chrome.runtime.sendMessage({
       type: DOWNLOAD_MESSAGE,
       url,
-      title: readPageTitle()
+      title: downloadTitle(boundVideo)
     })
     downloadBtn.title = response?.ok ? "Download started" : "Could not save this video"
   } catch {
@@ -2417,8 +2439,22 @@ function fitQualityPop(): void {
   else if (next.left < bar.left + pad) qualityAnchor.dataset.align = "start"
 }
 
+function layoutSignature(settings: EffectSettings): string {
+  const order = domainIconOrder(location.hostname, dockContextOf(boundVideo))
+  const parts = [`${location.hostname}${location.pathname}`]
+  for (const id of order) {
+    const place = settings.dockLayout[id]
+    parts.push(`${id}:${controlShown(id, settings) ? 1 : 0}:${place.edge}:${place.slot}:${place.x}:${place.y}`)
+  }
+  parts.push(settings.dockProgress ? "progress" : "")
+  return parts.join("|")
+}
+
 function layoutControls(settings: EffectSettings): void {
   if (!root) return
+  const signature = layoutSignature(settings)
+  if (signature === layoutStamp) return
+  layoutStamp = signature
   for (const node of packNodes.values()) node.replaceChildren()
   const progress = settings.dockLayout.progress
   const liftEdge = settings.dockProgress && progress.slot !== "custom" ? progress.edge : ""
@@ -2826,6 +2862,7 @@ function ensureBar(): HTMLDivElement {
   })
   downloadBtn?.addEventListener("click", (event) => {
     stopAct(event)
+    if (recentAct()) return
     void downloadCurrent()
   })
   const openQuality = () => {
@@ -3300,6 +3337,7 @@ export function stopSeekBar(): void {
   qualityList = null
   fullBtn = null
   downloadBusy = false
+  layoutStamp = ""
   qualityToken = 0
   qualityStamp = ""
   renditionGroups = []

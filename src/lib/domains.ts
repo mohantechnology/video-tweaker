@@ -317,6 +317,107 @@ export function readPageTitle(): string {
   return raw.replace(/\s+/g, " ").trim().slice(0, 160)
 }
 
+function clipTitle(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 160)
+}
+
+function genericTitle(value: string): boolean {
+  const text = value.replace(/^\(\d+\)\s*/, "").trim()
+  return /^(instagram|reels?|watch|video|video player)$/i.test(text)
+}
+
+/** Quoted caption from an Instagram tab or Open Graph title. */
+function parseInstagramTitle(raw: string): string {
+  const text = raw.replace(/^\(\d+\)\s*/, "").replace(/\s+/g, " ").trim()
+  if (!text || genericTitle(text)) return ""
+  const quoted = text.match(/[“"]([^”"]{1,300})[”"]\s*$/)
+  if (quoted?.[1] && /instagram/i.test(text)) return clipTitle(quoted[1])
+  const loose = text.match(/on Instagram:\s*(.+)$/i)
+  if (!loose?.[1]) return ""
+  return clipTitle(loose[1].replace(/^[“"]|[”"]$/g, ""))
+}
+
+function pagePostTitle(): string {
+  if (!/\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+/.test(location.pathname)) return ""
+  const og = document.querySelector('meta[property="og:title"]')?.getAttribute("content") || ""
+  return parseInstagramTitle(og) || parseInstagramTitle(document.title)
+}
+
+function isProfileHref(href: string): boolean {
+  try {
+    const parts = new URL(href, "https://www.instagram.com").pathname.split("/").filter(Boolean)
+    if (parts.length !== 1) return false
+    return !/^(p|reel|reels|tv|explore|stories|direct|accounts|about)$/i.test(parts[0])
+  } catch {
+    return false
+  }
+}
+
+function captionText(node: HTMLElement): string {
+  const clone = node.cloneNode(true) as HTMLElement
+  for (const link of clone.querySelectorAll("a")) {
+    if (isProfileHref(link.getAttribute("href") || "")) link.remove()
+  }
+  return clipTitle(clone.textContent || "")
+}
+
+function chromeCaption(text: string): boolean {
+  if (text.length < 2 || genericTitle(text)) return true
+  if (
+    /^(follow|following|message|like|liked|comment|comments|share|save|saved|more|send|audio|original audio|view insights|watch more reels|see more|see translation|see original)$/i.test(
+      text
+    )
+  ) {
+    return true
+  }
+  if (/^\d[\d,.]*(\s*(likes?|views?|comments?|shares?|plays?))?$/i.test(text)) return true
+  if (/^(\d+\s+)?(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago$/i.test(text)) return true
+  if (/^view all \d+ comments$/i.test(text)) return true
+  if (/^liked by\b/i.test(text)) return true
+  if (/^add a comment\b/i.test(text)) return true
+  if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) return true
+  if (/^@?[A-Za-z0-9._]{1,30}$/.test(text)) return true
+  return false
+}
+
+/** Caption drawn on the current Instagram video. */
+function captionNear(video: HTMLVideoElement): string {
+  const videoBox = video.getBoundingClientRect()
+  if (videoBox.width < 40 || videoBox.height < 40) return ""
+  const scope = video.closest("article") || video.closest("[role='dialog']") || video.closest("main") || document.body
+  let best = ""
+  for (const node of scope.querySelectorAll("h1, span[dir='auto']")) {
+    if (!(node instanceof HTMLElement)) continue
+    if (node.closest("button, [role='button'], nav")) continue
+    if (node.querySelector("span[dir='auto'], h1")) continue
+    const text = captionText(node)
+    if (chromeCaption(text)) continue
+    const box = node.getBoundingClientRect()
+    if (box.width < 8 || box.height < 8) continue
+    const cx = box.left + box.width / 2
+    const cy = box.top + Math.min(box.height, 24) / 2
+    const near =
+      cx >= videoBox.left - 8 &&
+      cx <= videoBox.left + videoBox.width * 0.92 &&
+      cy >= videoBox.top + videoBox.height * 0.35 &&
+      cy <= videoBox.bottom + 120
+    if (!near || text.length <= best.length) continue
+    best = text
+  }
+  return best
+}
+
+/** Name to save. Instagram uses the post caption when the page has one. */
+export function readVideoTitle(video: HTMLVideoElement | null): string {
+  if (video && registrableDomain(location.hostname) === "instagram.com") {
+    const caption = captionNear(video) || pagePostTitle()
+    if (caption) return caption
+  }
+  const own = clipTitle(video?.getAttribute("title") || "")
+  if (own && !genericTitle(own)) return own
+  return readPageTitle()
+}
+
 export function siteSkipsResume(hostname = location.hostname): boolean {
   return domainProfile(hostname)?.skipResume === true
 }

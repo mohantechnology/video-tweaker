@@ -182,9 +182,15 @@ function absorbRenditions(found: Rendition[][]): void {
         group.length > previous.length ||
         group.reduce((sum, item) => sum + (item.aliases?.length || 0), 0) >
           previous.reduce((sum, item) => sum + (item.aliases?.length || 0), 0)
+      const incomingTitle = group.find((item) => item.title)?.title
+      const keptTitle = previous.find((item) => item.title)?.title
       if (richer) {
+        if (keptTitle) for (const item of group) if (!item.title) item.title = keptTitle
         renditionCatalog.set(key, group)
         batch.push(group)
+      } else if (incomingTitle && !keptTitle) {
+        for (const item of previous) if (!item.title) item.title = incomingTitle
+        batch.push(previous)
       }
       continue
     }

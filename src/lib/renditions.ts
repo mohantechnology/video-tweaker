@@ -17,6 +17,8 @@ export type Rendition = {
   aliases?: string[]
   /** Length in seconds, used to tell one post from another. */
   duration?: number
+  /** Post caption or title carried with this file. */
+  title?: string
 }
 
 export type RenditionMessage = {
@@ -92,6 +94,37 @@ export function sortRenditions(group: readonly Rendition[]): Rendition[] {
   return [...group].sort((a, b) => b.height - a.height || b.width - a.width)
 }
 
+function cleanTitle(value: unknown): string | undefined {
+  const raw =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object" && typeof (value as { text?: unknown }).text === "string"
+        ? (value as { text: string }).text
+        : ""
+  const text = raw.replace(/\s+/g, " ").trim()
+  if (!text) return undefined
+  return text.slice(0, 160)
+}
+
+function captionOn(record: Record<string, unknown>): string | undefined {
+  const caption = cleanTitle(record.caption)
+  const titled = cleanTitle(record.title)
+  const direct = caption || (titled && !/^(hd|sd|video|original audio)$/i.test(titled) ? titled : undefined)
+  if (direct) return direct
+  const edge = record.edge_media_to_caption
+  if (!edge || typeof edge !== "object") return undefined
+  const edges = (edge as { edges?: unknown }).edges
+  if (!Array.isArray(edges) || !edges[0] || typeof edges[0] !== "object") return undefined
+  const node = (edges[0] as { node?: unknown }).node
+  if (!node || typeof node !== "object") return undefined
+  return cleanTitle((node as { text?: unknown }).text)
+}
+
+function stampTitle(items: Rendition[], title: string | undefined): void {
+  if (!title) return
+  for (const item of items) if (!item.title) item.title = title
+}
+
 function dimension(value: unknown): number {
   const number = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN
   return Number.isFinite(number) ? number : 0
@@ -122,7 +155,8 @@ function asRendition(value: unknown): Rendition | null {
     measured,
     audioUrl: audio || undefined,
     aliases: aliases && aliases.length ? aliases : undefined,
-    duration: duration > 0 ? duration : undefined
+    duration: duration > 0 ? duration : undefined,
+    title: cleanTitle(raw.title)
   }
 }
 
@@ -412,6 +446,7 @@ function renditionsOn(record: Record<string, unknown>): Rendition[] {
   if (duration > 0) {
     for (const item of merged) if (!item.duration) item.duration = duration
   }
+  stampTitle(merged, captionOn(record))
   return dedupe(merged)
 }
 
@@ -585,6 +620,7 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
       found.push(dedupe(group))
       continue
     }
+    stampTitle(host, group.find((item) => item.title)?.title)
     for (const item of group) {
       const existing = host.find((other) => mediaPath(other.url) === mediaPath(item.url))
       if (existing) {
