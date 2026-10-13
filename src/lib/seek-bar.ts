@@ -902,6 +902,7 @@ let downloadBusy = false
 let ytOffer: YtOffer | null = null
 const pendingYoutubeFetch = new Map<string, (bytes: Uint8Array | null) => void>()
 let layoutStamp = ""
+let shownMediaStamp = ""
 let qualityToken = 0
 let qualityNonce = ""
 let qualityStamp = ""
@@ -4634,6 +4635,18 @@ export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSett
   placeSeekBar(video)
   syncNativeControls(video)
   if (!showing) showChrome()
+  const mediaStamp = [
+    settings.volume,
+    settings.muted,
+    settings.playbackRate,
+    settings.loop,
+    settings.audioTouched,
+    settings.playbackTouched
+  ].join("|")
+  if (mediaStamp !== shownMediaStamp) {
+    shownMediaStamp = mediaStamp
+    paintControls()
+  }
   reportLoop()
 }
 
@@ -4720,6 +4733,7 @@ export function stopSeekBar(): void {
   fullBtn = null
   downloadBusy = false
   layoutStamp = ""
+  shownMediaStamp = ""
   qualityStamp = ""
   catalogSeen = false
   renditionGroups = []

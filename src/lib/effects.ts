@@ -312,8 +312,10 @@ function mediaState(video: HTMLVideoElement): OwnedMedia {
 function writeTransport(video: HTMLVideoElement, rate: number, loop: boolean): boolean {
   const nextRate = clamp(rate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
   const before = video.playbackRate
-  if (before !== nextRate) video.playbackRate = nextRate
+  // Loop has no media event. Set it before playbackRate so a ratechange
+  // listener reports the loop we just chose, not the previous one.
   if (video.loop !== loop) video.loop = loop
+  if (before !== nextRate) video.playbackRate = nextRate
   return video.playbackRate !== before
 }
 

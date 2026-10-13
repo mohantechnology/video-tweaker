@@ -262,9 +262,18 @@ export function startVideoBridge(options: {
     }
 
     placeDock(next)
+    const settings = options.getSettings()
+    // Write speed, loop, and loudness before the bar reads the video.
+    // Otherwise the bar copies the old loop back into the domain settings.
+    if (next && allowed) {
+      const nextStamp = playbackStamp(settings)
+      if (nextStamp !== stamp) {
+        applyPlayback(next, settings)
+        stamp = nextStamp
+      }
+    }
     seekBar.sync(allowed ? next : null)
     progress.setTracking(allowed)
-    const settings = options.getSettings()
     if (!allowed) {
       releaseSkipBoost(next, settings)
       progress.follow(null)
@@ -274,11 +283,6 @@ export function startVideoBridge(options: {
     if (next) {
       applyVisual(next, settings)
       applyNativeControls(next, settings)
-      const nextStamp = playbackStamp(settings)
-      if (nextStamp !== stamp) {
-        applyPlayback(next, settings)
-        stamp = nextStamp
-      }
     }
     applySkipMethods({ video: next, roots, settings, allowed: true })
     maintainHold(next)

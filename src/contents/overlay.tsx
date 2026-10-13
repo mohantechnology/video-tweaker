@@ -111,6 +111,19 @@ import {
   NO_VIDEO_NOTICE_DELAY_MS
 } from "~settings"
 import {
+  emptyTabMedia,
+  mergeTabMedia,
+  releaseTabMedia,
+  releaseTabMediaFromDomain,
+  tabAudioOwned,
+  tabLoopOwned,
+  tabRateOwned,
+  withTabAudio,
+  withTabLoop,
+  withTabRate,
+  type TabMedia
+} from "~lib/tab-media"
+import {
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
   MAX_USER_PRESETS,
@@ -483,6 +496,7 @@ function Overlay() {
     height: window.innerHeight
   }))
   const settingsRef = useRef(settings)
+  const tabMediaRef = useRef<TabMedia>(emptyTabMedia())
   const policyRef = useRef(policy)
   const globallyEnabledRef = useRef(false)
   const appliedRef = useRef(settings)
@@ -651,9 +665,12 @@ function Overlay() {
   useEffect(() => {
     if (!ready || !policyReady || !globallyEnabled) return
     const bridge = startVideoBridge({
-      getSettings: () => effectiveSettings(appliedRef.current),
+      getSettings: () => mergeTabMedia(effectiveSettings(appliedRef.current), tabMediaRef.current),
       getUiSettings: () =>
-        domainDockView(settingsRef.current, location.hostname, dockContextOf(getActiveVideo())),
+        mergeTabMedia(
+          domainDockView(settingsRef.current, location.hostname, dockContextOf(getActiveVideo())),
+          tabMediaRef.current
+        ),
       isAllowed: () => siteAllowed(hostname, policyRef.current),
       onPresence: setHasVideo,
       onControl: (control) => dockBridge.current.onControl(control),
@@ -661,12 +678,13 @@ function Overlay() {
       onVideo: (video) => {
         if (!video) return
         const current = settingsRef.current
+        const tab = tabMediaRef.current
         const next: EffectSettings = { ...current }
         if (!current.playbackTouched) {
-          next.playbackRate = video.playbackRate || 1
-          next.loop = video.loop
+          if (!tabRateOwned(tab)) next.playbackRate = video.playbackRate || 1
+          if (!tabLoopOwned(tab)) next.loop = video.loop
         }
-        if (!current.audioTouched) {
+        if (!current.audioTouched && !tabAudioOwned(tab)) {
           if (Math.abs(current.volume - video.volume) >= 0.005) next.volume = video.volume
           if (current.muted !== video.muted) next.muted = video.muted
         }
@@ -772,6 +790,11 @@ function Overlay() {
         setGloballyEnabled(enabled)
       }
       const adoptExternal = (incoming: EffectSettings) => {
+        tabMediaRef.current = releaseTabMediaFromDomain(
+          tabMediaRef.current,
+          settingsRef.current,
+          incoming
+        )
         adoptedSeq.current = saveSeq.current + 1
         dirtyRef.current = false
         window.clearTimeout(applyTimer.current)
@@ -780,6 +803,9 @@ function Overlay() {
         settingsRef.current = incoming
         appliedRef.current = incoming
         setSettings(incoming)
+        // The bar reports the video's current loop before playback is written.
+        // Hold that report so this domain update is not copied back as a local edit.
+        suppressDockMedia(LIGHT_APPLY_DELAY_MS + 280)
         if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
       }
       const siteChange = changes[siteStorageKey(hostname)]
@@ -993,6 +1019,7 @@ function Overlay() {
     const resolved: Partial<EffectSettings> =
       snapshotChanged && !applyingPreset ? { ...next, presetId: "" } : next
     const touchAudio = touchesAudio(resolved)
+    tabMediaRef.current = releaseTabMedia(tabMediaRef.current, resolved)
     if (
       "volume" in resolved ||
       "muted" in resolved ||
@@ -1035,48 +1062,45 @@ function Overlay() {
   }
 
   dockBridge.current.onControl = (control) => {
+    const tab = tabMediaRef.current
     if (control.type === "audio") {
-      const next: Partial<EffectSettings> = {}
-      if (typeof control.volume === "number") next.volume = control.volume
-      if (typeof control.muted === "boolean") next.muted = control.muted
-      patch(next, false, "light")
-      return
+      tabMediaRef.current = withTabAudio(tab, control.volume, control.muted)
+    } else if (control.type === "rate") {
+      tabMediaRef.current = withTabRate(tab, control.playbackRate)
+    } else {
+      tabMediaRef.current = withTabLoop(tab, control.loop)
     }
-    if (control.type === "rate") {
-      patch(
-        {
-          playbackRate: Math.min(
-            PLAYBACK_RATE_MAX,
-            Math.max(PLAYBACK_RATE_MIN, control.playbackRate)
-          )
-        },
-        true
-      )
-      return
-    }
-    patch({ loop: control.loop }, true)
+    bridgeRef.current?.applyNow()
   }
 
   dockBridge.current.onMedia = (media) => {
     const current = settingsRef.current
+    const tab = tabMediaRef.current
+    const audioOwned = tabAudioOwned(tab)
+    const rateOwned = tabRateOwned(tab)
+    const loopOwned = tabLoopOwned(tab)
     let volume = current.volume
     let muted = current.muted
     let playbackRate = current.playbackRate
     let loop = current.loop
     let changed = false
-    if (Math.abs(current.volume - media.volume) >= 0.005) {
+    if (!audioOwned && Math.abs(current.volume - media.volume) >= 0.005) {
       volume = media.volume
       changed = true
     }
-    if (current.muted !== media.muted) {
+    if (!audioOwned && current.muted !== media.muted) {
       muted = media.muted
       changed = true
     }
-    if (media.playbackRate !== null && Math.abs(current.playbackRate - media.playbackRate) >= 0.001) {
+    if (
+      !rateOwned &&
+      media.playbackRate !== null &&
+      Math.abs(current.playbackRate - media.playbackRate) >= 0.001
+    ) {
       playbackRate = media.playbackRate
       changed = true
     }
-    if (current.loop !== media.loop) {
+    if (!loopOwned && current.loop !== media.loop) {
       loop = media.loop
       changed = true
     }
