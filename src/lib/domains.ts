@@ -33,17 +33,43 @@ export type DockContext = {
   boxHeight: number
 }
 
+/** Where this site's icons are measured against the player. */
+export type DockPlaceStrategy =
+  | "instagram"
+  | "facebook-watch"
+  | "facebook-reel"
+  | "prime"
+  | "bottom-cluster"
+
+/** Flat glyph treatment. Missing means the generic purple controls. */
+export type DomainChrome = {
+  /** Icon button size in pixels. */
+  icon: number
+  /** Color while a control is on. */
+  active: string
+  /** Hover wash. Transparent keeps the glyph flat. */
+  hover: string
+}
+
+/**
+ * How loudness is read on this site.
+ * `followLive` mirrors the player, including a hover unmute, until the user
+ * changes volume. `holdUserMute` puts a mute from the extension back if the
+ * site turns sound on by hovering.
+ */
+export type DomainAudio = {
+  followLive: boolean
+  holdUserMute: boolean
+}
+
 export type DomainDockPreset = {
   /** Controls turned on while this preset is still automatic. */
   controls: Partial<Record<DockFlagKey, boolean>>
   layout: Partial<ControlLayout>
   /** Order along a shared side. Icons not listed keep the generic order. */
   order: readonly DockPlaceId[]
-  /**
-   * Measure a control on the video and sit the right-hand stack under it.
-   * Used for Facebook reels. Missing means the layout slots alone.
-   */
-  anchor?: "facebook-search"
+  /** Measure native controls and sit our icons beside them. */
+  place?: DockPlaceStrategy
 }
 
 export type DomainProfile = {
@@ -60,6 +86,10 @@ export type DomainProfile = {
   skipResume?: boolean
   /** Icon treatment for this player. Other sites keep the generic controls. */
   skin: DockSkin
+  /** Flat icon size and colors. Omitted sites keep the generic controls. */
+  chrome?: DomainChrome
+  /** Mute and hover behavior. Omitted sites follow the video element only. */
+  audio?: DomainAudio
   /** Extra host test. Amazon storefronts share one registrable name per country. */
   matchHost?: (domain: string) => boolean
   /**
@@ -95,6 +125,7 @@ const INSTAGRAM_DOCK: DomainDockPreset = {
     dockTime: true,
     dockSpeed: true,
     dockSkip: true,
+    dockVolume: true,
     dockFullscreen: true,
     dockDownload: true,
     dockQuality: true
@@ -104,35 +135,47 @@ const INSTAGRAM_DOCK: DomainDockPreset = {
     time: at("bottom", "start"),
     speed: at("bottom", "start"),
     skip: at("bottom", "start"),
+    volume: at("bottom", "start"),
     download: at("top", "end"),
     quality: at("top", "end"),
     fullscreen: at("top", "end")
   },
-  order: ["time", "speed", "skip", "download", "quality", "fullscreen"]
+  order: ["time", "speed", "skip", "volume", "download", "quality", "fullscreen"],
+  place: "instagram"
 }
 
 const FACEBOOK_LONG: DomainDockPreset = {
-  controls: { dockSpeed: true, dockLoop: true, dockDownload: true, dockQuality: true },
+  controls: { dockSpeed: true, dockLoop: true, dockVolume: true, dockDownload: true, dockQuality: true },
   layout: {
     speed: at("bottom", "end"),
     loop: at("bottom", "end"),
+    volume: at("bottom", "end"),
     quality: at("bottom", "end"),
     download: at("bottom", "end")
   },
-  order: ["speed", "loop", "quality", "download"]
+  order: ["speed", "loop", "volume", "quality", "download"],
+  place: "facebook-watch"
 }
 
 const FACEBOOK_VERTICAL: DomainDockPreset = {
-  controls: { dockTime: true, dockSpeed: true, dockFullscreen: true, dockDownload: true, dockQuality: true },
+  controls: {
+    dockTime: true,
+    dockSpeed: true,
+    dockVolume: true,
+    dockFullscreen: true,
+    dockDownload: true,
+    dockQuality: true
+  },
   layout: {
     time: at("top", "center"),
     speed: at("right", "end"),
+    volume: at("right", "end"),
     quality: at("right", "end"),
     fullscreen: at("right", "end"),
     download: at("right", "end")
   },
-  order: ["speed", "quality", "fullscreen", "download", "time"],
-  anchor: "facebook-search"
+  order: ["speed", "volume", "quality", "fullscreen", "download", "time"],
+  place: "facebook-reel"
 }
 
 const PRIME_DOCK: DomainDockPreset = {
@@ -141,7 +184,8 @@ const PRIME_DOCK: DomainDockPreset = {
     speed: at("top", "end"),
     loop: at("top", "end")
   },
-  order: ["speed", "loop"]
+  order: ["speed", "loop"],
+  place: "prime"
 }
 
 const BOTTOM_RIGHT_DOCK: DomainDockPreset = {
@@ -150,7 +194,20 @@ const BOTTOM_RIGHT_DOCK: DomainDockPreset = {
     speed: at("bottom", "end"),
     loop: at("bottom", "end")
   },
-  order: ["speed", "loop"]
+  order: ["speed", "loop"],
+  place: "bottom-cluster"
+}
+
+const FLAT_CHROME: DomainChrome = {
+  icon: 32,
+  active: "#fff",
+  hover: "transparent"
+}
+
+/** Hover can start sound without a normal volume change on the video element. */
+const HOVER_AUDIO: DomainAudio = {
+  followLive: true,
+  holdUserMute: true
 }
 
 function facebookVertical(ctx: DockContext): boolean {
@@ -182,11 +239,15 @@ export const DOMAIN_PROFILES: DomainProfile[] = [
   {
     domains: ["instagram.com"],
     skin: "instagram",
+    chrome: FLAT_CHROME,
+    audio: HOVER_AUDIO,
     dock: INSTAGRAM_DOCK
   },
   {
     domains: ["facebook.com", "fb.com", "fb.watch"],
     skin: "facebook",
+    chrome: FLAT_CHROME,
+    audio: HOVER_AUDIO,
     dock: FACEBOOK_LONG,
     variants: [{ id: "vertical", match: facebookVertical, dock: FACEBOOK_VERTICAL }]
   },
@@ -270,6 +331,18 @@ export function domainShape(hostname: string, ctx: DockContext): string {
   return ""
 }
 
+export function domainChrome(hostname: string): DomainChrome | null {
+  return domainProfile(hostname)?.chrome ?? null
+}
+
+export function domainPlace(hostname: string, ctx: DockContext): DockPlaceStrategy | "" {
+  return domainDockPreset(hostname, ctx)?.place ?? ""
+}
+
+export function domainAudio(hostname: string): DomainAudio {
+  return domainProfile(hostname)?.audio ?? { followLive: false, holdUserMute: false }
+}
+
 export function domainIconOrder(hostname: string, ctx: DockContext): readonly DockPlaceId[] {
   const preferred = domainDockPreset(hostname, ctx)?.order
   if (!preferred || preferred.length === 0) return DOCK_ICON_ORDER
@@ -323,7 +396,7 @@ function clipTitle(value: string): string {
 
 function genericTitle(value: string): boolean {
   const text = value.replace(/^\(\d+\)\s*/, "").trim()
-  return /^(instagram|reels?|watch|video|video player)$/i.test(text)
+  return /^(instagram|facebook|fb|reels?|watch|video|video player|facebook watch)$/i.test(text)
 }
 
 /** Quoted caption from an Instagram tab or Open Graph title. */
@@ -364,7 +437,7 @@ function captionText(node: HTMLElement): string {
 function chromeCaption(text: string): boolean {
   if (text.length < 2 || genericTitle(text)) return true
   if (
-    /^(follow|following|message|like|liked|comment|comments|share|save|saved|more|send|audio|original audio|view insights|watch more reels|see more|see translation|see original)$/i.test(
+    /^(follow|following|message|like|liked|comment|comments|share|save|saved|more|send|audio|original audio|view insights|watch more reels|see more|see translation|see original|whatsapp|copy link|save video|most relevant|write a comment|reply)$/i.test(
       text
     )
   ) {
@@ -407,15 +480,75 @@ function captionNear(video: HTMLVideoElement): string {
   return best
 }
 
-/** Name to save. Instagram uses the post caption when the page has one. */
+function parseFacebookTitle(raw: string): string {
+  let text = raw.replace(/^\(\d+\)\s*/, "").replace(/\s+/g, " ").trim()
+  text = text.replace(/\s*[|–-]\s*Facebook(?:\s+Watch)?$/i, "").trim()
+  text = text.replace(/^Facebook(?:\s+Watch)?\s*[|–-]\s*/i, "").trim()
+  if (!text || genericTitle(text)) return ""
+  return clipTitle(text)
+}
+
+/** Post text drawn on the current Facebook video. */
+function facebookCaptionNear(video: HTMLVideoElement): string {
+  const videoBox = video.getBoundingClientRect()
+  if (videoBox.width < 40 || videoBox.height < 40) return ""
+  const scope =
+    video.closest("[role='article']") ||
+    video.closest("article") ||
+    video.closest("[role='dialog']") ||
+    video.closest("main") ||
+    document.body
+  const preview = scope.querySelector("[data-ad-preview='message'], [data-ad-comet-preview='message']")
+  if (preview instanceof HTMLElement) {
+    const text = clipTitle(preview.innerText || preview.textContent || "")
+    if (text && !genericTitle(text) && !chromeCaption(text)) return text
+  }
+  let best = ""
+  for (const node of scope.querySelectorAll("span[dir='auto'], div[dir='auto'], h1")) {
+    if (!(node instanceof HTMLElement)) continue
+    if (node.closest("button, [role='button'], nav, [data-vee-seek-bar], #vee-seek-bar")) continue
+    if (node.querySelector("span[dir='auto'], div[dir='auto'], h1")) continue
+    const text = clipTitle(node.innerText || node.textContent || "")
+    if (chromeCaption(text)) continue
+    const box = node.getBoundingClientRect()
+    if (box.width < 8 || box.height < 8) continue
+    const cx = box.left + box.width / 2
+    const cy = box.top + Math.min(box.height, 24) / 2
+    const near =
+      cx >= videoBox.left - 24 &&
+      cx <= videoBox.right + 24 &&
+      cy >= videoBox.top - 80 &&
+      cy <= videoBox.bottom + 160
+    if (!near || text.length <= best.length) continue
+    best = text
+  }
+  return best
+}
+
+function facebookPageTitle(): string {
+  const og = parseFacebookTitle(document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "")
+  const tab = parseFacebookTitle(document.title)
+  // The tab title follows the open video. The og title is often the section, such as Watch.
+  if (tab && og && tab !== og) return tab
+  return og || tab
+}
+
+/** Name to save. Each known site reads the label the page actually shows. */
 export function readVideoTitle(video: HTMLVideoElement | null): string {
-  if (video && registrableDomain(location.hostname) === "instagram.com") {
+  const skin = domainSkin(location.hostname, location.pathname)
+  if (video && skin === "instagram") {
     const caption = captionNear(video) || pagePostTitle()
+    if (caption) return caption
+  }
+  if (video && skin === "facebook") {
+    const caption = facebookCaptionNear(video) || facebookPageTitle()
     if (caption) return caption
   }
   const own = clipTitle(video?.getAttribute("title") || "")
   if (own && !genericTitle(own)) return own
-  return readPageTitle()
+  const page = readPageTitle()
+  if (!genericTitle(page)) return page
+  return "video"
 }
 
 export function siteSkipsResume(hostname = location.hostname): boolean {

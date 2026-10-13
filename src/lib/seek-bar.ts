@@ -1,6 +1,9 @@
 import {
   dockContextOf,
+  domainAudio,
+  domainChrome,
   domainIconOrder,
+  domainPlace,
   domainShape,
   domainSkin,
   readVideoTitle
@@ -662,43 +665,53 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID}[data-skin="youtube"][data-shape="short"] .vee-pack[data-edge="bottom"] {
   bottom: 88px;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-chrome-btn,
-#${SEEK_BAR_ID}[data-skin="facebook"] .vee-chrome-btn {
-  width: 32px;
-  height: 32px;
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-chrome-btn {
+  width: var(--vee-icon, 32px);
+  height: var(--vee-icon, 32px);
+  background: transparent;
+  color: #fff;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-rate-btn,
-#${SEEK_BAR_ID}[data-skin="facebook"] .vee-rate-btn {
-  height: 32px;
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-rate-btn {
+  height: var(--vee-icon, 32px);
+  background: transparent;
+  color: #fff;
   font-size: 13px;
+  font-weight: 600;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-chrome-btn svg,
-#${SEEK_BAR_ID}[data-skin="facebook"] .vee-chrome-btn svg {
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-chrome-btn svg {
   width: 22px;
   height: 22px;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-pack[data-edge="bottom"][data-slot="start"] {
-  bottom: 128px;
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-chrome-btn[data-on="true"],
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-rate-btn[data-on="true"] {
+  color: var(--vee-active, #fff);
+}
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-chrome-btn:hover,
+#${SEEK_BAR_ID}[data-chrome="flat"] .vee-rate-btn:hover {
+  background: var(--vee-hover, transparent);
+}
+#${SEEK_BAR_ID}[data-place="instagram"] .vee-pack[data-edge="bottom"][data-slot="start"] {
+  bottom: 16px;
   left: 12px;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-pack[data-lift="true"][data-edge="bottom"][data-slot="start"] {
-  bottom: 128px;
+#${SEEK_BAR_ID}[data-place="instagram"] .vee-pack[data-lift="true"][data-edge="bottom"][data-slot="start"] {
+  bottom: 28px;
 }
-#${SEEK_BAR_ID}[data-skin="instagram"] .vee-pack[data-edge="top"][data-slot="end"] {
+#${SEEK_BAR_ID}[data-place="instagram"] .vee-pack[data-edge="top"][data-slot="end"] {
   top: 12px;
-  right: 48px;
+  right: 64px;
 }
-#${SEEK_BAR_ID}[data-skin="facebook"]:not([data-shape="vertical"]) .vee-pack[data-edge="bottom"][data-slot="end"] {
-  right: 160px;
-  bottom: 12px;
+#${SEEK_BAR_ID}[data-place="facebook-watch"] .vee-pack[data-edge="bottom"][data-slot="end"] {
+  right: 188px;
+  bottom: 10px;
 }
-#${SEEK_BAR_ID}[data-skin="facebook"][data-shape="vertical"] .vee-pack[data-edge="top"][data-slot="center"] {
-  top: 44px;
+#${SEEK_BAR_ID}[data-place="facebook-reel"] .vee-pack[data-edge="top"][data-slot="center"] {
+  top: 56px;
 }
-#${SEEK_BAR_ID}[data-skin="facebook"][data-shape="vertical"] .vee-pack[data-edge="right"][data-slot="end"] {
-  top: 128px;
-  right: 14px;
-  bottom: auto;
+#${SEEK_BAR_ID}[data-place="facebook-reel"] .vee-pack[data-edge="right"][data-slot="end"] {
+  top: auto;
+  right: 12px;
+  bottom: 112px;
 }
 #${SEEK_BAR_ID}[data-skin="prime"] .vee-chrome-btn,
 #${SEEK_BAR_ID}[data-skin="netflix"] .vee-chrome-btn,
@@ -909,6 +922,10 @@ let audioClean: (() => void) | null = null
 let soundtrackLevel = { muted: false, volume: 1 }
 let soundtrackSince = 0
 let lastViewerInput = 0
+let siteMuteClickAt = 0
+let muteLock = false
+let hoverSampleTimers: number[] = []
+let hoverWatch = 0
 let soundtrackReady = true
 let waitEpoch = 0
 let waitFrame = 0
@@ -1437,6 +1454,165 @@ function paintTime(video: HTMLVideoElement): void {
   timeEl.textContent = duration ? `${current} / ${duration}` : current
 }
 
+function clearHoverSamples(): void {
+  for (const id of hoverSampleTimers) window.clearTimeout(id)
+  hoverSampleTimers = []
+  if (hoverWatch) window.clearInterval(hoverWatch)
+  hoverWatch = 0
+}
+
+/** Sound Instagram or Facebook starts beside the clip, often on hover. */
+function hoverSoundtrack(video: HTMLVideoElement): HTMLAudioElement | null {
+  const article = video.closest("article") || video.closest("[role='article']") || video.closest("[role='dialog']")
+  const scopes: ParentNode[] = []
+  if (article) scopes.push(article)
+  if (video.parentElement && video.parentElement !== article) scopes.push(video.parentElement)
+  scopes.push(document)
+  const seen = new Set<ParentNode>()
+  for (const scope of scopes) {
+    if (seen.has(scope)) continue
+    seen.add(scope)
+    for (const node of scope.querySelectorAll("audio")) {
+      if (!(node instanceof HTMLAudioElement)) continue
+      if (node.getAttribute("data-vee-audio") === "1") continue
+      if (!node.isConnected || node.paused || node.ended || node.muted || node.volume <= 0.001) continue
+      if (scope === document) {
+        const host = node.closest("article") || node.closest("[role='article']") || node.closest("[role='dialog']")
+        if (host && (!article || host !== article)) continue
+      }
+      return node
+    }
+  }
+  return null
+}
+
+/** What is actually audible: the soundtrack, a hover clip, or the video itself. */
+function liveAudible(video: HTMLVideoElement): { volume: number; muted: boolean } {
+  const extra = hoverSoundtrack(video)
+  if (extra) return { volume: extra.volume || 1, muted: false }
+  if (!video.muted && video.volume > 0.001) return { volume: video.volume, muted: false }
+  const side = sidecars.get(video)
+  if (
+    side &&
+    lockedAudio &&
+    lockedVideo === video &&
+    side.dataset.veeHoldMute !== "1" &&
+    side.src &&
+    !side.muted &&
+    side.volume > 0.001
+  ) {
+    return { volume: side.volume, muted: false }
+  }
+  return { volume: video.volume, muted: true }
+}
+
+function shownAudio(video: HTMLVideoElement, settings: EffectSettings): { volume: number; muted: boolean } {
+  if (pendingVolume) return pendingVolume
+  const policy = domainAudio(location.hostname)
+  if (settings.audioTouched) return { volume: settings.volume, muted: settings.muted }
+  if (policy.followLive) return liveAudible(video)
+  return { volume: settings.volume, muted: settings.muted }
+}
+
+function userHoldsMute(): boolean {
+  const settings = readSettings()
+  const policy = domainAudio(location.hostname)
+  if (!policy.holdUserMute || !settings?.audioTouched || !settings.muted) return false
+  if (pendingVolume && !pendingVolume.muted) return false
+  return performance.now() - siteMuteClickAt >= 800
+}
+
+function enforceHeldMute(video: HTMLVideoElement): void {
+  if (!userHoldsMute() || muteLock) return
+  muteLock = true
+  try {
+    if (!video.muted) video.muted = true
+    const side = sidecars.get(video)
+    if (side && !side.muted) side.muted = true
+    const extra = hoverSoundtrack(video)
+    if (extra) extra.muted = true
+  } catch {
+    /* The element can already be detached. */
+  } finally {
+    muteLock = false
+  }
+}
+
+function paintMute(): void {
+  const video = boundVideo
+  const settings = readSettings()
+  if (!video || !settings || !muteBtn) return
+  const level = shownAudio(video, settings)
+  const volumeNow = level.volume
+  const silent = level.muted || volumeNow <= 0.001
+  if (volumeNow > 0.001) lastAudible = volumeNow
+  const volumeIcon = silent ? "muted" : volumeNow < 0.5 ? "low" : "high"
+  setIcon(muteBtn, volumeIcon, silent ? ICON_MUTED : volumeNow < 0.5 ? ICON_VOLUME_LOW : ICON_VOLUME)
+  muteBtn.dataset.on = String(silent)
+  muteBtn.setAttribute("aria-label", silent ? "Unmute" : "Mute")
+  muteBtn.setAttribute("aria-pressed", String(silent))
+  if (volumeInput && !volumeDrag) volumeInput.value = String(volumeNow)
+}
+
+function sampleAudioSoon(video: HTMLVideoElement): void {
+  for (const id of hoverSampleTimers) window.clearTimeout(id)
+  hoverSampleTimers = []
+  const run = () => {
+    if (boundVideo !== video) return
+    enforceHeldMute(video)
+    paintMute()
+    reportMedia()
+  }
+  run()
+  for (const delay of [80, 280, 640, 1200]) hoverSampleTimers.push(window.setTimeout(run, delay))
+}
+
+function onVideoPointer(event: Event): void {
+  const video = boundVideo
+  if (!video) return
+  const policy = domainAudio(location.hostname)
+  if (!policy.followLive && !policy.holdUserMute) return
+  if (event.type === "pointerleave") {
+    if (hoverWatch) window.clearInterval(hoverWatch)
+    hoverWatch = 0
+    sampleAudioSoon(video)
+    return
+  }
+  sampleAudioSoon(video)
+  if (hoverWatch) return
+  hoverWatch = window.setInterval(() => {
+    if (boundVideo !== video) return
+    if (userHoldsMute()) enforceHeldMute(video)
+    paintMute()
+    reportMedia()
+  }, 300)
+}
+
+function onSiteAudioClick(event: Event): void {
+  if (!event.isTrusted) return
+  const target = event.target
+  if (!(target instanceof Element) || root?.contains(target)) return
+  const control = target.closest("button, [role='button']")
+  if (!(control instanceof HTMLElement)) return
+  const label = (control.getAttribute("aria-label") || "").toLowerCase()
+  if (!/mute|unmute|sound|audio|volume/.test(label)) return
+  siteMuteClickAt = performance.now()
+}
+
+function onPageAudio(event: Event): void {
+  const video = boundVideo
+  if (!video) return
+  const policy = domainAudio(location.hostname)
+  if (!policy.followLive && !policy.holdUserMute) return
+  const target = event.target
+  if (!(target instanceof HTMLAudioElement) || target.getAttribute("data-vee-audio") === "1") return
+  if (userHoldsMute()) enforceHeldMute(video)
+  else {
+    paintControls()
+    reportMedia()
+  }
+}
+
 function paintControls(): void {
   const video = boundVideo
   const settings = readSettings()
@@ -1444,8 +1620,9 @@ function paintControls(): void {
   applyChromeSkin(video)
   const pipOn = document.pictureInPictureElement === video
   const fullOn = videoIsFullscreen(video)
-  const volumeNow = pendingVolume?.volume ?? settings.volume
-  const mutedNow = pendingVolume?.muted ?? settings.muted
+  const level = shownAudio(video, settings)
+  const volumeNow = level.volume
+  const mutedNow = level.muted
   const silent = mutedNow || volumeNow <= 0.001
   const rate = shownRate(video, settings)
   if (volumeNow > 0.001) lastAudible = volumeNow
@@ -2347,6 +2524,10 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
     if (!lockedAudio || lockedVideo !== video) return
     audio.playbackRate = video.playbackRate || 1
     if (audio.dataset.veeHoldMute === "1") return
+    if (userHoldsMute()) {
+      audio.muted = true
+      return
+    }
     audio.muted = video.muted
     audio.volume = video.volume
   }
@@ -2436,6 +2617,11 @@ function onViewerInput(event: Event): void {
 
 /** Level captured at the switch, or the live one once the viewer changed it. */
 function soundtrackLevelNow(video: HTMLVideoElement): { muted: boolean; volume: number } {
+  const settings = readSettings()
+  const policy = domainAudio(location.hostname)
+  if (policy.holdUserMute && settings?.audioTouched && settings.muted && performance.now() - siteMuteClickAt >= 800) {
+    return { muted: true, volume: settings.volume }
+  }
   if (lastViewerInput > soundtrackSince) return { muted: video.muted, volume: video.volume }
   return soundtrackLevel
 }
@@ -2721,8 +2907,10 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
   if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl && lockedVideo === video) return
   const wantPlay = !video.paused && !video.ended
   const time = video.currentTime || 0
-  const muted = video.muted
-  const volume = video.volume
+  const settings = readSettings()
+  const heldMute = domainAudio(location.hostname).holdUserMute && !!settings?.audioTouched && !!settings.muted
+  const muted = heldMute ? true : video.muted
+  const volume = heldMute && settings ? settings.volume : video.volume
   const rate = video.playbackRate || 1
   const token = String(++qualityToken)
   qualityNonce = token
@@ -2931,10 +3119,25 @@ function applyChromeSkin(video: HTMLVideoElement | null): void {
   const ctx = dockContextOf(video)
   const skin = domainSkin(location.hostname, ctx.pathname)
   const shape = domainShape(location.hostname, ctx)
+  const chrome = domainChrome(location.hostname)
+  const place = domainPlace(location.hostname, ctx)
   if (skin === "default") delete root.dataset.skin
   else root.dataset.skin = skin
   if (!shape) delete root.dataset.shape
   else root.dataset.shape = shape
+  if (!place) delete root.dataset.place
+  else root.dataset.place = place
+  if (!chrome) {
+    delete root.dataset.chrome
+    root.style.removeProperty("--vee-icon")
+    root.style.removeProperty("--vee-active")
+    root.style.removeProperty("--vee-hover")
+    return
+  }
+  root.dataset.chrome = "flat"
+  root.style.setProperty("--vee-icon", `${chrome.icon}px`)
+  root.style.setProperty("--vee-active", chrome.active)
+  root.style.setProperty("--vee-hover", chrome.hover)
 }
 
 function clearPackAnchor(node: HTMLElement): void {
@@ -3162,11 +3365,38 @@ function findCornerButton(nodes: HTMLElement[], bar: DOMRect): HTMLElement | nul
   return best
 }
 
+let pageControlCache: { at: number; key: string; nodes: HTMLElement[] } | null = null
+
+/** Buttons on the page, including a control bar portaled outside the player. */
+function pageControls(video: HTMLVideoElement): HTMLElement[] {
+  const now = performance.now()
+  const key = `${location.hostname}${location.pathname}`
+  if (pageControlCache && pageControlCache.key === key && now - pageControlCache.at < 400) {
+    return pageControlCache.nodes.filter((node) => node.isConnected)
+  }
+  const bar = video.getBoundingClientRect()
+  const nodes = listedControls(document.body)
+  const found: HTMLElement[] = []
+  for (const node of nodes) {
+    if (root?.contains(node)) continue
+    const box = node.getBoundingClientRect()
+    if (box.width < 10 || box.height < 10 || box.width > 220 || box.height > 80) continue
+    if (box.right < bar.left - 8 || box.left > bar.right + 24) continue
+    if (box.bottom < bar.top || box.top > bar.bottom + 80) continue
+    const style = getComputedStyle(node)
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue
+    found.push(node)
+  }
+  pageControlCache = { at: now, key, nodes: found }
+  return found
+}
+
 function pinBottomRightCluster(video: HTMLVideoElement): void {
   const pack = packNodes.get("bottom:end")
   const bar = root?.getBoundingClientRect()
   if (!pack || pack.hidden || !bar) return
-  const cluster = rightCluster(nativeControls(video).filter((node) => inBand(node, bar, "bottom")))
+  const nodes = root?.dataset.place === "facebook-watch" ? pageControls(video) : nativeControls(video)
+  const cluster = rightCluster(nodes.filter((node) => inBand(node, bar, "bottom")))
   const anchor = cluster[0]
   if (!anchor) return
   pinLeftOf(pack, anchor, bar)
@@ -3182,6 +3412,13 @@ function pinPrime(video: HTMLVideoElement): void {
   pinLeftOf(pack, anchor, bar)
 }
 
+function onRightRail(node: HTMLElement, bar: DOMRect): boolean {
+  const box = node.getBoundingClientRect()
+  const cx = box.left + box.width / 2
+  const cy = box.top + box.height / 2
+  return cx >= bar.left + bar.width * 0.72 && cx <= bar.right + 8 && cy >= bar.top + 8 && cy <= bar.bottom - 8
+}
+
 function reelRightMarks(shell: HTMLElement, bar: DOMRect): HTMLElement[] {
   if (scanFresh(markCache)) return (markCache?.nodes ?? []).filter((node) => node.isConnected)
   const marks: HTMLElement[] = []
@@ -3189,8 +3426,8 @@ function reelRightMarks(shell: HTMLElement, bar: DOMRect): HTMLElement[] {
   for (const node of nodes) {
     if (root?.contains(node)) continue
     const box = node.getBoundingClientRect()
-    if (box.width < 8 || box.height < 8 || box.width > 80 || box.height > 64) continue
-    if (!inBand(node, bar, "right")) continue
+    if (box.width < 8 || box.height < 8 || box.width > 80 || box.height > 72) continue
+    if (!onRightRail(node, bar)) continue
     const text = (node.textContent || "").trim()
     const rate = /^\d+(\.\d+)?x$/i.test(text)
     const button = node.tagName === "BUTTON" || node.getAttribute("role") === "button"
@@ -3227,12 +3464,28 @@ function pinFacebookReel(video: HTMLVideoElement): void {
       lowestBottom = box.bottom
     }
   }
-  if (lowest) {
-    const box = lowest.getBoundingClientRect()
-    const nearTop = box.bottom - bar.top < 72
+  const copy = findBottomCopy(shell, bar)
+  const railRight = lowest ? Math.max(8, bar.right - lowest.getBoundingClientRect().right) : 12
+  if (lowest && copy) {
+    const lowBox = lowest.getBoundingClientRect()
+    const copyBox = copy.getBoundingClientRect()
+    const gapTop = lowBox.bottom - bar.top + 10
+    const captionTop = copyBox.top - bar.top
+    const stackHeight = stack.offsetHeight || 120
+    if (gapTop + stackHeight < captionTop - 8) {
+      placePack(stack, { top: gapTop, right: railRight })
+      return
+    }
     placePack(stack, {
-      top: box.bottom - bar.top + (nearTop ? 72 : 10),
-      right: Math.max(8, bar.right - box.right)
+      bottom: bar.bottom - copyBox.top + 8,
+      right: railRight
+    })
+    return
+  }
+  if (lowest) {
+    placePack(stack, {
+      top: lowest.getBoundingClientRect().bottom - bar.top + 10,
+      right: railRight
     })
     return
   }
@@ -3240,7 +3493,7 @@ function pinFacebookReel(video: HTMLVideoElement): void {
   if (!search) return
   const box = search.getBoundingClientRect()
   placePack(stack, {
-    top: box.bottom - bar.top + 72,
+    top: box.bottom - bar.top + 10,
     right: Math.max(8, bar.right - box.right)
   })
 }
@@ -3263,7 +3516,7 @@ function pinInstagram(video: HTMLVideoElement): void {
   if (!copy || !row || row.hidden) return
   const box = copy.getBoundingClientRect()
   placePack(row, {
-    bottom: bar.bottom - box.top + 10,
+    bottom: bar.bottom - box.top + 8,
     left: 12
   })
 }
@@ -3271,12 +3524,11 @@ function pinInstagram(video: HTMLVideoElement): void {
 function pinPresetAnchor(video: HTMLVideoElement | null): void {
   for (const node of packNodes.values()) clearPackAnchor(node)
   if (!root || !video) return
-  const skin = root.dataset.skin || ""
-  const shape = root.dataset.shape || ""
-  if (skin === "facebook" && shape === "vertical") pinFacebookReel(video)
-  else if (skin === "instagram") pinInstagram(video)
-  else if (skin === "prime") pinPrime(video)
-  else if (skin === "hotstar" || skin === "netflix" || skin === "facebook") pinBottomRightCluster(video)
+  const place = root.dataset.place || ""
+  if (place === "facebook-reel") pinFacebookReel(video)
+  else if (place === "instagram") pinInstagram(video)
+  else if (place === "prime") pinPrime(video)
+  else if (place === "bottom-cluster" || place === "facebook-watch") pinBottomRightCluster(video)
   for (const node of packNodes.values()) {
     if (!node.hidden) keepPackInside(node)
   }
@@ -3426,9 +3678,15 @@ function reportMedia(): void {
     noteWrite()
     onControl?.({ type: "rate", playbackRate: chosen })
   }
+  const settings = readSettings()
+  const policy = domainAudio(location.hostname)
+  const heard =
+    policy.followLive && settings && !settings.audioTouched && !pendingVolume
+      ? liveAudible(video)
+      : pendingVolume ?? { volume: video.volume, muted: video.muted }
   onMedia({
-    volume: video.volume,
-    muted: video.muted,
+    volume: heard.volume,
+    muted: heard.muted,
     playbackRate,
     loop: video.loop
   })
@@ -3521,6 +3779,8 @@ function fileControlsChanged(video: HTMLVideoElement): boolean {
 }
 
 function onMediaSignal(): void {
+  const video = boundVideo
+  if (video) enforceHeldMute(video)
   reportMedia()
   paintControls()
   updateFill()
@@ -4041,8 +4301,11 @@ function onPresentationChange(): void {
 
 function unbindVideo(video: HTMLVideoElement | null): void {
   if (!video) return
+  clearHoverSamples()
   if (lockedVideo === video) releaseQuality(video, false)
   dropPin(video)
+  video.removeEventListener("pointerenter", onVideoPointer)
+  video.removeEventListener("pointerleave", onVideoPointer)
   video.removeEventListener("timeupdate", onTime)
   video.removeEventListener("progress", onTime)
   video.removeEventListener("durationchange", onTime)
@@ -4056,6 +4319,8 @@ function unbindVideo(video: HTMLVideoElement | null): void {
 }
 
 function bindVideo(video: HTMLVideoElement): void {
+  video.addEventListener("pointerenter", onVideoPointer)
+  video.addEventListener("pointerleave", onVideoPointer)
   video.addEventListener("timeupdate", onTime)
   video.addEventListener("progress", onTime)
   video.addEventListener("durationchange", onTime)
@@ -4210,6 +4475,9 @@ export function stopSeekBar(): void {
   window.removeEventListener("message", onRenditionMessage)
   window.removeEventListener("pointerdown", onViewerInput, true)
   window.removeEventListener("keydown", onViewerInput, true)
+  document.removeEventListener("click", onSiteAudioClick, true)
+  document.removeEventListener("play", onPageAudio, true)
+  clearHoverSamples()
   window.clearTimeout(hotTimer)
   cancelPopClose("volume")
   cancelPopClose("speed")
@@ -4308,6 +4576,8 @@ export function startSeekBar(options: {
   window.addEventListener("message", onRenditionMessage)
   window.addEventListener("pointerdown", onViewerInput, true)
   window.addEventListener("keydown", onViewerInput, true)
+  document.addEventListener("click", onSiteAudioClick, true)
+  document.addEventListener("play", onPageAudio, true)
   hookHistory()
   postRenditionAsk()
   return {

@@ -260,10 +260,33 @@ function cleanTitle(value: unknown): string | undefined {
   return text.slice(0, 160)
 }
 
+function nestedText(value: unknown): string | undefined {
+  if (typeof value === "string") return cleanTitle(value)
+  if (!value || typeof value !== "object") return undefined
+  const text = (value as { text?: unknown }).text
+  return typeof text === "string" ? cleanTitle(text) : undefined
+}
+
+function keptTitle(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  if (/^(hd|sd|video|original audio|facebook|watch|reel|reels|fb)$/i.test(value)) return undefined
+  return value
+}
+
+/** Caption on this record, or the story text sitting above a Facebook video. */
+function storyTitle(record: Record<string, unknown>): string | undefined {
+  return (
+    keptTitle(nestedText(record.message)) ||
+    keptTitle(nestedText(record.caption)) ||
+    keptTitle(nestedText(record.savable_description)) ||
+    keptTitle(nestedText(record.title))
+  )
+}
+
 function captionOn(record: Record<string, unknown>): string | undefined {
-  const caption = cleanTitle(record.caption)
-  const titled = cleanTitle(record.title)
-  const direct = caption || (titled && !/^(hd|sd|video|original audio)$/i.test(titled) ? titled : undefined)
+  const named = nestedText(record.name)
+  const direct =
+    storyTitle(record) || (named && !/^(facebook|watch|reel|reels|video|fb)$/i.test(named) ? named : undefined)
   if (direct) return direct
   const edge = record.edge_media_to_caption
   if (!edge || typeof edge !== "object") return undefined
@@ -363,6 +386,26 @@ function pairUrls(hd: string, sd: string): Rendition[] | null {
   ]
 }
 
+/** Nearest post text before a Facebook playable URL. */
+function facebookSliceTitle(before: string): string | undefined {
+  const patterns = [
+    /"message"\s*:\s*\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"/g,
+    /"savable_description"\s*:\s*\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"/g,
+    /"title"\s*:\s*\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"/g,
+    /"name"\s*:\s*"((?:\\.|[^"\\]){2,200})"/g
+  ]
+  for (const pattern of patterns) {
+    let best = ""
+    let found: RegExpExecArray | null
+    while ((found = pattern.exec(before))) {
+      const text = keptTitle(cleanTitle(readJsonString(found[1])))
+      if (text) best = text
+    }
+    if (best) return best
+  }
+  return undefined
+}
+
 function facebookGroups(text: string): Rendition[][] {
   const groups: Rendition[][] = []
   const hdKey = /"(browser_native_hd_url|playable_url_quality_hd)"\s*:\s*"((?:\\.|[^"\\])*)"/g
@@ -376,6 +419,8 @@ function facebookGroups(text: string): Rendition[][] {
     if (!sdMatch) continue
     const group = pairUrls(high, readJsonString(sdMatch[2]))
     if (!group) continue
+    const before = text.slice(Math.max(0, match.index - 12000), match.index)
+    stampTitle(group, facebookSliceTitle(before))
     seen.add(high)
     groups.push(group)
     if (groups.length >= 24) break
@@ -1178,22 +1223,33 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
   }
 }
 
-function walk(value: unknown, found: Rendition[][], depth: number, budget: { nodes: number }, inheritedCode = ""): void {
+function walk(
+  value: unknown,
+  found: Rendition[][],
+  depth: number,
+  budget: { nodes: number },
+  inheritedCode = "",
+  inheritedTitle = ""
+): void {
   if (depth > MAX_DEPTH || budget.nodes > MAX_NODES || value == null || typeof value !== "object") return
   budget.nodes += 1
   if (Array.isArray(value)) {
-    for (const item of value) walk(item, found, depth + 1, budget, inheritedCode)
+    for (const item of value) walk(item, found, depth + 1, budget, inheritedCode, inheritedTitle)
     return
   }
   const record = value as Record<string, unknown>
   const ownCode = recordCode(record)
+  const ownTitle = storyTitle(record) || inheritedTitle
   const group = renditionsOn(record, ownCode || inheritedCode)
-  if (group.length) found.push(group)
+  if (group.length) {
+    if (ownTitle) stampTitle(group, ownTitle)
+    found.push(group)
+  }
   const keys = Object.keys(record)
   keys.sort((a, b) => mediaKeyRank(b) - mediaKeyRank(a))
   const nextCode = ownCode || inheritedCode
   for (const key of keys) {
     if (key === "video_versions" || key === "progressive_urls" || DASH_KEYS.has(key)) continue
-    walk(record[key], found, depth + 1, budget, nextCode)
+    walk(record[key], found, depth + 1, budget, nextCode, ownTitle)
   }
 }
