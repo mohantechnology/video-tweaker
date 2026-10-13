@@ -31,7 +31,8 @@
     ],
     "host_permissions": [
       "http://*/*",
-      "https://*/*"
+      "https://*/*",
+      "*://*.googlevideo.com/*"
     ],
     "optional_host_permissions": [
       "*://*.doubleclick.net/*",

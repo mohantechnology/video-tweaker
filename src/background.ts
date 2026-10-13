@@ -1,4 +1,4 @@
-import { DOWNLOAD_MESSAGE, downloadFilename, fileUrl } from "~lib/media-file"
+import { DOWNLOAD_MESSAGE, downloadFilename, fileUrl, SAVE_BYTES_MESSAGE } from "~lib/media-file"
 import {
   AD_BLOCK_CANCELLED,
   AD_BLOCK_CHECK,
@@ -26,13 +26,16 @@ let grantTarget: GrantTarget | null = null
 let grantSettled = false
 
 void syncAdBlockRules()
+void allowPlaybackReferrer()
 
 chrome.runtime.onInstalled.addListener(() => {
   void syncAdBlockRules()
+  void allowPlaybackReferrer()
 })
 
 chrome.runtime.onStartup.addListener(() => {
   void syncAdBlockRules()
+  void allowPlaybackReferrer()
 })
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -84,16 +87,82 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false })
       return
     }
+    void allowPlaybackReferrer()
+      .then(() => downloadRemote(url, downloadFilename(title, url)))
+      .then((ok) => sendResponse({ ok }))
+    return true
+  }
+  if (type === SAVE_BYTES_MESSAGE) {
+    const filename = String((message as { filename?: string }).filename ?? "")
+    const data = (message as { data?: unknown }).data
+    if (typeof data !== "string" || data.length < 12 || data.length > 680_000_000 || !filename) {
+      sendResponse({ ok: false })
+      return
+    }
     chrome.downloads.download(
-      { url, filename: downloadFilename(title, url), conflictAction: "uniquify" },
-      () => {
-        sendResponse({ ok: !chrome.runtime.lastError })
+      { url: `data:video/mp4;base64,${data}`, filename, conflictAction: "uniquify" },
+      (id) => {
+        sendResponse({ ok: !chrome.runtime.lastError && typeof id === "number" })
       }
     )
     return true
   }
   return
 })
+
+const PLAYBACK_REFERRER_RULE = 9001
+
+async function allowPlaybackReferrer(): Promise<void> {
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [PLAYBACK_REFERRER_RULE],
+      addRules: [
+        {
+          id: PLAYBACK_REFERRER_RULE,
+          priority: 1,
+          action: {
+            type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+            requestHeaders: [
+              {
+                header: "referer",
+                operation: chrome.declarativeNetRequest.HeaderOperation.SET,
+                value: "https://www.youtube.com/"
+              }
+            ]
+          },
+          condition: {
+            urlFilter: "||googlevideo.com/videoplayback",
+            resourceTypes: [
+              chrome.declarativeNetRequest.ResourceType.OTHER,
+              chrome.declarativeNetRequest.ResourceType.MEDIA,
+              chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST
+            ]
+          }
+        }
+      ]
+    })
+  } catch {
+    /* A download can still be fetched by the page. */
+  }
+}
+
+function downloadRemote(url: string, filename: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    chrome.downloads.download({ url, filename, conflictAction: "uniquify" }, (id) => {
+      if (chrome.runtime.lastError || typeof id !== "number") {
+        resolve(false)
+        return
+      }
+      const done = (delta: chrome.downloads.DownloadDelta) => {
+        if (delta.id !== id || !delta.state?.current) return
+        if (delta.state.current !== "complete" && delta.state.current !== "interrupted") return
+        chrome.downloads.onChanged.removeListener(done)
+        resolve(delta.state.current === "complete")
+      }
+      chrome.downloads.onChanged.addListener(done)
+    })
+  })
+}
 
 async function handleCheck(
   host: string,

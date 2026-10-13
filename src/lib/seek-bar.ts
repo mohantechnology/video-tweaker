@@ -8,7 +8,18 @@ import {
   domainSkin,
   readVideoTitle
 } from "./domains"
-import { directMediaUrl, DOWNLOAD_MESSAGE, fileUrl, mediaPath } from "./media-file"
+import { directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath, SAVE_BYTES_MESSAGE } from "./media-file"
+import { isIsoBmff } from "./mp4-mux"
+import {
+  allowedFetchUrl,
+  assembleDownload,
+  fullRangeUrl,
+  readYtFetchResult,
+  readYtOffer,
+  youtubeVideoId,
+  YT_MEDIA_SOURCE,
+  type YtOffer
+} from "./youtube-media"
 import {
   postRenditionAsk,
   postRenditionDrop,
@@ -888,6 +899,8 @@ let controlsBeforeFullscreen: boolean | null = null
 let controlsObserver: MutationObserver | null = null
 let suppressingControls = false
 let downloadBusy = false
+let ytOffer: YtOffer | null = null
+const pendingYoutubeFetch = new Map<string, (bytes: Uint8Array | null) => void>()
 let layoutStamp = ""
 let qualityToken = 0
 let qualityNonce = ""
@@ -2282,6 +2295,7 @@ function activeRendition(video: HTMLVideoElement, choices: readonly Rendition[])
 }
 
 function downloadTitle(video: HTMLVideoElement | null): string {
+  if (ytOffer?.title && ytOffer.videoId === youtubeVideoId(location.href)) return ytOffer.title
   const group = video ? matchedGroup(video) : []
   const url = fileForDownload(video)
   const path = url ? mediaPath(url) : ""
@@ -2292,7 +2306,61 @@ function downloadTitle(video: HTMLVideoElement | null): string {
   return readVideoTitle(video)
 }
 
+function youtubeBlocked(video: HTMLVideoElement | null): boolean {
+  if (!video) return false
+  try {
+    return Boolean(video.mediaKeys)
+  } catch {
+    return true
+  }
+}
+
+function youtubeOfferForPage(): YtOffer | null {
+  if (domainSkin(location.hostname, location.pathname) !== "youtube") return null
+  if (!ytOffer || ytOffer.live || ytOffer.videoId !== youtubeVideoId(location.href)) return null
+  if (youtubeBlocked(boundVideo)) return null
+  if (!ytOffer.combinedUrl && !(ytOffer.videoUrl && ytOffer.audioUrl)) return null
+  return ytOffer
+}
+
+function saveRemoteFile(url: string, title: string): Promise<boolean> {
+  return chrome.runtime
+    .sendMessage({ type: DOWNLOAD_MESSAGE, url, title })
+    .then((response) => response?.ok === true)
+    .catch(() => false)
+}
+
+function refreshPlayerOffer(previousUrl: string): Promise<YtOffer | null> {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      window.removeEventListener("message", onMessage)
+      resolve(null)
+    }, 8000)
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return
+      const offer = readYtOffer(event.data)
+      if (!offer || !offer.combinedUrl || offer.combinedUrl === previousUrl) return
+      window.clearTimeout(timer)
+      window.removeEventListener("message", onMessage)
+      resolve(offer)
+    }
+    window.addEventListener("message", onMessage)
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "refresh" }, "*")
+  })
+}
+
+function askYoutubeOffer(): void {
+  if (domainSkin(location.hostname, location.pathname) !== "youtube") return
+  window.postMessage({ source: YT_MEDIA_SOURCE, kind: "ask" }, "*")
+}
+
+function youtubeToken(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9]/gi, "").slice(0, 32).padEnd(8, "0")
+}
+
 function fileForDownload(video: HTMLVideoElement | null): string | null {
+  const offer = youtubeOfferForPage()
+  if (offer) return offer.combinedUrl || offer.videoUrl
   if (!video) return null
   const direct = directMediaUrl(video)
   if (direct) return direct
@@ -2966,6 +3034,37 @@ function onQualityResult(message: RenditionMessage): void {
 
 async function downloadCurrent(): Promise<void> {
   if (downloadBusy) return
+  const offer = youtubeOfferForPage()
+  if (offer) {
+    if (!downloadBtn) return
+    downloadBusy = true
+    markAct()
+    downloadBtn.title = "Downloading"
+    try {
+      let current = offer
+      let saved = false
+      if (current.combinedUrl) {
+        saved = await saveRemoteFile(current.combinedUrl, current.title || downloadTitle(boundVideo))
+        if (!saved) {
+          const next = await refreshPlayerOffer(current.combinedUrl)
+          if (next?.combinedUrl) {
+            current = next
+            saved = await saveRemoteFile(next.combinedUrl, next.title || downloadTitle(boundVideo))
+          }
+        }
+      }
+      if (!saved) {
+        const bytes = await assembleDownload(current, loadYoutubePlayback)
+        saved = await saveDownloadBytes(bytes, downloadFilename(current.title || downloadTitle(boundVideo), "https://example.com/video.mp4"))
+      }
+      if (downloadBtn) downloadBtn.title = saved ? "Download started" : "Could not save this video"
+    } catch {
+      if (downloadBtn) downloadBtn.title = "Could not save this video"
+    } finally {
+      downloadBusy = false
+    }
+    return
+  }
   const url = fileForDownload(boundVideo)
   if (!url || !downloadBtn) return
   downloadBusy = true
@@ -2985,8 +3084,96 @@ async function downloadCurrent(): Promise<void> {
   }
 }
 
+async function loadYoutubePlayback(url: string): Promise<Uint8Array> {
+  const ranged = fullRangeUrl(url)
+  const candidates = ranged && ranged !== url ? [url, ranged] : [url]
+  let last: unknown = new Error("media")
+  for (const candidate of candidates) {
+    try {
+      return await loadYoutubeCandidate(candidate)
+    } catch (error) {
+      last = error
+    }
+  }
+  throw last instanceof Error ? last : new Error("media")
+}
+
+async function loadYoutubeCandidate(url: string): Promise<Uint8Array> {
+  let last: unknown = new Error("media")
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const bytes = await fetchYoutubeFromPage(url)
+      if (bytes) return bytes
+    } catch (error) {
+      last = error
+    }
+    try {
+      return await readYoutubeBody(await fetch(url, { credentials: "omit" }))
+    } catch (error) {
+      last = error
+    }
+  }
+  throw last instanceof Error ? last : new Error("media")
+}
+
+async function readYoutubeBody(response: Response): Promise<Uint8Array> {
+  if (!response.ok) throw new Error(String(response.status))
+  const length = Number(response.headers.get("content-length") || "")
+  if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > 500_000_000 || !isIsoBmff(bytes)) throw new Error("media")
+  return bytes
+}
+
+function fetchYoutubeFromPage(url: string): Promise<Uint8Array | null> {
+  const safe = allowedFetchUrl(url)
+  if (!safe) return Promise.resolve(null)
+  const token = youtubeToken()
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      pendingYoutubeFetch.delete(token)
+      resolve(null)
+    }, 180_000)
+    pendingYoutubeFetch.set(token, (bytes) => {
+      window.clearTimeout(timer)
+      pendingYoutubeFetch.delete(token)
+      resolve(bytes)
+    })
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "fetch", token, url: safe }, "*")
+  })
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ""
+  const step = 0x2000
+  for (let index = 0; index < bytes.length; index += step) {
+    const slice = bytes.subarray(index, index + step)
+    binary += String.fromCharCode.apply(null, slice as unknown as number[])
+  }
+  return btoa(binary)
+}
+
+function saveDownloadBytes(bytes: Uint8Array, filename: string): Promise<boolean> {
+  return chrome.runtime
+    .sendMessage({ type: SAVE_BYTES_MESSAGE, filename, data: bytesToBase64(bytes) })
+    .then((response) => response?.ok === true)
+    .catch(() => false)
+}
+
 function onRenditionMessage(event: MessageEvent): void {
   if (event.source !== window) return
+  const fetched = readYtFetchResult(event.data)
+  if (fetched) {
+    const bytes = fetched.buffer ? new Uint8Array(fetched.buffer) : null
+    pendingYoutubeFetch.get(fetched.token)?.(bytes && isIsoBmff(bytes) ? bytes : null)
+    return
+  }
+  const offer = readYtOffer(event.data)
+  if (offer) {
+    ytOffer = offer
+    paintControls()
+    return
+  }
   const message = readRenditionMessage(event.data)
   if (!message) return
   if (message.kind === "used" || message.kind === "failed") {
@@ -4523,6 +4710,9 @@ export function stopSeekBar(): void {
   loopBtn = null
   pipBtn = null
   downloadBtn = null
+  ytOffer = null
+  for (const done of pendingYoutubeFetch.values()) done(null)
+  pendingYoutubeFetch.clear()
   qualityAnchor = null
   qualityBtn = null
   qualityPop = null
@@ -4574,6 +4764,8 @@ export function startSeekBar(options: {
   document.addEventListener("fullscreenchange", onFullscreenCapture, true)
   document.addEventListener("fullscreenchange", onPresentationChange)
   window.addEventListener("message", onRenditionMessage)
+  window.addEventListener("yt-navigate-finish", askYoutubeOffer)
+  askYoutubeOffer()
   window.addEventListener("pointerdown", onViewerInput, true)
   window.addEventListener("keydown", onViewerInput, true)
   document.addEventListener("click", onSiteAudioClick, true)

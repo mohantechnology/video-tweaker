@@ -16,6 +16,19 @@ import {
   type RenditionMessage
 } from "~lib/renditions"
 import { fileUrl, mediaPath } from "~lib/media-file"
+import {
+  collectPlayers,
+  downloadOffer,
+  extractAssignedObject,
+  mergeTracks,
+  readYtAsk,
+  readYtRefresh,
+  readYtFetchRequest,
+  rememberPlayback,
+  youtubeVideoId,
+  YT_MEDIA_SOURCE,
+  type YtTrack
+} from "~lib/youtube-media"
 
 export const config: PlasmoCSConfig = {
   matches: ["http://*/*", "https://*/*"],
@@ -859,6 +872,307 @@ function dropRendition(message: RenditionMessage): void {
   restoreSource(next, true)
 }
 
+let ytWatchInstalled = false
+let ytNativeFetch: typeof window.fetch | null = null
+let ytVideoId = ""
+let ytTitle = ""
+let ytLive = false
+let ytTracks: YtTrack[] = []
+let ytStamp = ""
+let ytRefresh: number[] = []
+let ytPendingPlayback: string[] = []
+let ytPlayerAsked = ""
+let ytPlayerTries = 0
+const ytScriptStamps = new Set<string>()
+
+const ANDROID_PLAYER = {
+  clientName: "ANDROID",
+  clientVersion: "20.10.38",
+  androidSdkVersion: 30,
+  osName: "Android",
+  osVersion: "11"
+}
+
+type WatchedXhr = XMLHttpRequest & { __veeYt?: string }
+
+function onYoutubeHost(): boolean {
+  const host = location.hostname.replace(/^www\./, "")
+  return (
+    host === "youtube.com" ||
+    host.endsWith(".youtube.com") ||
+    host === "youtube-nocookie.com" ||
+    host.endsWith(".youtube-nocookie.com")
+  )
+}
+
+function youtubeAdPlaying(): boolean {
+  return Boolean(document.querySelector(".ad-showing, .ytp-ad-player-overlay"))
+}
+
+function syncYoutubePage(): void {
+  const pageId = youtubeVideoId(location.href)
+  if (pageId === ytVideoId) return
+  ytVideoId = pageId
+  ytTitle = ""
+  ytLive = false
+  ytTracks = []
+  ytStamp = ""
+  ytPendingPlayback = []
+  ytPlayerAsked = ""
+  ytPlayerTries = 0
+  ytScriptStamps.clear()
+  if (!pageId) return
+  publishYoutube()
+}
+
+function publishYoutube(): void {
+  const offer = downloadOffer(ytVideoId, ytTitle, ytLive, ytTracks)
+  const stamp = [offer.videoId, offer.live ? "1" : "0", offer.title, offer.combinedUrl, offer.videoUrl, offer.audioUrl].join("|")
+  if (stamp === ytStamp) return
+  ytStamp = stamp
+  if (!offer.videoId) return
+  window.postMessage({ source: YT_MEDIA_SOURCE, kind: "offer", ...offer }, "*")
+}
+
+function absorbPlayerValue(value: unknown): void {
+  syncYoutubePage()
+  if (!ytVideoId) return
+  let nextTracks = ytTracks
+  let nextTitle = ytTitle
+  let nextLive = ytLive
+  let changed = false
+  for (const media of collectPlayers(value)) {
+    if (media.videoId !== ytVideoId) continue
+    changed = true
+    if (media.title) nextTitle = media.title
+    if (media.live) nextLive = true
+    nextTracks = nextLive ? [] : mergeTracks(nextTracks, media.tracks)
+  }
+  if (!changed) return
+  ytTitle = nextTitle
+  ytLive = nextLive
+  ytTracks = nextTracks
+  if (!ytLive && ytTracks.length && ytPendingPlayback.length) {
+    const pending = ytPendingPlayback
+    ytPendingPlayback = []
+    for (const raw of pending) ytTracks = rememberPlayback(ytTracks, raw).slice()
+  }
+  publishYoutube()
+  void requestPlayerFile()
+}
+
+function absorbPlayerText(text: string): void {
+  if (!text || text.length > 12_000_000 || !text.includes("streamingData")) return
+  try {
+    absorbPlayerValue(JSON.parse(text) as unknown)
+    return
+  } catch {
+    /* A script can assign the player object instead of being the object. */
+  }
+  const assigned = extractAssignedObject(text, "ytInitialPlayerResponse") || extractAssignedObject(text, "playerResponse")
+  if (assigned) absorbPlayerValue(assigned)
+}
+
+function noteYoutubePlayback(raw: string): void {
+  if (!raw.includes("videoplayback") || youtubeAdPlaying()) return
+  syncYoutubePage()
+  if (!ytVideoId || ytLive) return
+  if (!ytTracks.length) {
+    ytPendingPlayback.push(raw)
+    if (ytPendingPlayback.length > 48) ytPendingPlayback.shift()
+    return
+  }
+  const next = rememberPlayback(ytTracks, raw)
+  if (next === ytTracks) return
+  ytTracks = next.slice()
+  publishYoutube()
+}
+
+function isPlayerApi(url: string): boolean {
+  return /\/youtubei\/v1\/player(?:\?|$)|reel_item_watch|reel_watch_sequence|get_watch\?/i.test(url)
+}
+
+function noteYoutubeResponse(response: Response): void {
+  const url = response.url || ""
+  if (url.includes("videoplayback")) {
+    noteYoutubePlayback(url)
+    return
+  }
+  if (!isPlayerApi(url)) return
+  void response
+    .clone()
+    .text()
+    .then((text) => absorbPlayerText(text))
+    .catch(() => undefined)
+}
+
+function noteYoutubeXhr(xhr: WatchedXhr): void {
+  const url = xhr.responseURL || xhr.__veeYt || ""
+  if (url.includes("videoplayback")) {
+    noteYoutubePlayback(url)
+    return
+  }
+  if (!isPlayerApi(url)) return
+  if (xhr.responseType === "json") {
+    absorbPlayerValue(xhr.response)
+    return
+  }
+  if (xhr.responseType && xhr.responseType !== "text") return
+  if (typeof xhr.responseText === "string") absorbPlayerText(xhr.responseText)
+}
+
+function requestHref(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input
+  if (input instanceof URL) return input.href
+  return input.url
+}
+
+function readYoutubeGlobals(): void {
+  const bag = window as unknown as {
+    ytInitialPlayerResponse?: unknown
+    ytplayer?: { config?: { args?: { player_response?: string } } }
+  }
+  if (bag.ytInitialPlayerResponse) absorbPlayerValue(bag.ytInitialPlayerResponse)
+  const embedded = bag.ytplayer?.config?.args?.player_response
+  if (typeof embedded === "string") absorbPlayerText(embedded)
+}
+
+function readYoutubeScripts(): void {
+  document.querySelectorAll("script").forEach((node) => {
+    const text = node.textContent || ""
+    const at = text.indexOf("ytInitialPlayerResponse")
+    if (at < 0 || text.length > 8_000_000) return
+    const stamp = `${text.length}:${at}:${text.slice(at, at + 40)}`
+    if (ytScriptStamps.has(stamp)) return
+    ytScriptStamps.add(stamp)
+    const assigned = extractAssignedObject(text, "ytInitialPlayerResponse")
+    if (assigned) absorbPlayerValue(assigned)
+  })
+}
+
+function innertubeValue(name: string): string {
+  const bag = window as unknown as {
+    ytcfg?: { get?: (key: string) => unknown; data_?: Record<string, unknown> }
+  }
+  const direct = bag.ytcfg?.get?.(name)
+  if (typeof direct === "string" && direct) return direct
+  const stored = bag.ytcfg?.data_?.[name]
+  return typeof stored === "string" ? stored : ""
+}
+
+/** The watch-page player lists sizes only. The Android player response still includes a file address. */
+function requestPlayerFile(force = false): void {
+  if (!ytNativeFetch || !ytVideoId || ytLive) return
+  if (!force && ytTracks.some((track) => track.url && !track.played)) return
+  if (ytPlayerAsked === ytVideoId || ytPlayerTries >= 3) return
+  const key = innertubeValue("INNERTUBE_API_KEY")
+  if (!key) return
+  const videoId = ytVideoId
+  const visitor = innertubeValue("VISITOR_DATA")
+  ytPlayerAsked = videoId
+  ytPlayerTries += 1
+  const body = JSON.stringify({
+    videoId,
+    context: {
+      client: {
+        ...ANDROID_PLAYER,
+        hl: "en",
+        gl: "US",
+        visitorData: visitor
+      }
+    },
+    contentCheckOk: true,
+    racyCheckOk: true
+  })
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (visitor) headers["x-goog-visitor-id"] = visitor
+  void ytNativeFetch
+    .call(window, `https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=${encodeURIComponent(key)}`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body
+    })
+    .then(async (response) => {
+      if (ytVideoId !== videoId) return
+      absorbPlayerText(await response.text())
+      if (ytVideoId === videoId && !ytLive && !ytTracks.some((track) => track.url && !track.played)) ytPlayerAsked = ""
+    })
+    .catch(() => {
+      if (ytVideoId === videoId) ytPlayerAsked = ""
+    })
+}
+
+function refreshYoutubeSoon(): void {
+  for (const timer of ytRefresh) window.clearTimeout(timer)
+  ytRefresh = [0, 300, 1000, 2500].map((delay) =>
+    window.setTimeout(() => {
+      syncYoutubePage()
+      readYoutubeGlobals()
+      readYoutubeScripts()
+      void requestPlayerFile()
+    }, delay)
+  )
+}
+
+function installYoutubeWatch(): void {
+  if (ytWatchInstalled || !onYoutubeHost()) return
+  ytWatchInstalled = true
+  const nativeFetch = window.fetch
+  ytNativeFetch = nativeFetch
+  window.fetch = function (this: Window, input: RequestInfo | URL, init?: RequestInit) {
+    const asked = requestHref(input)
+    if (asked.includes("videoplayback")) noteYoutubePlayback(asked)
+    return nativeFetch.call(window, input, init).then((response) => {
+      try {
+        noteYoutubeResponse(response)
+      } catch {
+        /* The player still receives its response. */
+      }
+      return response
+    })
+  }
+  const nativeOpen = XMLHttpRequest.prototype.open
+  XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, ...args: [string, string | URL, boolean?, (string | null)?, (string | null)?]) {
+    const url = args[1]
+    ;(this as WatchedXhr).__veeYt = String(url)
+    if (String(url).includes("videoplayback")) noteYoutubePlayback(String(url))
+    return nativeOpen.apply(this, args)
+  } as typeof XMLHttpRequest.prototype.open
+  const nativeSend = XMLHttpRequest.prototype.send
+  XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
+    this.addEventListener("load", () => {
+      try {
+        noteYoutubeXhr(this as WatchedXhr)
+      } catch {
+        /* Ignore unreadable bodies. */
+      }
+    })
+    return nativeSend.call(this, body)
+  }
+  window.addEventListener("yt-navigate-start", refreshYoutubeSoon)
+  window.addEventListener("yt-navigate-finish", refreshYoutubeSoon)
+  window.addEventListener("yt-page-data-updated", refreshYoutubeSoon)
+  document.addEventListener("DOMContentLoaded", refreshYoutubeSoon)
+  refreshYoutubeSoon()
+}
+
+async function onYoutubeFetch(data: unknown): Promise<void> {
+  const request = readYtFetchRequest(data)
+  if (!request || !ytNativeFetch) return
+  try {
+    const response = await ytNativeFetch.call(window, request.url, { credentials: "omit", referrer: location.href })
+    if (!response.ok) throw new Error(String(response.status))
+    const length = Number(response.headers.get("content-length") || "")
+    if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
+    const buffer = await response.arrayBuffer()
+    if (buffer.byteLength > 500_000_000) throw new Error("large")
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "data", token: request.token, ok: true, buffer }, "*")
+  } catch {
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "data", token: request.token, ok: false }, "*")
+  }
+}
+
 /** Record renditions from responses these pages already load. */
 function installRenditionWatch(): void {
   if (renditionWatchInstalled || !onRenditionHost()) return
@@ -879,6 +1193,7 @@ function installRenditionWatch(): void {
 }
 
 installRenditionWatch()
+installYoutubeWatch()
 
 function readPendingRendition(): RenditionMessage | null {
   const root = document.documentElement
@@ -900,6 +1215,21 @@ window.addEventListener(RENDITION_USE_EVENT, () => {
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return
+  if (readYtAsk(event.data)) {
+    ytStamp = ""
+    publishYoutube()
+    return
+  }
+  if (readYtRefresh(event.data)) {
+    ytPlayerAsked = ""
+    ytPlayerTries = 0
+    requestPlayerFile(true)
+    return
+  }
+  if (readYtFetchRequest(event.data)) {
+    void onYoutubeFetch(event.data)
+    return
+  }
   const renditions = readRenditionMessage(event.data)
   if (renditions?.kind === "hold") {
     noteHold(renditions)

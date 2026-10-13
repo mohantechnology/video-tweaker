@@ -110,13 +110,14 @@ function at(edge: DockEdge, slot: DockSlot): DockPlacement {
 const PROGRESS_BOTTOM: DockPlacement = { edge: "bottom", slot: "start", x: 0, y: 100 }
 
 const YOUTUBE_DOCK: DomainDockPreset = {
-  controls: { dockLoop: true, dockSkip: true, dockSpeed: true },
+  controls: { dockLoop: true, dockSkip: true, dockSpeed: true, dockDownload: true },
   layout: {
     loop: at("bottom", "center"),
     skip: at("bottom", "center"),
-    speed: at("bottom", "center")
+    speed: at("bottom", "center"),
+    download: at("bottom", "center")
   },
-  order: ["loop", "skip", "speed"]
+  order: ["loop", "skip", "speed", "download"]
 }
 
 const INSTAGRAM_DOCK: DomainDockPreset = {

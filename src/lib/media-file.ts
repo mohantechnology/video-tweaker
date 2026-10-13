@@ -1,6 +1,7 @@
 /** Save a video the page already exposes as a normal file address. */
 
 export const DOWNLOAD_MESSAGE = "VEE_DOWNLOAD"
+export const SAVE_BYTES_MESSAGE = "VEE_SAVE_BYTES"
 
 const MEDIA_EXTENSIONS = ["mp4", "webm", "mkv", "mov", "m4v", "ogv", "ogg"] as const
 
@@ -46,7 +47,12 @@ function mediaExtension(url: string): string {
 
 /** Title plus a file extension chrome.downloads will accept. */
 export function downloadFilename(title: string, file: string): string {
-  let base = title.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim()
+  let base = title
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s.'-]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
   if (!base) base = "video"
   if (base.length > 80) base = base.slice(0, 80).trim()
   return `${base || "video"}.${mediaExtension(file)}`
