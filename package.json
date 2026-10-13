@@ -29,6 +29,10 @@
       "downloads",
       "declarativeNetRequest"
     ],
+    "host_permissions": [
+      "http://*/*",
+      "https://*/*"
+    ],
     "optional_host_permissions": [
       "*://*.doubleclick.net/*",
       "*://doubleclick.net/*",

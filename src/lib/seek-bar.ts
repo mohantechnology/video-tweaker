@@ -9,6 +9,7 @@ import { directMediaUrl, DOWNLOAD_MESSAGE, fileUrl, mediaPath } from "./media-fi
 import {
   postRenditionAsk,
   postRenditionDrop,
+  postRenditionHold,
   postRenditionUse,
   QUALITY_MARK,
   qualityLabel,
@@ -444,6 +445,15 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-quality-pop button[data-on="true"] {
   background: rgba(255, 255, 255, 0.34);
 }
+#${SEEK_BAR_ID} .vee-quality-pop .vee-quality-pending {
+  margin: 0;
+  padding: 7px 10px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 #${SEEK_BAR_ID} .vee-speed-caption {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -870,13 +880,24 @@ let qualityToken = 0
 let qualityNonce = ""
 let qualityStamp = ""
 const rememberedSrc = new WeakMap<HTMLVideoElement, string>()
+const rememberedCode = new WeakMap<HTMLVideoElement, string>()
 const pinnedGroup = new WeakMap<HTMLVideoElement, Rendition[]>()
+const pinnedCode = new WeakMap<HTMLVideoElement, string>()
 const startedPath = new WeakMap<HTMLVideoElement, string>()
 const sidecars = new WeakMap<HTMLVideoElement, HTMLAudioElement>()
 let renditionGroups: Rendition[][] = []
 let playedPaths: string[] = []
 let latestBatch: Rendition[][] = []
 let latestAt = 0
+let heldStamp = ""
+let qualitySearchAt = 0
+let qualitySearchKey = ""
+let qualityAskAt = 0
+let qualityBind = 0
+let catalogSeen = false
+const QUALITY_SHOW_DELAY_MS = 900
+const QUALITY_SEARCH_MS = 12_000
+const QUALITY_ASK_GAP_MS = 1500
 let lockedVideo: HTMLVideoElement | null = null
 let lockedUrl = ""
 let lockedAudio = ""
@@ -886,6 +907,8 @@ let historyHooked = false
 let audioEpoch = 0
 let audioClean: (() => void) | null = null
 let soundtrackLevel = { muted: false, volume: 1 }
+let soundtrackSince = 0
+let lastViewerInput = 0
 let soundtrackReady = true
 let waitEpoch = 0
 let waitFrame = 0
@@ -1465,6 +1488,7 @@ function paintControls(): void {
     fullBtn.setAttribute("aria-pressed", String(fullOn))
   }
   rememberDirect(video)
+  noteActiveClip(video)
   paintQuality(video)
   if (!volumeDrag && !speedDrag) applyBarLayout(settings)
 }
@@ -1528,7 +1552,7 @@ function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
     case "download":
       return settings.dockDownload && fileForDownload(boundVideo) != null
     case "quality":
-      return settings.dockQuality && qualityReady(boundVideo)
+      return settings.dockQuality && qualityShown(boundVideo)
     case "fullscreen":
       return settings.dockFullscreen
   }
@@ -1536,7 +1560,11 @@ function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
 
 function rememberDirect(video: HTMLVideoElement): void {
   const url = directMediaUrl(video)
-  if (url) rememberedSrc.set(video, url)
+  if (!url) return
+  rememberedSrc.set(video, url)
+  if (!instagramPage()) return
+  const code = mediaCode(video)
+  if (code) rememberedCode.set(video, code)
 }
 
 function sizeNear(known: number, live: number): boolean {
@@ -1545,37 +1573,62 @@ function sizeNear(known: number, live: number): boolean {
 }
 
 function groupContainingPath(path: string): Rendition[] | null {
-  if (!path) return null
+  const groups = groupsWithPath(path)
+  return groups.length ? groups[groups.length - 1] : null
+}
+
+function groupsWithPath(path: string): Rendition[][] {
+  if (!path) return []
   const name = path.split("/").pop() || ""
-  let nameHit: Rendition[] | null = null
+  const primary: Rendition[][] = []
+  const alias: Rendition[][] = []
   for (let index = renditionGroups.length - 1; index >= 0; index -= 1) {
     const group = renditionGroups[index]
+    let kind: "primary" | "alias" | "" = ""
     for (const item of group) {
       const itemPath = mediaPath(item.url)
-      const aliasHit =
-        item.aliases?.some((alias) => mediaPath(alias) === path || (name.length > 12 && mediaPath(alias).endsWith(`/${name}`))) ===
-        true
-      if (itemPath === path || aliasHit || (item.audioUrl && mediaPath(item.audioUrl) === path)) return group
-      if (name.length > 12 && (itemPath.endsWith(`/${name}`) || itemPath === name)) nameHit = group
+      if (itemPath === path || (name.length > 12 && (itemPath.endsWith(`/${name}`) || itemPath === name))) kind = "primary"
+      else if (
+        kind !== "primary" &&
+        (item.aliases?.some((alias) => mediaPath(alias) === path || (name.length > 12 && mediaPath(alias).endsWith(`/${name}`))) ||
+          (item.audioUrl && mediaPath(item.audioUrl) === path))
+      ) {
+        kind = "alias"
+      }
     }
+    if (kind === "primary") primary.push(group)
+    else if (kind === "alias") alias.push(group)
   }
-  return nameHit
+  return primary.length ? primary : alias
+}
+
+function groupHasPath(group: readonly Rendition[], path: string): boolean {
+  if (!path) return false
+  const name = path.split("/").pop() || ""
+  return group.some((item) => {
+    const itemPath = mediaPath(item.url)
+    if (itemPath === path) return true
+    if (item.aliases?.some((alias) => mediaPath(alias) === path)) return true
+    return name.length > 12 && (itemPath.endsWith(`/${name}`) || itemPath === name)
+  })
 }
 
 function recentPaths(): string[] {
   const found: string[] = []
   const seen = new Set<string>()
-  const add = (value: string) => {
+  const add = (value: string, trusted: boolean) => {
     if (!value || seen.has(value)) return
     const path = value.startsWith("http") ? mediaPath(value) : value
-    if (!/\.(mp4|webm|m4v|mov)$/i.test(path) || seen.has(path)) return
+    if (!path.startsWith("/") || seen.has(path)) return
+    if (!trusted && !/\.(mp4|webm|m4v|mov)$/i.test(path)) return
+    seen.add(value)
     seen.add(path)
     found.push(path)
   }
-  for (const path of playedPaths) add(path)
+  for (const path of playedPaths) add(path, true)
   try {
     const entries = performance.getEntriesByType("resource")
-    for (let index = entries.length - 1; index >= 0 && found.length < 16; index -= 1) add(entries[index].name)
+    for (let index = entries.length - 1; index >= 0 && found.length < 16; index -= 1) add(entries[index].name, false)
   } catch {
     /* Resource timing can be unavailable in this frame. */
   }
@@ -1602,31 +1655,320 @@ function sizeFits(group: readonly Rendition[], video: HTMLVideoElement): boolean
 
 function pinGroup(video: HTMLVideoElement, group: Rendition[]): Rendition[] {
   pinnedGroup.set(video, group)
+  const code = groupCode(group) || (instagramPage() ? mediaCode(video) : "")
+  if (code) pinnedCode.set(video, code)
   return group
+}
+
+function dropPin(video: HTMLVideoElement): void {
+  pinnedGroup.delete(video)
+  pinnedCode.delete(video)
+  startedPath.delete(video)
+  qualityStamp = ""
+}
+
+const DURATION_SLOP = 1.25
+
+function instagramPage(): boolean {
+  const host = location.hostname.replace(/^www\./, "")
+  return host === "instagram.com" || host.endsWith(".instagram.com")
+}
+
+function groupCode(group: readonly Rendition[] | null | undefined): string {
+  if (!group) return ""
+  let code = ""
+  for (const item of group) {
+    if (!item.code) continue
+    if (!code) code = item.code
+    else if (code !== item.code) return ""
+  }
+  return code
+}
+
+function groupPk(group: readonly Rendition[]): string {
+  let pk = ""
+  for (const item of group) {
+    if (!item.pk) continue
+    if (!pk) pk = item.pk
+    else if (pk !== item.pk) return ""
+  }
+  return pk
+}
+
+function clipDuration(group: readonly Rendition[]): number {
+  return group.find((item) => item.duration && item.duration > 0)?.duration || 0
+}
+
+function durationSlop(live: number): number {
+  return Math.max(DURATION_SLOP, live * 0.05)
+}
+
+function durationConflicts(group: readonly Rendition[], video: HTMLVideoElement): boolean {
+  const known = clipDuration(group)
+  const live = video.duration
+  if (!known || !Number.isFinite(live) || live <= 0) return false
+  return Math.abs(known - live) > durationSlop(live)
+}
+
+function durationAgrees(group: readonly Rendition[], live: number): boolean {
+  const known = clipDuration(group)
+  if (!known || !Number.isFinite(live) || live <= 0) return false
+  return Math.abs(known - live) <= durationSlop(live)
+}
+
+function sameClipGroup(a: readonly Rendition[], b: readonly Rendition[]): boolean {
+  const codeA = groupCode(a)
+  const codeB = groupCode(b)
+  if (!codeA || codeA !== codeB) return false
+  const pkA = groupPk(a)
+  const pkB = groupPk(b)
+  if (pkA && pkB) return pkA === pkB
+  const durA = clipDuration(a)
+  const durB = clipDuration(b)
+  if (durA && durB) return Math.abs(durA - durB) <= durationSlop(Math.max(durA, durB))
+  return false
+}
+
+function dedupeChoices(items: Rendition[]): Rendition[] {
+  const seen = new Set<string>()
+  const next: Rendition[] = []
+  for (const item of items) {
+    const key = `${item.width}x${item.height}:${mediaPath(item.url)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    next.push(item)
+  }
+  return next
+}
+
+function uniteClip(seed: Rendition[], pool: Rendition[][]): Rendition[] {
+  const related = pool.filter((group) => group === seed || sameClipGroup(seed, group))
+  const soundtracks = new Set(
+    related.flatMap((group) => group.map((item) => item.soundtrack || item.audioUrl || "")).filter(Boolean)
+  )
+  const items = dedupeChoices(related.flat())
+  if (soundtracks.size === 1) {
+    const track = [...soundtracks][0]
+    for (const item of items) if (!item.soundtrack) item.soundtrack = track
+  }
+  return items
+}
+
+function playingPath(video: HTMLVideoElement, code = ""): string {
+  const direct = directMediaUrl(video)
+  if (direct) return mediaPath(direct)
+  const remembered = rememberedSrc.get(video)
+  if (!remembered) return ""
+  if (!instagramPage()) return mediaPath(remembered)
+  const live = code || mediaCode(video)
+  const marked = rememberedCode.get(video) || ""
+  if (live && marked && live !== marked) {
+    rememberedSrc.delete(video)
+    rememberedCode.delete(video)
+    return ""
+  }
+  return mediaPath(remembered)
+}
+
+function strictRecent(video: HTMLVideoElement): Rendition[] | null {
+  const live = video.duration
+  if (!Number.isFinite(live) || live <= 0) return null
+  const hits = renditionGroups.filter((group) => {
+    if (!groupCode(group) && group.some((item) => item.code)) return false
+    return durationAgrees(group, live) && sizeFits(group, video)
+  })
+  return hits.length === 1 ? hits[0] : null
+}
+
+function sizeMatch(groups: Rendition[][], video: HTMLVideoElement): Rendition[][] {
+  if (!sizeKnown(video)) return []
+  return groups.filter((group) =>
+    group.some((item) => item.measured !== false && sizeNear(item.width, video.videoWidth) && sizeNear(item.height, video.videoHeight))
+  )
+}
+
+function fullest(groups: Rendition[][]): Rendition[] {
+  return groups.reduce((best, group) => (group.length > best.length ? group : best))
+}
+
+function pickCoded(groups: Rendition[][], video: HTMLVideoElement, path: string): Rendition[] | null {
+  if (!groups.length) return null
+  if (path) {
+    const hits = groups.filter((group) => groupHasPath(group, path))
+    if (hits.length === 1) return hits[0]
+    if (hits.length > 1) return fullest(hits)
+  }
+  if (groups.length === 1) return groups[0]
+  const live = video.duration
+  let pool = groups
+  if (Number.isFinite(live) && live > 0) {
+    const close = groups.filter((group) => durationAgrees(group, live))
+    if (close.length === 1) return close[0]
+    if (close.length > 1) pool = close
+    else {
+      const sized = sizeMatch(groups, video)
+      return sized.length === 1 ? sized[0] : null
+    }
+  }
+  const pks = new Set(pool.map((group) => groupPk(group)).filter(Boolean))
+  if (pks.size === 1) return fullest(pool)
+  const sized = sizeMatch(pool, video)
+  if (sized.length === 1) return sized[0]
+  return null
+}
+
+/** One multi-file group for this shortcode, when duration cannot separate the slides. */
+function uniqueQualityGroup(groups: Rendition[][], video: HTMLVideoElement): Rendition[] | null {
+  const multi = groups.filter((group) => group.length > 1 && !durationConflicts(group, video))
+  if (multi.length === 1) return multi[0]
+  const live = video.duration
+  if (!Number.isFinite(live) || live <= 0) return null
+  const close = multi.filter((group) => durationAgrees(group, live))
+  return close.length === 1 ? close[0] : null
+}
+
+/** Join same-post files that share one media id or one duration. */
+function mergeOwned(groups: Rendition[][], video: HTMLVideoElement): Rendition[] | null {
+  const pool = groups.filter((group) => group.length && !durationConflicts(group, video))
+  if (!pool.length) return null
+  const multi = pool.filter((group) => group.length > 1)
+  if (multi.length > 1) {
+    const live = video.duration
+    if (!Number.isFinite(live) || live <= 0) return null
+    const close = multi.filter((group) => durationAgrees(group, live))
+    if (close.length !== 1) return null
+    const items = dedupeChoices(uniteClip(close[0], pool))
+    return items.length > 1 ? items : null
+  }
+  const pks = [...new Set(pool.map((group) => groupPk(group)).filter(Boolean))]
+  if (pks.length > 1) {
+    const live = video.duration
+    if (!Number.isFinite(live) || live <= 0) return null
+    const close = pool.filter((group) => durationAgrees(group, live))
+    const closePks = [...new Set(close.map((group) => groupPk(group)).filter(Boolean))]
+    if (closePks.length !== 1) return null
+    const seed = close.find((group) => groupPk(group) === closePks[0])
+    if (!seed) return null
+    const items = dedupeChoices(uniteClip(seed, close))
+    return items.length > 1 ? items : null
+  }
+  const items = dedupeChoices(uniteClip(fullest(pool), pool))
+  return items.length > 1 ? items : null
+}
+
+function codedChoice(groups: Rendition[][], video: HTMLVideoElement, path: string): Rendition[] | null {
+  const strict = pickCoded(groups, video, path)
+  const loose = uniqueQualityGroup(groups, video)
+  const looseWins =
+    !!loose &&
+    loose.length > (strict?.length || 0) &&
+    (!strict || strict.length < 2) &&
+    !durationConflicts(loose, video)
+  const seed = looseWins ? loose : strict
+  if (seed && seed.length > 1) return uniteClip(seed, groups)
+  const merged = mergeOwned(groups, video)
+  return merged && merged.length > 1 ? merged : null
+}
+
+function groupAllowed(group: readonly Rendition[], code: string): boolean {
+  const tagged = groupCode(group)
+  if (code && tagged && tagged !== code) return false
+  if (code && !tagged && group.some((item) => item.code)) return false
+  return true
+}
+
+/**
+ * Instagram prefetches the next reel into the same catalog. Size and recency
+ * are not enough to tell those clips apart, so the post shortcode decides.
+ * A shortcode with no tagged files still falls through to the playing URL,
+ * because some responses omit the code until the post page is loaded.
+ */
+function matchInstagram(video: HTMLVideoElement): Rendition[] {
+  const code = mediaCode(video)
+  const path = playingPath(video, code)
+  const marked = pinnedCode.get(video) || ""
+  if (code && marked && code !== marked) dropPin(video)
+
+  if (code) {
+    const owned = renditionGroups.filter((group) => groupCode(group) === code)
+    const picked = codedChoice(owned, video, path)
+    if (picked) return pinGroup(video, picked)
+  }
+
+  if (path) {
+    const groups = groupsWithPath(path).filter((group) => groupAllowed(group, code))
+    if (groups.length === 1 && groups[0].length > 1) return pinGroup(video, groups[0])
+    if (groups.length > 1) {
+      const coded = code ? groups.filter((group) => groupCode(group) === code) : []
+      if (coded.length === 1) {
+        const united = uniteClip(coded[0], coded)
+        if (united.length > 1) return pinGroup(video, united)
+      }
+      const open = groups.filter((group) => !groupCode(group))
+      if (open.length === 1 && open[0].length > 1) return pinGroup(video, open[0])
+    }
+  }
+
+  const pinned = pinnedGroup.get(video)
+  if (pinned && pinned.length > 1 && groupAllowed(pinned, code)) {
+    const pinCode = pinnedCode.get(video) || ""
+    if (code && pinCode === code) return pinned
+    if (!code && !durationConflicts(pinned, video)) return pinned
+    if (code && !pinCode && path && groupHasPath(pinned, path) && !durationConflicts(pinned, video)) return pinned
+  }
+
+  const strict = strictRecent(video)
+  if (strict && strict.length > 1 && groupAllowed(strict, code)) return pinGroup(video, strict)
+  if (!code) return matchPlayed(video)
+  const owned = renditionGroups.filter((group) => groupCode(group) === code)
+  const single = pickCoded(owned, video, path)
+  if (single?.length) return pinGroup(video, uniteClip(single, owned))
+  if (path) {
+    const groups = groupsWithPath(path).filter((group) => groupAllowed(group, code))
+    if (groups.length === 1) return pinGroup(video, groups[0])
+  }
+  return []
 }
 
 function matchedGroup(video: HTMLVideoElement | null): Rendition[] {
   if (!video) return []
+  if (instagramPage()) return matchInstagram(video)
+  return matchPlayed(video)
+}
+
+function unlabeledPlayed(groups: Rendition[][]): Rendition[] | null {
+  const unlabeled = groups.filter((group) => group.every((item) => item.measured === false))
+  if (unlabeled.length < 2) return null
+  for (const path of recentPaths()) {
+    const hits = unlabeled.filter((group) => groupHasPath(group, path))
+    if (hits.length === 1) return hits[0]
+  }
+  return null
+}
+
+function matchPlayed(video: HTMLVideoElement): Rendition[] {
   const src = directMediaUrl(video) || rememberedSrc.get(video) || ""
   if (src) {
     const group = groupContainingPath(mediaPath(src))
-    if (group && durationFits(group, video)) return pinGroup(video, group)
+    if (group && group.length > 1 && durationFits(group, video)) return pinGroup(video, group)
   }
   const started = startedPath.get(video)
   if (started) {
     const group = groupContainingPath(started)
-    if (group && durationFits(group, video) && (!sizeKnown(video) || sizeFits(group, video))) return pinGroup(video, group)
-    if (sizeKnown(video)) startedPath.delete(video)
+    const fits = !!group && durationFits(group, video) && (!sizeKnown(video) || sizeFits(group, video))
+    if (fits && group && group.length > 1) return pinGroup(video, group)
+    if (sizeKnown(video) && !fits) startedPath.delete(video)
   }
-  if (!sizeKnown(video)) return []
-  for (const path of recentPaths()) {
-    const group = groupContainingPath(path)
-    if (!group || !durationFits(group, video) || !sizeFits(group, video)) continue
-    startedPath.set(video, path)
-    return pinGroup(video, group)
+  if (sizeKnown(video)) {
+    for (const path of recentPaths()) {
+      const group = groupContainingPath(path)
+      if (!group || group.length < 2 || !durationFits(group, video) || !sizeFits(group, video)) continue
+      startedPath.set(video, path)
+      return pinGroup(video, group)
+    }
   }
   const pinned = pinnedGroup.get(video)
-  if (pinned && durationFits(pinned, video) && (pinned.length > 1 || src)) return pinned
+  if (pinned && pinned.length > 1 && durationFits(pinned, video)) return pinned
   if (
     latestBatch.length === 1 &&
     latestBatch[0].length > 1 &&
@@ -1636,19 +1978,108 @@ function matchedGroup(video: HTMLVideoElement | null): Rendition[] {
   ) {
     return pinGroup(video, latestBatch[0])
   }
-  const sized = renditionGroups.filter(
-    (group) => group.length > 1 && durationFits(group, video) && sizeFits(group, video) && group.some((item) => item.measured !== false)
+  const multi = renditionGroups.filter(
+    (group) => group.length > 1 && durationFits(group, video) && sizeFits(group, video)
   )
-  if (sized.length === 1) return pinGroup(video, sized[0])
+  const measured = multi.filter((group) => group.some((item) => item.measured !== false))
+  if (sizeKnown(video) && measured.length === 1) return pinGroup(video, measured[0])
+  const unlabeled = unlabeledPlayed(multi)
+  if (unlabeled) return pinGroup(video, unlabeled)
+  if (multi.length === 1) return pinGroup(video, multi[0])
+  if (src) {
+    const group = groupContainingPath(mediaPath(src))
+    if (group && durationFits(group, video)) return pinGroup(video, group)
+  }
+  if (started) {
+    const group = groupContainingPath(started)
+    if (group && durationFits(group, video) && (!sizeKnown(video) || sizeFits(group, video))) return pinGroup(video, group)
+  }
   return []
 }
 
 function qualityReady(video: HTMLVideoElement | null): boolean {
-  return matchedGroup(video).length > 1
+  return collapseSizes(matchedGroup(video)).length > 1
+}
+
+function renditionHost(): boolean {
+  const host = location.hostname.replace(/^www\./, "")
+  return (
+    instagramPage() ||
+    host === "facebook.com" ||
+    host.endsWith(".facebook.com") ||
+    host === "fb.com" ||
+    host.endsWith(".fb.com") ||
+    host === "fb.watch" ||
+    host.endsWith(".fb.watch")
+  )
+}
+
+function clipSearchKey(video: HTMLVideoElement): string {
+  const code = instagramPage() ? pageCodeFor(video) || codeInSingleVideoHost(video) : ""
+  return `${qualityBind}|${location.pathname}|${code}`
+}
+
+function touchQualitySearch(video: HTMLVideoElement): void {
+  if (!renditionHost()) return
+  const key = clipSearchKey(video)
+  if (key === qualitySearchKey) return
+  qualitySearchKey = key
+  qualitySearchAt = performance.now()
+  qualityAskAt = 0
+}
+
+function qualityShown(video: HTMLVideoElement | null): boolean {
+  if (!video) return false
+  if (qualityReady(video)) return true
+  if (catalogSeen || !renditionHost() || !qualitySearchAt) return false
+  const elapsed = performance.now() - qualitySearchAt
+  return elapsed >= QUALITY_SHOW_DELAY_MS && elapsed < QUALITY_SEARCH_MS
+}
+
+function betterFile(a: Rendition, b: Rendition): boolean {
+  if (!a.audioUrl !== !b.audioUrl) return !a.audioUrl
+  return (a.bandwidth || 0) > (b.bandwidth || 0)
+}
+
+/** One choice per picture size. Instagram lists several bitrate tiers of the same size. */
+function collapseSizes(items: readonly Rendition[]): Rendition[] {
+  const bySize = new Map<string, Rendition[]>()
+  const next: Rendition[] = []
+  for (const item of items) {
+    if (item.measured === false) {
+      next.push(item)
+      continue
+    }
+    const key = `${item.width}x${item.height}`
+    const same = bySize.get(key)
+    if (same) same.push(item)
+    else {
+      bySize.set(key, [item])
+      next.push(item)
+    }
+  }
+  return next.map((item) => {
+    const same = item.measured === false ? null : bySize.get(`${item.width}x${item.height}`)
+    if (!same || same.length < 2) return item
+    const best = same.reduce((top, other) => (betterFile(other, top) ? other : top))
+    const aliases = new Set(best.aliases || [])
+    for (const other of same) {
+      if (other === best) continue
+      aliases.add(other.url)
+      for (const alias of other.aliases || []) aliases.add(alias)
+    }
+    const bestPath = mediaPath(best.url)
+    const kept = [...aliases].filter((alias) => mediaPath(alias) !== bestPath)
+    return {
+      ...best,
+      soundtrack: best.soundtrack || same.find((other) => other.soundtrack)?.soundtrack,
+      aliases: kept.length ? kept : undefined
+    }
+  })
 }
 
 function choicesFor(video: HTMLVideoElement): Rendition[] {
-  return sortRenditions(matchedGroup(video))
+  return sortRenditions(collapseSizes(matchedGroup(video)))
 }
 
 function mentionsPath(item: Rendition, path: string): boolean {
@@ -1697,21 +2128,32 @@ function fileForDownload(video: HTMLVideoElement | null): string | null {
     const near = active ? muxed.find((item) => sizeNear(item.height, active.height)) : undefined
     return (near || muxed[0]).url
   }
-  return active?.url || null
+  if (active?.url) return active.url
+  return sortRenditions(group)[0]?.url || null
 }
 
 function paintQuality(video: HTMLVideoElement): void {
   const choices = choicesFor(video)
   const active = activeRendition(video, choices)
   const currentPath = active ? mediaPath(active.url) : ""
+  const waiting = !catalogSeen && choices.length < 2
   if (qualityBtn) {
     const label = active ? qualityLabel(active, choices) : "Resolution"
     qualityBtn.setAttribute("aria-label", active ? `Resolution ${label}` : "Resolution")
   }
-  const stamp = `${choices.map((item) => `${item.height}:${item.width}:${item.url}:${item.audioUrl || ""}:${item.soundtrack || ""}`).join("|")}#${currentPath}`
+  const stamp = waiting
+    ? "waiting"
+    : `${choices.map((item) => `${item.height}:${item.width}:${item.url}:${item.audioUrl || ""}:${item.soundtrack || ""}`).join("|")}#${currentPath}`
   if (!qualityList || stamp === qualityStamp) return
   qualityStamp = stamp
   qualityList.replaceChildren()
+  if (waiting) {
+    const note = document.createElement("p")
+    note.className = "vee-quality-pending"
+    note.textContent = "Finding resolutions"
+    qualityList.appendChild(note)
+    return
+  }
   for (const item of choices) {
     const button = document.createElement("button")
     button.type = "button"
@@ -1724,14 +2166,144 @@ function paintQuality(video: HTMLVideoElement): void {
   }
 }
 
+const POST_CODE = /\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/
+const RESERVED_CODE = /^(audio|explore|tags|locations|saved|accounts)$/i
+
+function codeFromPath(pathname: string): string {
+  const match = pathname.match(POST_CODE)
+  if (!match || match[1].length < 5 || RESERVED_CODE.test(match[1])) return ""
+  return match[1]
+}
+
+function codeFromHref(href: string): string {
+  try {
+    return codeFromPath(new URL(href, location.href).pathname)
+  } catch {
+    return ""
+  }
+}
+
+function codesIn(root: ParentNode): string[] {
+  const found = new Set<string>()
+  for (const link of root.querySelectorAll("a[href*='/reel/'], a[href*='/reels/'], a[href*='/p/'], a[href*='/tv/']")) {
+    if (!(link instanceof HTMLAnchorElement)) continue
+    const code = codeFromHref(link.getAttribute("href") || "")
+    if (code) found.add(code)
+  }
+  return [...found]
+}
+
+function timedCodeIn(root: ParentNode): string {
+  let found = ""
+  for (const link of root.querySelectorAll("a[href]")) {
+    if (!(link instanceof HTMLAnchorElement) || !link.querySelector("time")) continue
+    const code = codeFromHref(link.getAttribute("href") || "")
+    if (!code) continue
+    if (found && found !== code) return ""
+    found = code
+  }
+  return found
+}
+
+/** Post linked from the smallest box that contains this video and no other. */
+function codeInSingleVideoHost(video: HTMLVideoElement): string {
+  let node: HTMLElement | null = video.parentElement
+  for (let depth = 0; node && depth < 16 && node !== document.body && node !== document.documentElement; depth += 1) {
+    if (node.querySelectorAll("video").length > 1) break
+    const timed = timedCodeIn(node)
+    if (timed) return timed
+    const codes = codesIn(node)
+    if (codes.length === 1) return codes[0]
+    node = node.parentElement
+  }
+  return ""
+}
+
+/** Post link drawn on this video, when the reel feed does not wrap each clip. */
+function codeOverlapping(video: HTMLVideoElement): string {
+  const box = video.getBoundingClientRect()
+  if (box.width < 40 || box.height < 40) return ""
+  const root = video.closest("[role='dialog']") || video.closest("main") || document.body
+  let best = ""
+  let bestDistance = Number.POSITIVE_INFINITY
+  let timed = ""
+  let timedDistance = Number.POSITIVE_INFINITY
+  const centerX = box.left + box.width / 2
+  const centerY = box.top + box.height / 2
+  for (const link of root.querySelectorAll("a[href*='/reel/'], a[href*='/reels/'], a[href*='/p/'], a[href*='/tv/']")) {
+    if (!(link instanceof HTMLAnchorElement)) continue
+    const code = codeFromHref(link.getAttribute("href") || "")
+    if (!code) continue
+    const linkBox = link.getBoundingClientRect()
+    if (linkBox.width < 2 || linkBox.height < 2) continue
+    const linkX = linkBox.left + linkBox.width / 2
+    const linkY = linkBox.top + linkBox.height / 2
+    const onVideo = linkX >= box.left && linkX <= box.right && linkY >= box.top - 96 && linkY <= box.bottom + 160
+    if (!onVideo) continue
+    const distance = (linkX - centerX) ** 2 + (linkY - centerY) ** 2
+    if (link.querySelector("time") && distance < timedDistance) {
+      timedDistance = distance
+      timed = code
+    }
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = code
+    }
+  }
+  return timed || best
+}
+
+function pageCodeFor(video: HTMLVideoElement): string {
+  const code = codeFromPath(location.pathname)
+  if (!code) return ""
+  const videos = [...document.querySelectorAll("video")].filter((node) => node.isConnected)
+  if (videos.length <= 1) return code
+  let largest: HTMLVideoElement = video
+  let area = 0
+  for (const node of videos) {
+    const rect = node.getBoundingClientRect()
+    const size = Math.max(0, rect.width) * Math.max(0, rect.height)
+    if (size > area) {
+      area = size
+      largest = node
+    }
+  }
+  return largest === video ? code : ""
+}
+
 function mediaCode(video: HTMLVideoElement): string {
-  const fromPath = location.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/)
-  if (fromPath) return fromPath[1]
-  const root = video.closest("article") || video.parentElement
-  const link = root?.querySelector("a[href*='/reel/'], a[href*='/reels/'], a[href*='/p/'], a[href*='/tv/']")
-  if (!(link instanceof HTMLAnchorElement)) return ""
-  const match = link.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/)
-  return match ? match[1] : ""
+  if (instagramPage()) return pageCodeFor(video) || codeInSingleVideoHost(video) || codeOverlapping(video)
+  return codeFromPath(location.pathname) || codeInSingleVideoHost(video)
+}
+
+function sharesClip(left: readonly Rendition[], right: readonly Rendition[]): boolean {
+  const paths = new Set<string>()
+  for (const item of left) {
+    paths.add(mediaPath(item.url))
+    for (const alias of item.aliases || []) paths.add(mediaPath(alias))
+  }
+  return right.some((item) => paths.has(mediaPath(item.url)) || item.aliases?.some((alias) => paths.has(mediaPath(alias))))
+}
+
+/** Keep the on-screen clip's files even when a later catalog snapshot dropped them. */
+function noteActiveClip(video: HTMLVideoElement): void {
+  if (!renditionHost()) return
+  touchQualitySearch(video)
+  if (instagramPage()) {
+    const code = mediaCode(video)
+    const path = playingPath(video, code)
+    const stamp = `${location.pathname}|${code}|${path}`
+    if (stamp !== heldStamp) {
+      heldStamp = stamp
+      postRenditionHold(code, path)
+    }
+  }
+  if (qualityReady(video) || !qualitySearchAt) return
+  if (performance.now() - qualitySearchAt >= QUALITY_SEARCH_MS) return
+  const now = performance.now()
+  if (qualityAskAt !== 0 && now - qualityAskAt < QUALITY_ASK_GAP_MS) return
+  qualityAskAt = now
+  postRenditionAsk()
 }
 
 function holding(video: HTMLVideoElement): boolean {
@@ -1840,6 +2412,16 @@ type ProbedVideo = HTMLVideoElement & {
   audioTracks?: { length: number }
 }
 
+function onViewerInput(event: Event): void {
+  if (event.isTrusted) lastViewerInput = performance.now()
+}
+
+/** Level captured at the switch, or the live one once the viewer changed it. */
+function soundtrackLevelNow(video: HTMLVideoElement): { muted: boolean; volume: number } {
+  if (lastViewerInput > soundtrackSince) return { muted: video.muted, volume: video.volume }
+  return soundtrackLevel
+}
+
 function noteAudioReady(): void {
   soundtrackReady = true
   waitClose?.()
@@ -1858,6 +2440,7 @@ function beginSoundtrack(
   volume = video.volume
 ): void {
   soundtrackLevel = { muted, volume }
+  soundtrackSince = performance.now()
   const audio = ensureSidecar(video)
   const same =
     lockedAudio === audioUrl &&
@@ -1930,14 +2513,15 @@ function beginSoundtrack(
       noteAudioReady()
       return
     }
-    if (video.muted !== muted) video.muted = muted
+    const level = soundtrackLevelNow(video)
+    if (video.muted !== level.muted) video.muted = level.muted
     try {
-      if (Math.abs(video.volume - volume) > 0.02) video.volume = volume
+      if (Math.abs(video.volume - level.volume) > 0.02) video.volume = level.volume
     } catch {
       /* Ignore a volume the element rejects. */
     }
-    audio.muted = muted
-    audio.volume = volume
+    audio.muted = level.muted
+    audio.volume = level.volume
     try {
       const time = video.currentTime || 0
       if (time > 0) audio.currentTime = time
@@ -2074,8 +2658,9 @@ function showQualityWait(video: HTMLVideoElement, wantPlay: boolean, waitForAudi
     const audio = sidecars.get(video)
     if (audio?.dataset.veeHoldMute === "1" && lockedAudio) {
       delete audio.dataset.veeHoldMute
-      audio.muted = soundtrackLevel.muted
-      audio.volume = soundtrackLevel.volume
+      const level = soundtrackLevelNow(video)
+      audio.muted = level.muted
+      audio.volume = level.volume
       if (wantPlay) void audio.play().catch(() => undefined)
     }
     soundtrackReady = true
@@ -2092,7 +2677,10 @@ function hookHistory(): void {
     function (this: History, ...args: Parameters<typeof history.pushState>) {
       const before = location.pathname
       const result = original.apply(this, args)
-      if (location.pathname !== before) releaseQuality(lockedVideo, true)
+      if (location.pathname !== before) {
+        releaseQuality(lockedVideo, true)
+        postRenditionAsk()
+      }
       return result
     }
   history.pushState = wrap(history.pushState)
@@ -2100,7 +2688,17 @@ function hookHistory(): void {
   window.addEventListener("popstate", () => releaseQuality(lockedVideo, true))
 }
 
+function renditionBelongs(video: HTMLVideoElement, url: string): boolean {
+  if (!instagramPage()) return true
+  const groups = groupsWithPath(mediaPath(url)).filter((group) => !group.some((item) => item.code) || Boolean(groupCode(group)))
+  if (!groups.length) return false
+  const code = mediaCode(video)
+  if (code) return groups.some((group) => groupCode(group) === code)
+  return groups.length === 1
+}
+
 function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void {
+  if (!renditionBelongs(video, url)) return
   const live = video.currentSrc || video.src
   if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl && lockedVideo === video) return
   const wantPlay = !video.paused && !video.ended
@@ -2190,7 +2788,13 @@ function onRenditionMessage(event: MessageEvent): void {
     return
   }
   if (message.kind !== "list") return
-  renditionGroups = message.groups ?? []
+  catalogSeen = true
+  const incoming = message.groups ?? []
+  const pinned = boundVideo ? pinnedGroup.get(boundVideo) : undefined
+  renditionGroups = incoming
+  if (pinned && !incoming.some((group) => sharesClip(group, pinned) || sameClipGroup(group, pinned))) {
+    renditionGroups = [...incoming, pinned]
+  }
   if (message.played && message.played.length > 0) playedPaths = message.played
   if (message.batch && message.batch.length > 0) {
     latestBatch = message.batch
@@ -2825,23 +3429,56 @@ function onEmptied(): void {
   const remembered = rememberedSrc.get(video)
   const assigned = video.src || ""
   if (remembered && assigned && mediaPath(assigned) === mediaPath(remembered)) return
+  if (instagramPage()) {
+    const code = mediaCode(video)
+    const marked = pinnedCode.get(video) || rememberedCode.get(video) || ""
+    if (code && marked && code !== marked) {
+      rememberedSrc.delete(video)
+      rememberedCode.delete(video)
+      dropPin(video)
+      paintControls()
+      return
+    }
+    const pinned = pinnedGroup.get(video)
+    if (pinned && (!code || !marked || code === marked) && !durationConflicts(pinned, video)) {
+      paintControls()
+      return
+    }
+  }
   rememberedSrc.delete(video)
-  pinnedGroup.delete(video)
-  startedPath.delete(video)
+  rememberedCode.delete(video)
+  dropPin(video)
   paintControls()
 }
 
 function refreshStarted(video: HTMLVideoElement): void {
-  if ((video.currentTime || 0) > 0.45) return
-  const existing = startedPath.get(video)
-  const newest = recentPaths()[0]
-  if (!existing || !newest || newest === existing) return
-  const next = groupContainingPath(newest)
-  const prev = groupContainingPath(existing)
-  if (!next || next === prev) return
-  startedPath.delete(video)
-  pinnedGroup.delete(video)
-  qualityStamp = ""
+  if (holding(video) || applyingQuality) return
+  const pinned = pinnedGroup.get(video)
+  if (!pinned) return
+  if (!instagramPage()) {
+    if ((video.currentTime || 0) > 0.45) return
+    const existing = startedPath.get(video)
+    const newest = recentPaths()[0]
+    if (!existing || !newest || newest === existing) return
+    const next = groupContainingPath(newest)
+    const prev = groupContainingPath(existing)
+    if (!next || next === prev) return
+    dropPin(video)
+    return
+  }
+  const code = mediaCode(video)
+  const marked = pinnedCode.get(video) || ""
+  const tagged = groupCode(pinned)
+  if ((code && marked && code !== marked) || (code && tagged && tagged !== code)) {
+    dropPin(video)
+    return
+  }
+  if (!code && durationConflicts(pinned, video)) {
+    dropPin(video)
+    return
+  }
+  const src = directMediaUrl(video)
+  if (src && !groupHasPath(pinned, mediaPath(src))) dropPin(video)
 }
 
 function onTime(): void {
@@ -2857,10 +3494,11 @@ function onTime(): void {
 function fileControlsChanged(video: HTMLVideoElement): boolean {
   const settings = readSettings()
   if (!settings) return false
+  touchQualitySearch(video)
   const downloadEl = controlNodes.get("download")
   const qualityEl = controlNodes.get("quality")
   const downloadOn = settings.dockDownload && fileForDownload(video) != null
-  const qualityOn = settings.dockQuality && qualityReady(video)
+  const qualityOn = settings.dockQuality && qualityShown(video)
   return (!!downloadEl && downloadEl.hidden === downloadOn) || (!!qualityEl && qualityEl.hidden === qualityOn)
 }
 
@@ -3386,8 +4024,7 @@ function onPresentationChange(): void {
 function unbindVideo(video: HTMLVideoElement | null): void {
   if (!video) return
   if (lockedVideo === video) releaseQuality(video, false)
-  startedPath.delete(video)
-  pinnedGroup.delete(video)
+  dropPin(video)
   video.removeEventListener("timeupdate", onTime)
   video.removeEventListener("progress", onTime)
   video.removeEventListener("durationchange", onTime)
@@ -3514,6 +4151,7 @@ export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSett
   if (boundVideo !== video) {
     unbindVideo(boundVideo)
     boundVideo = video
+    qualityBind += 1
     heldRate = null
     heldRateUntil = 0
     rateCorrected = false
@@ -3552,6 +4190,8 @@ export function stopSeekBar(): void {
   document.removeEventListener("fullscreenchange", onFullscreenCapture, true)
   document.removeEventListener("fullscreenchange", onPresentationChange)
   window.removeEventListener("message", onRenditionMessage)
+  window.removeEventListener("pointerdown", onViewerInput, true)
+  window.removeEventListener("keydown", onViewerInput, true)
   window.clearTimeout(hotTimer)
   cancelPopClose("volume")
   cancelPopClose("speed")
@@ -3605,6 +4245,7 @@ export function stopSeekBar(): void {
   downloadBusy = false
   layoutStamp = ""
   qualityStamp = ""
+  catalogSeen = false
   renditionGroups = []
   playedPaths = []
   latestBatch = []
@@ -3647,6 +4288,8 @@ export function startSeekBar(options: {
   document.addEventListener("fullscreenchange", onFullscreenCapture, true)
   document.addEventListener("fullscreenchange", onPresentationChange)
   window.addEventListener("message", onRenditionMessage)
+  window.addEventListener("pointerdown", onViewerInput, true)
+  window.addEventListener("keydown", onViewerInput, true)
   hookHistory()
   postRenditionAsk()
   return {

@@ -4,6 +4,7 @@ import { readEngineSignal } from "~lib/engine"
 import {
   groupsFromText,
   groupsFromValue,
+  mergeCatalogEntries,
   postRenditionResult,
   QUALITY_MARK,
   readRenditionMessage,
@@ -96,7 +97,11 @@ function uninstall(): void {
 
 const renditionCatalog = new Map<string, Rendition[]>()
 const playedPaths: string[] = []
+const heldCodes: string[] = []
+const heldPaths: string[] = []
 let renditionWatchInstalled = false
+const CATALOG_SOFT_CAP = 160
+const CATALOG_HARD_CAP = 240
 
 function onRenditionHost(): boolean {
   const host = location.hostname.replace(/^www\./, "")
@@ -113,7 +118,7 @@ function onRenditionHost(): boolean {
 }
 
 function absorbText(text: string): void {
-  if (!text || text.length > 12_000_000) return
+  if (!text || text.length > 32_000_000) return
   if (
     !text.includes("video_versions") &&
     !text.includes("video_dash_manifest") &&
@@ -121,6 +126,7 @@ function absorbText(text: string): void {
     !text.includes("progressive_url") &&
     !text.includes("browser_native_hd_url") &&
     !text.includes("playable_url_quality_hd") &&
+    !text.includes("video_url") &&
     !text.includes("<MPD") &&
     !text.includes("<Representation")
   ) {
@@ -168,69 +174,142 @@ function publishRenditions(batch: Rendition[][]): void {
   )
 }
 
-function notePlayed(url: string): void {
+function notePlayed(url: string, videoFile = false): void {
   const file = fileUrl(url)
   if (!file) return
   const path = mediaPath(file)
-  if (!/\.(mp4|webm|m4v|mov)$/i.test(path)) return
+  if (!videoFile && !/\.(mp4|webm|m4v|mov)$/i.test(path)) return
   if (playedPaths[0] === path) return
   playedPaths.unshift(path)
-  if (playedPaths.length > 16) playedPaths.length = 16
+  if (playedPaths.length > 48) playedPaths.length = 48
   publishRenditions([])
+}
+
+function catalogKey(group: readonly Rendition[]): string {
+  return group
+    .map((item) => mediaPath(item.url))
+    .filter(Boolean)
+    .sort()
+    .join("|")
+}
+
+function catalogStamp(group: readonly Rendition[]): string {
+  return group
+    .map((item) =>
+      [
+        mediaPath(item.url),
+        item.code || "",
+        item.pk || "",
+        item.width,
+        item.height,
+        item.audioUrl || "",
+        item.soundtrack || "",
+        item.title || "",
+        item.duration || "",
+        (item.aliases || []).map((alias) => mediaPath(alias)).join(",")
+      ].join("~")
+    )
+    .sort()
+    .join("|")
+}
+
+function groupPaths(group: readonly Rendition[]): Set<string> {
+  const paths = new Set<string>()
+  for (const item of group) {
+    paths.add(mediaPath(item.url))
+    for (const alias of item.aliases || []) paths.add(mediaPath(alias))
+  }
+  return paths
+}
+
+function sharesUrl(left: readonly Rendition[], right: readonly Rendition[]): boolean {
+  const paths = groupPaths(left)
+  return right.some((item) => paths.has(mediaPath(item.url)) || item.aliases?.some((alias) => paths.has(mediaPath(alias))))
+}
+
+function pageShortcode(): string {
+  const match = location.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/)
+  if (!match || match[1].length < 5 || /^(audio|explore|tags|locations|saved|accounts)$/i.test(match[1])) return ""
+  return match[1]
+}
+
+function noteHold(message: RenditionMessage): void {
+  if (message.code && !heldCodes.includes(message.code)) {
+    heldCodes.unshift(message.code)
+    if (heldCodes.length > 24) heldCodes.length = 24
+  }
+  for (const path of message.played || []) {
+    if (!path || heldPaths.includes(path)) continue
+    heldPaths.unshift(path)
+  }
+  if (heldPaths.length > 48) heldPaths.length = 48
+}
+
+/** The clip on screen is often the oldest entry. A short catalog drops it while later posts keep loading. */
+function groupProtected(group: readonly Rendition[]): boolean {
+  const page = pageShortcode()
+  if (page && group.some((item) => item.code === page)) return true
+  if (group.some((item) => item.code && heldCodes.includes(item.code))) return true
+  const paths = groupPaths(group)
+  if (playedPaths.some((path) => paths.has(path))) return true
+  if (heldPaths.some((path) => paths.has(path))) return true
+  return false
+}
+
+function trimCatalog(): void {
+  const dropUnprotected = (): boolean => {
+    for (const [key, group] of renditionCatalog) {
+      if (groupProtected(group)) continue
+      renditionCatalog.delete(key)
+      return true
+    }
+    return false
+  }
+  while (renditionCatalog.size > CATALOG_SOFT_CAP && dropUnprotected()) {
+    /* Keep the posts the viewer can still scroll back to. */
+  }
+  while (renditionCatalog.size > CATALOG_HARD_CAP) {
+    const first = renditionCatalog.keys().next().value
+    if (first == null) break
+    renditionCatalog.delete(first)
+  }
+}
+
+function storeGroup(group: Rendition[]): Rendition[] | null {
+  const remove: string[] = []
+  let merged = group
+  let before = ""
+  for (const [key, existing] of renditionCatalog) {
+    if (!sharesUrl(existing, merged)) continue
+    before += catalogStamp(existing)
+    merged = mergeCatalogEntries(existing, merged)
+    remove.push(key)
+  }
+  if (!remove.length) before = ""
+  for (const key of remove) renditionCatalog.delete(key)
+  const nextKey = catalogKey(merged)
+  if (!nextKey) return null
+  const after = catalogStamp(merged)
+  renditionCatalog.set(nextKey, merged)
+  trimCatalog()
+  if (before && before === after) return null
+  return merged
 }
 
 function absorbRenditions(found: Rendition[][]): void {
   if (!found.length) return
   const batch: Rendition[][] = []
   for (const group of found) {
-    const key = group
-      .map((item) => mediaPath(item.url))
-      .sort()
-      .join("|")
-    if (!key) continue
-    const previous = renditionCatalog.get(key)
-    if (previous) {
-      const incomingTrack = group.find((item) => item.soundtrack || item.audioUrl)
-      const keptTrack = previous.find((item) => item.soundtrack || item.audioUrl)
-      const track = incomingTrack?.soundtrack || incomingTrack?.audioUrl || keptTrack?.soundtrack || keptTrack?.audioUrl
-      if (track) {
-        for (const item of group) if (!item.soundtrack) item.soundtrack = track
-        for (const item of previous) if (!item.soundtrack) item.soundtrack = track
-      }
-      const richer =
-        group.length > previous.length ||
-        group.reduce((sum, item) => sum + (item.aliases?.length || 0), 0) >
-          previous.reduce((sum, item) => sum + (item.aliases?.length || 0), 0)
-      const incomingTitle = group.find((item) => item.title)?.title
-      const keptTitle = previous.find((item) => item.title)?.title
-      const gainedTrack = Boolean(track) && !keptTrack
-      if (richer) {
-        if (keptTitle) for (const item of group) if (!item.title) item.title = keptTitle
-        renditionCatalog.set(key, group)
-        batch.push(group)
-      } else if (incomingTitle && !keptTitle) {
-        for (const item of previous) if (!item.title) item.title = incomingTitle
-        batch.push(previous)
-      } else if (gainedTrack) {
-        batch.push(previous)
-      }
-      continue
-    }
-    renditionCatalog.set(key, group)
-    batch.push(group)
-    while (renditionCatalog.size > 48) {
-      const first = renditionCatalog.keys().next().value
-      if (first == null) break
-      renditionCatalog.delete(first)
-    }
+    const stored = storeGroup(group)
+    if (stored) batch.push(stored)
   }
   if (batch.length) publishRenditions(batch)
 }
 
 function noteResponse(response: Response): void {
   try {
-    notePlayed(response.url)
     const type = (response.headers.get("content-type") || "").toLowerCase()
+    notePlayed(response.url, type.startsWith("video/"))
     if (
       type.startsWith("video/") ||
       type.startsWith("audio/") ||
@@ -240,7 +319,7 @@ function noteResponse(response: Response): void {
       return
     }
     const length = Number(response.headers.get("content-length") || "")
-    if (Number.isFinite(length) && length > 12_000_000) return
+    if (Number.isFinite(length) && length > 32_000_000) return
     const textual =
       type.includes("json") ||
       type.includes("text") ||
@@ -261,8 +340,8 @@ function noteResponse(response: Response): void {
 
 function noteXhr(xhr: XMLHttpRequest): void {
   try {
-    notePlayed(xhr.responseURL || "")
     const type = (xhr.getResponseHeader("content-type") || "").toLowerCase()
+    notePlayed(xhr.responseURL || "", type.startsWith("video/"))
     if (type.startsWith("video/") || type.startsWith("audio/") || type.startsWith("image/")) return
     if (xhr.responseType === "json") {
       absorbRenditions(groupsFromValue(xhr.response))
@@ -321,6 +400,15 @@ type QualityHold = {
 
 let hold: QualityHold | null = null
 let revealEpoch = 0
+let lastViewerInput = 0
+
+function noteViewerInput(event: Event): void {
+  if (event.isTrusted) lastViewerInput = performance.now()
+}
+
+for (const type of ["pointerdown", "keydown"]) {
+  window.addEventListener(type, noteViewerInput, { capture: true, passive: true })
+}
 
 const mediaSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src")
 const mediaObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")
@@ -546,6 +634,11 @@ function armPlaybackGuard(next: QualityHold): void {
     const mutedChanged = video.muted !== next.muted
     const volumeChanged = Math.abs(video.volume - next.volume) > 0.02
     if (!mutedChanged && !volumeChanged) return
+    if (lastViewerInput > next.armedAt || (next.muted && !video.muted)) {
+      next.muted = video.muted
+      next.volume = video.volume
+      return
+    }
     next.levelTries += 1
     video.muted = next.muted
     try {
@@ -808,6 +901,10 @@ window.addEventListener(RENDITION_USE_EVENT, () => {
 window.addEventListener("message", (event) => {
   if (event.source !== window) return
   const renditions = readRenditionMessage(event.data)
+  if (renditions?.kind === "hold") {
+    noteHold(renditions)
+    return
+  }
   if (renditions?.kind === "ask") {
     publishRenditions([])
     return

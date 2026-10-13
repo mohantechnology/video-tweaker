@@ -1,3 +1,5 @@
+import { QUALITY_MARK } from "./renditions"
+
 const MIN_WIDTH = 280
 const MIN_HEIGHT = 150
 
@@ -101,7 +103,8 @@ function layoutViewportBox(
 }
 
 function scoreVideo(video: HTMLVideoElement): number {
-  if (video.videoWidth === 0 && video.readyState < 2) return 0
+  // A resolution swap empties the element for a moment. Dropping it then ends the swap and its soundtrack.
+  if (video.videoWidth === 0 && video.readyState < 2 && !video.hasAttribute(QUALITY_MARK)) return 0
 
   // Stretch, zoom, and pan change the painted box, not the layout box.
   const size = laidOutSize(video)

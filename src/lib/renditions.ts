@@ -32,21 +32,29 @@ export type Rendition = {
   soundtrack?: string
   /** Other addresses for this same picture, such as a video-only DASH file. */
   aliases?: string[]
+  /** Bits per second from the DASH manifest. Picks the best file among same-size tracks. */
+  bandwidth?: number
   /** Length in seconds, used to tell one post from another. */
   duration?: number
   /** Post caption or title carried with this file. */
   title?: string
+  /** Instagram shortcode for the post these files belong to. */
+  code?: string
+  /** Instagram media id. Slides that share a shortcode still differ here. */
+  pk?: string
 }
 
 export type RenditionMessage = {
   source: typeof RENDITION_SOURCE
-  kind: "ask" | "list" | "use" | "drop" | "used" | "failed"
+  kind: "ask" | "list" | "use" | "drop" | "used" | "failed" | "hold"
   groups?: Rendition[][]
   batch?: Rendition[][]
   /** Pathnames of media files the page just requested, newest first. */
   played?: string[]
   /** Identifies the video element for a resolution swap. */
   token?: string
+  /** Instagram shortcode of the clip currently on screen. */
+  code?: string
   url?: string
   audioUrl?: string
   time?: number
@@ -60,6 +68,8 @@ export type RenditionMessage = {
 }
 
 const MAX_TEXT = 12_000_000
+const MAX_SCAN = 32_000_000
+const MAX_GROUPS = 240
 const MAX_DEPTH = 40
 const MAX_NODES = 150_000
 
@@ -67,6 +77,12 @@ export function readRenditionMessage(data: unknown): RenditionMessage | null {
   if (!data || typeof data !== "object") return null
   const message = data as Partial<RenditionMessage>
   if (message.source !== RENDITION_SOURCE) return null
+  if (message.kind === "hold") {
+    const code = typeof message.code === "string" && /^[A-Za-z0-9_-]{5,20}$/.test(message.code.trim()) ? message.code.trim() : undefined
+    const played = sanitizePlayed(message.played)
+    if (!code && !played.length) return null
+    return { source: RENDITION_SOURCE, kind: "hold", code, played }
+  }
   if (message.kind === "ask" || message.kind === "list") {
     return {
       source: RENDITION_SOURCE,
@@ -110,6 +126,17 @@ function qualityToken(value: unknown): string {
 
 export function postRenditionAsk(): void {
   window.postMessage({ source: RENDITION_SOURCE, kind: "ask" } satisfies RenditionMessage, "*")
+}
+
+/** Tell the page hook which clip is on screen so its files are not discarded. */
+export function postRenditionHold(code: string, path: string): void {
+  const safe = /^[A-Za-z0-9_-]{5,20}$/.test(code) ? code : undefined
+  const played = path.startsWith("/") && path.length <= 500 ? [path] : undefined
+  if (!safe && !played) return
+  window.postMessage(
+    { source: RENDITION_SOURCE, kind: "hold", code: safe, played } satisfies RenditionMessage,
+    "*"
+  )
 }
 
 export function postRenditionUse(body: {
@@ -165,24 +192,28 @@ export function postRenditionResult(kind: "used" | "failed", token: string, url:
 }
 
 export function groupsFromText(text: string): Rendition[][] {
-  if (!text || text.length > MAX_TEXT) return []
+  if (!text || text.length > MAX_SCAN) return []
   const found: Rendition[][] = []
-  const parsed = parseLooseJson(text)
-  if (parsed) absorbGroups(found, groupsFromValue(parsed))
+  if (text.length <= MAX_TEXT) {
+    const parsed = parseLooseJson(text)
+    if (parsed) absorbGroups(found, groupsFromValue(parsed))
+  }
   absorbGroups(found, scanLoose(text))
   return found
 }
 
 export function groupsFromValue(value: unknown): Rendition[][] {
+  const walked: Rendition[][] = []
+  walk(value, walked, 0, { nodes: 0 })
   const found: Rendition[][] = []
-  walk(value, found, 0, { nodes: 0 })
+  absorbGroups(found, walked)
   return found
 }
 
 export function sanitizeGroups(value: unknown): Rendition[][] {
   if (!Array.isArray(value)) return []
   const groups: Rendition[][] = []
-  for (const group of value.slice(0, 48)) {
+  for (const group of value.slice(0, MAX_GROUPS)) {
     if (!Array.isArray(group)) continue
     const items: Rendition[] = []
     for (const item of group.slice(0, 12)) {
@@ -196,8 +227,9 @@ export function sanitizeGroups(value: unknown): Rendition[][] {
   return groups
 }
 
+/** Instagram's FBQualityLabel names a bitrate tier, so a measured size wins over it. */
 export function qualityLabel(item: Rendition, group: readonly Rendition[]): string {
-  if (item.label) return item.label
+  if (item.label && item.measured === false) return item.label
   const pixels = Math.min(item.width, item.height)
   const same = group.filter((other) => Math.min(other.width, other.height) === pixels).length
   return same > 1 ? `${pixels}p · ${Math.max(item.width, item.height)}` : `${pixels}p`
@@ -255,12 +287,15 @@ function asRendition(value: unknown): Rendition | null {
   const audio = fileUrl(typeof raw.audioUrl === "string" ? raw.audioUrl : "")
   const soundtrack = fileUrl(typeof raw.soundtrack === "string" ? raw.soundtrack : "")
   const duration = dimension(raw.duration)
+  const bandwidth = dimension(raw.bandwidth)
   const aliases = Array.isArray(raw.aliases)
     ? raw.aliases
         .filter((item): item is string => typeof item === "string")
         .map((item) => fileUrl(item))
         .filter((item): item is string => item != null && item !== url)
     : undefined
+  const code = readCodeValue(raw.code) || readCodeValue(raw.shortcode)
+  const pk = readPkValue(raw.pk)
   return {
     width: Math.round(width),
     height: Math.round(height),
@@ -270,9 +305,35 @@ function asRendition(value: unknown): Rendition | null {
     audioUrl: audio || undefined,
     soundtrack: soundtrack || audio || undefined,
     aliases: aliases && aliases.length ? aliases : undefined,
+    bandwidth: bandwidth > 0 ? Math.round(bandwidth) : undefined,
     duration: duration > 0 ? duration : undefined,
-    title: cleanTitle(raw.title)
+    title: cleanTitle(raw.title),
+    code: code || undefined,
+    pk: pk || undefined
   }
+}
+
+function readCodeValue(value: unknown): string {
+  if (typeof value !== "string") return ""
+  const code = value.trim()
+  if (!/^[A-Za-z0-9_-]{8,20}$/.test(code)) return ""
+  return code
+}
+
+function readPkValue(value: unknown): string {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value <= 0) return ""
+    const text = String(value)
+    return /^\d{6,}$/.test(text) ? text : ""
+  }
+  if (typeof value !== "string") return ""
+  const text = value.trim()
+  return /^\d{6,}$/.test(text) ? text : ""
+}
+
+function pkFromId(value: unknown): string {
+  if (typeof value !== "string") return ""
+  return readPkValue(value.split("_")[0])
 }
 
 function readJsonString(raw: string): string {
@@ -323,6 +384,9 @@ function dedupe(items: Rendition[]): Rendition[] {
     if (existing) {
       if (item.audioUrl && !existing.audioUrl) existing.audioUrl = item.audioUrl
       if (item.soundtrack && !existing.soundtrack) existing.soundtrack = item.soundtrack
+      if (item.code && !existing.code) existing.code = item.code
+      if (item.pk && !existing.pk) existing.pk = item.pk
+      if (item.duration && !existing.duration) existing.duration = item.duration
       continue
     }
     seen.set(key, item)
@@ -369,6 +433,7 @@ function matchBracket(text: string, start: number): number {
 }
 
 const DASH_KEYS = new Set(["video_dash_manifest", "dash_manifest", "manifest_xml"])
+const MEDIA_MARKERS = ["video_versions", "video_dash_manifest", "dash_manifest", "manifest_xml", "video_url"]
 
 function sanitizePlayed(value: unknown): string[] {
   if (!Array.isArray(value)) return []
@@ -409,18 +474,21 @@ function scanLoose(text: string): Rendition[][] {
   if (text.includes("video_dash_manifest") || text.includes("dash_manifest") || text.includes("<MPD") || text.includes("<Representation")) {
     for (const dash of dashSlices(text)) {
       const previous = versions.filter((slice) => slice.end <= dash.at).pop()
-      if (previous && dash.at - previous.end < 8000) absorbGroups(found, [mergeRenditions(previous.group, dash.videos)])
+      const near = previous != null && dash.at - previous.end < 8000
+      const samePost = previous != null && sameIdentity(previous, dash)
+      if (previous && near && samePost) absorbGroups(found, [mergeRenditions(previous.group, dash.videos)])
       else absorbGroups(found, [dash.videos])
     }
   }
   if (text.includes("progressive_url")) absorbGroups(found, progressiveGroups(text))
+  if (text.includes('"video_url"')) absorbGroups(found, videoUrlGroups(text))
   return found
 }
 
-function versionSlices(text: string): { group: Rendition[]; end: number }[] {
-  const slices: { group: Rendition[]; end: number }[] = []
+function versionSlices(text: string): { group: Rendition[]; end: number; code: string; pk: string }[] {
+  const slices: { group: Rendition[]; end: number; code: string; pk: string }[] = []
   let from = 0
-  while (slices.length < 48 && from < text.length) {
+  while (slices.length < MAX_GROUPS && from < text.length) {
     const at = text.indexOf("video_versions", from)
     if (at < 0) break
     const colon = text.indexOf(":", at + 14)
@@ -437,18 +505,24 @@ function versionSlices(text: string): { group: Rendition[]; end: number }[] {
     const end = matchBracket(text, start)
     if (end < 0) break
     const group = sanitizeGroups([parseJsonSlice(text.slice(start, end + 1))])[0]
-    if (group?.length) slices.push({ group, end })
+    if (group?.length) {
+      const id = identityNear(text, at)
+      const seconds = durationNear(text, end)
+      stampIdentity(group, id.code, id.pk)
+      if (seconds > 0) for (const item of group) if (!item.duration) item.duration = seconds
+      slices.push({ group, end, code: id.code, pk: id.pk })
+    }
     from = (end > at ? end : at) + 1
   }
   return slices
 }
 
-function dashSlices(text: string): { at: number; videos: Rendition[] }[] {
-  const found: { at: number; videos: Rendition[] }[] = []
+function dashSlices(text: string): { at: number; videos: Rendition[]; code: string; pk: string }[] {
+  const found: { at: number; videos: Rendition[]; code: string; pk: string }[] = []
   const keys = ["video_dash_manifest", "dash_manifest", "manifest_xml"]
   for (const key of keys) {
     let from = 0
-    while (found.length < 48 && from < text.length) {
+    while (found.length < MAX_GROUPS && from < text.length) {
       const at = text.indexOf(key, from)
       if (at < 0) break
       const colon = text.indexOf(":", at + key.length)
@@ -459,14 +533,160 @@ function dashSlices(text: string): { at: number; videos: Rendition[] }[] {
       const xml = readEncodedString(text, colon + 1)
       if (xml && (xml.includes("<MPD") || xml.includes("<Representation"))) {
         const parsed = parseDash(xml)
-        if (parsed.videos.length) found.push({ at, videos: parsed.videos })
+        if (parsed.videos.length) {
+          const id = identityNear(text, at)
+          stampIdentity(parsed.videos, id.code, id.pk)
+          found.push({ at, videos: parsed.videos, code: id.code, pk: id.pk })
+        }
       }
       from = at + key.length
     }
   }
   if (!found.length && (text.includes("<MPD") || text.includes("<Representation"))) {
     const parsed = parseDash(text)
-    if (parsed.videos.length) found.push({ at: 0, videos: parsed.videos })
+    if (parsed.videos.length) found.push({ at: 0, videos: parsed.videos, code: "", pk: "" })
+  }
+  return found
+}
+
+type ClipId = { code: string; pk: string }
+
+type TextHit = { value: string; index: number; end: number }
+
+function usableCode(value: string): string {
+  if (!/^[A-Za-z0-9_-]{8,20}$/.test(value)) return ""
+  if (/^(audio|explore|tags|locations|saved|accounts)$/i.test(value)) return ""
+  return value
+}
+
+/** Depth of `{}` in `slice`, or null once a brace closes the object we started in. */
+function objectDepth(slice: string): number | null {
+  let depth = 0
+  let quote = false
+  let escape = false
+  for (let index = 0; index < slice.length; index += 1) {
+    const char = slice[index]
+    if (quote) {
+      if (escape) escape = false
+      else if (char === "\\") escape = true
+      else if (char === '"') quote = false
+      continue
+    }
+    if (char === '"') quote = true
+    else if (char === "{") depth += 1
+    else if (char === "}") {
+      depth -= 1
+      if (depth < 0) return null
+    }
+  }
+  return depth
+}
+
+function collectHits(region: string, pattern: RegExp): TextHit[] {
+  const source = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)
+  const found: TextHit[] = []
+  let match: RegExpExecArray | null
+  while ((match = source.exec(region))) {
+    if (!match[1]) continue
+    found.push({ value: match[1], index: match.index, end: match.index + match[0].length })
+    if (match[0].length === 0) source.lastIndex += 1
+  }
+  return found
+}
+
+/** Last id that still belongs to the object containing the media key. */
+function idBefore(region: string, pattern: RegExp, clean: (value: string) => string): string {
+  let found = ""
+  for (const hit of collectHits(region, pattern)) {
+    const value = clean(hit.value)
+    if (!value || objectDepth(region.slice(hit.end)) == null) continue
+    found = value
+  }
+  return found
+}
+
+/** First id at the media object's own level, before the next object starts. */
+function idAfter(region: string, pattern: RegExp, clean: (value: string) => string): string {
+  for (const hit of collectHits(region, pattern)) {
+    const value = clean(hit.value)
+    if (!value) continue
+    const depth = objectDepth(region.slice(0, hit.index))
+    if (depth === 0) return value
+  }
+  return ""
+}
+
+function markerAt(text: string, at: number): number {
+  for (const marker of MEDIA_MARKERS) {
+    if (text.startsWith(marker, at)) return marker.length
+  }
+  return 1
+}
+
+function markerBound(text: string, at: number, dir: "before" | "after"): number {
+  const origin = dir === "before" ? Math.max(0, at - 12000) : at + markerAt(text, at)
+  const end = dir === "before" ? at : Math.min(text.length, at + 12000)
+  const slice = text.slice(origin, end)
+  let nearest = -1
+  for (const marker of MEDIA_MARKERS) {
+    const pos = dir === "before" ? slice.lastIndexOf(marker) : slice.indexOf(marker)
+    if (pos < 0) continue
+    if (nearest < 0 || (dir === "before" ? pos > nearest : pos < nearest)) nearest = pos
+  }
+  if (nearest < 0) return dir === "before" ? origin : end
+  return origin + nearest + (dir === "before" ? markerAt(slice, nearest) : 0)
+}
+
+/**
+ * Shortcode and media id for the clip that owns the key at `at`.
+ * The id is often after `video_versions`, so a backward-only search tags the previous post.
+ */
+function identityNear(text: string, at: number): ClipId {
+  const back = text.slice(markerBound(text, at, "before"), at)
+  const forward = text.slice(at, markerBound(text, at, "after"))
+  const codePattern = /"(?:code|shortcode)"\s*:\s*"([A-Za-z0-9_-]{8,20})"/g
+  const linkPattern = /instagram\.com\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]{8,20})/gi
+  const pkPattern = /"pk"\s*:\s*"?(\d{6,})"?/g
+  return {
+    code: idBefore(back, codePattern, usableCode) || idBefore(back, linkPattern, usableCode) || idAfter(forward, codePattern, usableCode) || idAfter(forward, linkPattern, usableCode),
+    pk: idBefore(back, pkPattern, (value) => value) || idAfter(forward, pkPattern, (value) => value)
+  }
+}
+
+function durationNear(text: string, end: number): number {
+  const region = text.slice(end, Math.min(text.length, end + 2500))
+  const match = /"video_duration"\s*:\s*(\d+(?:\.\d+)?)/.exec(region)
+  if (!match) return 0
+  const value = Number(match[1])
+  return value > 0 && value < 86_400 ? value : 0
+}
+
+function sameIdentity(a: ClipId, b: ClipId): boolean {
+  if (a.code && b.code && a.code !== b.code) return false
+  if (a.pk && b.pk && a.pk !== b.pk) return false
+  return Boolean((a.code && b.code && a.code === b.code) || (a.pk && b.pk && a.pk === b.pk))
+}
+
+function stampIdentity(items: Rendition[], code: string, pk: string): void {
+  if (!code && !pk) return
+  for (const item of items) {
+    if (code && !item.code) item.code = code
+    if (pk && !item.pk) item.pk = pk
+  }
+}
+
+function videoUrlGroups(text: string): Rendition[][] {
+  const found: Rendition[][] = []
+  const pattern = /"video_url"\s*:\s*"((?:\\.|[^"\\])*)"/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) && found.length < MAX_GROUPS) {
+    const rendition = fileRendition(readJsonString(match[1]), "")
+    if (!rendition) continue
+    const id = identityNear(text, match.index)
+    stampIdentity([rendition], id.code, id.pk)
+    const seconds = durationNear(text, match.index)
+    if (seconds > 0 && !rendition.duration) rendition.duration = seconds
+    found.push([rendition])
   }
   return found
 }
@@ -491,6 +711,8 @@ function progressiveGroups(text: string): Rendition[][] {
     const item = found[index]
     const rendition = fileRendition(item.url, item.label)
     if (!rendition) continue
+    const id = identityNear(text, item.at)
+    stampIdentity([rendition], id.code, id.pk)
     const partner = found.findIndex(
       (other, otherIndex) =>
         otherIndex > index &&
@@ -502,7 +724,11 @@ function progressiveGroups(text: string): Rendition[][] {
     )
     if (partner >= 0) {
       const other = fileRendition(found[partner].url, found[partner].label)
-      if (other && mediaPath(other.url) !== mediaPath(rendition.url)) {
+      const otherId = identityNear(text, found[partner].at)
+      if (other) stampIdentity([other], otherId.code, otherId.pk)
+      const identified = Boolean(id.code || id.pk || otherId.code || otherId.pk)
+      const clash = identified && !sameIdentity(id, otherId)
+      if (other && !clash && mediaPath(other.url) !== mediaPath(rendition.url)) {
         used.add(index)
         used.add(partner)
         groups.push(dedupe([rendition, other]))
@@ -551,7 +777,27 @@ function readEncodedString(text: string, start: number): string | null {
   return null
 }
 
-function renditionsOn(record: Record<string, unknown>): Rendition[] {
+function permalinkCode(value: unknown): string {
+  if (typeof value !== "string") return ""
+  const match = /instagram\.com\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]{8,20})/i.exec(value)
+  return match ? usableCode(match[1]) : ""
+}
+
+function recordCode(record: Record<string, unknown>, inherited = ""): string {
+  return readCodeValue(record.code) || readCodeValue(record.shortcode) || permalinkCode(record.permalink) || permalinkCode(record.link) || inherited
+}
+
+function progressiveFile(record: Record<string, unknown>): Rendition | null {
+  const raw = typeof record.video_url === "string" ? record.video_url : ""
+  if (!raw) return null
+  const dims = record.dimensions && typeof record.dimensions === "object" ? (record.dimensions as Record<string, unknown>) : null
+  const width = dimension(record.original_width) || dimension(dims?.width) || dimension(record.width)
+  const height = dimension(record.original_height) || dimension(dims?.height) || dimension(record.height)
+  if (width >= 2 && height >= 2) return asRendition({ url: raw, width, height, measured: true })
+  return fileRendition(raw, "")
+}
+
+function renditionsOn(record: Record<string, unknown>, inheritedCode = ""): Rendition[] {
   const muxed: Rendition[] = []
   if (Array.isArray(record.video_versions)) {
     for (const item of record.video_versions) {
@@ -571,18 +817,25 @@ function renditionsOn(record: Record<string, unknown>): Rendition[] {
     const pair = pairUrls(hd, sd)
     if (pair) muxed.push(...pair)
   }
+  const single = progressiveFile(record)
+  if (single) muxed.push(single)
   let dashed: Rendition[] = []
   for (const key of DASH_KEYS) {
     const value = record[key]
     if (typeof value !== "string") continue
     dashed = dashed.concat(parseDash(value).videos)
   }
+  const code = recordCode(record, inheritedCode)
+  const pk = readPkValue(record.pk) || pkFromId(record.id)
+  stampIdentity(muxed, code, pk)
+  stampIdentity(dashed, code, pk)
   const merged = mergeRenditions(muxed, dashed)
   const duration = dimension(record.video_duration)
   if (duration > 0) {
     for (const item of merged) if (!item.duration) item.duration = duration
   }
   stampTitle(merged, captionOn(record))
+  stampIdentity(merged, code, pk)
   const unique = dedupe(merged)
   shareSoundtrack(unique)
   return unique
@@ -647,8 +900,27 @@ function rememberAlias(item: Rendition, url: string): void {
   item.aliases = aliases
 }
 
+function filePaths(item: Rendition): string[] {
+  const paths = [mediaPath(item.url)]
+  for (const alias of item.aliases || []) paths.push(mediaPath(alias))
+  return paths
+}
+
+function sameFile(a: Rendition, b: Rendition): boolean {
+  const left = new Set(filePaths(a))
+  return filePaths(b).some((path) => left.has(path))
+}
+
 /** Keep a muxed progressive file ahead of a video-only DASH address for the same picture. */
 function preferPlayable(same: Rendition, item: Rendition): void {
+  const touch = sameFile(same, item)
+  if (!touch && !sameClip(same, item)) return
+  if (touch && same.code && item.code && same.code !== item.code) return
+  if (touch && same.pk && item.pk && same.pk !== item.pk) return
+  if (item.code && !same.code) same.code = item.code
+  if (item.pk && !same.pk) same.pk = item.pk
+  if (item.title && !same.title) same.title = item.title
+  if (item.duration && !same.duration) same.duration = item.duration
   const track = item.soundtrack || item.audioUrl
   if (track && !same.soundtrack) same.soundtrack = track
   if (same.audioUrl && !same.soundtrack) same.soundtrack = same.audioUrl
@@ -664,17 +936,42 @@ function preferPlayable(same: Rendition, item: Rendition): void {
     rememberAlias(same, same.url)
     same.url = item.url
     same.audioUrl = undefined
+    same.bandwidth = undefined
     same.label = same.label || item.label
+  } else if ((item.bandwidth || 0) > (same.bandwidth || 0)) {
+    rememberAlias(same, same.url)
+    same.url = item.url
+    same.bandwidth = item.bandwidth
+    if (item.audioUrl) same.audioUrl = item.audioUrl
+    same.aliases = same.aliases?.filter((alias) => mediaPath(alias) !== mediaPath(item.url))
   } else rememberAlias(same, item.url)
   for (const alias of item.aliases || []) rememberAlias(same, alias)
+}
+
+/** True when both files are the same clip, or neither one is identified yet. */
+function sameClip(a: Rendition, b: Rendition): boolean {
+  if (a.code && b.code && a.code !== b.code) return false
+  if (a.pk && b.pk && a.pk !== b.pk) return false
+  const aKnown = Boolean(a.code || a.pk)
+  const bKnown = Boolean(b.code || b.pk)
+  if (!aKnown && !bKnown) return true
+  if (!aKnown || !bKnown) return false
+  return Boolean((a.code && b.code) || (a.pk && b.pk))
+}
+
+function identified(item: Rendition): boolean {
+  return Boolean(item.code || item.pk)
 }
 
 function mergeRenditions(muxed: Rendition[], dashed: Rendition[]): Rendition[] {
   const next = dedupe(muxed)
   for (const item of dashed) {
-    const same = next.find((other) => mediaPath(other.url) === mediaPath(item.url) || samePicture(other, item))
+    const same = next.find(
+      (other) => sameFile(other, item) || (sameClip(other, item) && samePicture(other, item))
+    )
     if (!same) {
-      next.push(item)
+      const clash = next.some((other) => identified(other) && identified(item) && !sameClip(other, item))
+      if (!clash) next.push(item)
       continue
     }
     preferPlayable(same, item)
@@ -682,6 +979,15 @@ function mergeRenditions(muxed: Rendition[], dashed: Rendition[]): Rendition[] {
   const unique = dedupe(next)
   shareSoundtrack(unique)
   return unique
+}
+
+function copyRendition(item: Rendition): Rendition {
+  return { ...item, aliases: item.aliases ? [...item.aliases] : undefined }
+}
+
+/** Join two sightings of the same files without dropping a shortcode or soundtrack. */
+export function mergeCatalogEntries(previous: readonly Rendition[], incoming: readonly Rendition[]): Rendition[] {
+  return mergeRenditions(previous.map(copyRendition), incoming.map(copyRendition))
 }
 
 function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
@@ -729,7 +1035,8 @@ function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
         height: Math.round(height),
         url,
         label,
-        measured: true
+        measured: true,
+        bandwidth: bandwidth > 0 ? Math.round(bandwidth) : undefined
       })
       videoOnly.push(!audioCodec)
     }
@@ -739,7 +1046,21 @@ function parseDash(xml: string): { videos: Rendition[]; audioUrl?: string } {
       if (videoOnly[index]) videos[index] = { ...videos[index], audioUrl }
     }
   }
+  const seconds = presentationSeconds(xml)
+  if (seconds > 0) {
+    for (const item of videos) if (!item.duration) item.duration = seconds
+  }
   return { videos: dedupe(videos), audioUrl }
+}
+
+function presentationSeconds(xml: string): number {
+  const tag = /<MPD\b[^>]*>/i.exec(xml.slice(0, 1200))
+  if (!tag) return 0
+  const raw = attr(tag[0], "mediaPresentationDuration")
+  const match = /PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?/i.exec(raw)
+  if (!match) return 0
+  const total = Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0)
+  return total > 0 && total < 86_400 ? total : 0
 }
 
 function representationUrl(body: string): string {
@@ -766,20 +1087,78 @@ function decodeXml(value: string): string {
     .replace(/&gt;/g, ">")
 }
 
+function clipsConflict(host: readonly Rendition[], incoming: readonly Rendition[]): boolean {
+  let shared = false
+  for (const left of host) {
+    for (const right of incoming) {
+      if (!sameFile(left, right)) continue
+      shared = true
+      if (left.code && right.code && left.code !== right.code) return true
+      if (left.pk && right.pk && left.pk !== right.pk) return true
+    }
+  }
+  if (shared) return false
+  return host.some((left) =>
+    incoming.some((right) => !sameClip(left, right) && Boolean((left.code || left.pk) && (right.code || right.pk)))
+  )
+}
+
+function groupCodeOf(group: readonly Rendition[]): string {
+  let code = ""
+  for (const item of group) {
+    if (!item.code) continue
+    if (!code) code = item.code
+    else if (code !== item.code) return ""
+  }
+  return code
+}
+
+function groupPkOf(group: readonly Rendition[]): string {
+  let pk = ""
+  for (const item of group) {
+    if (!item.pk) continue
+    if (!pk) pk = item.pk
+    else if (pk !== item.pk) return ""
+  }
+  return pk
+}
+
+function groupDuration(group: readonly Rendition[]): number {
+  return group.find((item) => item.duration && item.duration > 0)?.duration || 0
+}
+
+/** Same post and same slide, so a separate dash list can join the progressive file. */
+function sameCatalogClip(a: readonly Rendition[], b: readonly Rendition[]): boolean {
+  const codeA = groupCodeOf(a)
+  const codeB = groupCodeOf(b)
+  if (!codeA || codeA !== codeB) return false
+  const pkA = groupPkOf(a)
+  const pkB = groupPkOf(b)
+  if (pkA && pkB) return pkA === pkB
+  const durA = groupDuration(a)
+  const durB = groupDuration(b)
+  if (!durA || !durB) return false
+  return Math.abs(durA - durB) <= Math.max(1.25, Math.max(durA, durB) * 0.05)
+}
+
 function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
   for (const group of incoming) {
-    if (!group.length || found.length >= 48) continue
+    if (!group.length || found.length >= MAX_GROUPS) continue
     const paths = new Set(group.map((item) => mediaPath(item.url)))
-    const host = found.find((existing) => existing.some((item) => paths.has(mediaPath(item.url))))
+    let host = found.find((existing) => existing.some((item) => paths.has(mediaPath(item.url))))
+    if (host && clipsConflict(host, group)) host = undefined
+    if (!host) host = found.find((existing) => sameCatalogClip(existing, group))
     if (!host) {
       const unique = dedupe(group)
       shareSoundtrack(unique)
-      found.push(unique)
+      if (unique.length && found.length < MAX_GROUPS) found.push(unique)
       continue
     }
     stampTitle(host, group.find((item) => item.title)?.title)
     for (const item of group) {
-      const existing = host.find((other) => mediaPath(other.url) === mediaPath(item.url) || samePicture(other, item))
+      const existing = host.find(
+        (other) => mediaPath(other.url) === mediaPath(item.url) || (sameClip(other, item) && samePicture(other, item))
+      )
       if (existing) {
         preferPlayable(existing, item)
         continue
@@ -790,20 +1169,22 @@ function absorbGroups(found: Rendition[][], incoming: Rendition[][]): void {
   }
 }
 
-function walk(value: unknown, found: Rendition[][], depth: number, budget: { nodes: number }): void {
+function walk(value: unknown, found: Rendition[][], depth: number, budget: { nodes: number }, inheritedCode = ""): void {
   if (depth > MAX_DEPTH || budget.nodes > MAX_NODES || value == null || typeof value !== "object") return
   budget.nodes += 1
   if (Array.isArray(value)) {
-    for (const item of value) walk(item, found, depth + 1, budget)
+    for (const item of value) walk(item, found, depth + 1, budget, inheritedCode)
     return
   }
   const record = value as Record<string, unknown>
-  const group = renditionsOn(record)
+  const ownCode = recordCode(record)
+  const group = renditionsOn(record, ownCode || inheritedCode)
   if (group.length) found.push(group)
   const keys = Object.keys(record)
   keys.sort((a, b) => mediaKeyRank(b) - mediaKeyRank(a))
+  const nextCode = ownCode || inheritedCode
   for (const key of keys) {
     if (key === "video_versions" || key === "progressive_urls" || DASH_KEYS.has(key)) continue
-    walk(record[key], found, depth + 1, budget)
+    walk(record[key], found, depth + 1, budget, nextCode)
   }
 }
