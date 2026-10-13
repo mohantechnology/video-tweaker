@@ -2375,15 +2375,33 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
       /* The soundtrack can reject a seek until it has metadata. */
     }
   })
+  video.addEventListener("waiting", () => {
+    if (lockedAudio && lockedVideo === video) audio.pause()
+  })
+  video.addEventListener("playing", () => {
+    if (!lockedAudio || lockedVideo !== video) return
+    try {
+      audio.currentTime = video.currentTime
+    } catch {
+      /* The soundtrack can reject a seek until it has metadata. */
+    }
+    if (audio.paused) void audio.play().catch(() => undefined)
+  })
   video.addEventListener("timeupdate", () => {
     if (!lockedAudio || lockedVideo !== video || video.paused) return
-    if (Math.abs((audio.currentTime || 0) - (video.currentTime || 0)) > 0.35) {
+    const rate = video.playbackRate || 1
+    const drift = (video.currentTime || 0) - (audio.currentTime || 0)
+    if (Math.abs(drift) > 0.4) {
+      audio.playbackRate = rate
       try {
         audio.currentTime = video.currentTime
       } catch {
         /* Ignore a seek the soundtrack is not ready for. */
       }
+      return
     }
+    // A seek costs about as much lag as it fixes, so small drift is closed by speed instead.
+    audio.playbackRate = Math.abs(drift) > 0.04 ? rate * (1 + Math.max(-0.06, Math.min(0.06, drift))) : rate
   })
   return audio
 }

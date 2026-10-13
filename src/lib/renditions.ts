@@ -227,11 +227,20 @@ export function sanitizeGroups(value: unknown): Rendition[][] {
   return groups
 }
 
+const STANDARD_HEIGHTS = [144, 240, 360, 480, 540, 720, 1080, 1440, 2160]
+
+/** Encoders pad sizes like 1088 or 716. Name them by the standard height they are made for. */
+function standardHeight(item: Rendition): number {
+  const pixels = Math.min(item.width, item.height)
+  const near = STANDARD_HEIGHTS.find((height) => Math.abs(height - pixels) <= height * 0.02)
+  return near ?? pixels
+}
+
 /** Instagram's FBQualityLabel names a bitrate tier, so a measured size wins over it. */
 export function qualityLabel(item: Rendition, group: readonly Rendition[]): string {
   if (item.label && item.measured === false) return item.label
-  const pixels = Math.min(item.width, item.height)
-  const same = group.filter((other) => Math.min(other.width, other.height) === pixels).length
+  const pixels = standardHeight(item)
+  const same = group.filter((other) => standardHeight(other) === pixels).length
   return same > 1 ? `${pixels}p · ${Math.max(item.width, item.height)}` : `${pixels}p`
 }
 

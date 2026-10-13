@@ -1,6 +1,7 @@
 import { PROGRESS_SAVE_INTERVAL_MS, RESUME_LEAD_SECONDS } from "../settings"
 import { readPageTitle, siteSkipsResume } from "./domains"
 import { registrableDomain } from "./host"
+import { QUALITY_MARK } from "./renditions"
 import type { EffectSettings } from "./types"
 
 export { registrableDomain }
@@ -86,7 +87,8 @@ export function progressStorageKey(video: HTMLVideoElement): string {
   const page = pageIdentity()
   if (page.startsWith("youtube:")) return page
 
-  const src = video.currentSrc || video.src || ""
+  // A resolution swap plays a file address in place of the page's stream. It is still the same video.
+  const src = video.hasAttribute(QUALITY_MARK) ? "" : video.currentSrc || video.src || ""
   if (!src || src.startsWith("blob:") || src.startsWith("data:")) {
     const label = video.getAttribute("title") || video.getAttribute("aria-label") || ""
     return label ? `${page}|${label.slice(0, 80)}` : page
