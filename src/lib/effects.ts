@@ -381,7 +381,8 @@ export function protectMediaLevel(video: HTMLVideoElement, volume: number, muted
 }
 
 const VOLUME_DRIFT = 0.01
-const RATE_DRIFT = 0.02
+/** Smaller than the custom 0.01 step, so 1.00 and 1.02 stay different. */
+const RATE_DRIFT = 0.005
 
 type MediaBaseline = {
   volume?: number
@@ -450,8 +451,8 @@ function driftedBool(
 }
 
 /**
- * YouTube pins the slider at 0.25 or 2 when the real speed is outside that.
- * That pinned rate is not a user edit.
+ * YouTube's player rate stays put when the custom speed is not a slider step.
+ * That rate is not a user edit, on the player or copied back onto the element.
  */
 function publishedRateIsEcho(video: HTMLVideoElement, published: number | undefined): boolean {
   if (typeof published !== "number") return false
@@ -478,7 +479,9 @@ export function mediaDrift(video: HTMLVideoElement, live: NativeMirrorPatch): Na
   if (typeof base.playbackRate === "number") {
     const elementRate = live.playbackRate
     const elementMoved =
-      typeof elementRate === "number" && Math.abs(elementRate - base.playbackRate) >= RATE_DRIFT
+      typeof elementRate === "number" &&
+      !publishedRateIsEcho(video, elementRate) &&
+      Math.abs(elementRate - base.playbackRate) >= RATE_DRIFT
     if (elementMoved) playbackRate = elementRate
     else if (typeof publishedRate === "number" && Math.abs(publishedRate - base.playbackRate) >= RATE_DRIFT) {
       playbackRate = publishedRate

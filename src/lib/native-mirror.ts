@@ -7,13 +7,16 @@
 export const NATIVE_MIRROR_ATTR = "data-vee-mirror"
 
 const OURS = "#vee-seek-bar, #vee-csui"
-const RATE_EPSILON = 0.02
+/** Smaller than the custom 0.01 step, so 1.00 and 1.02 stay different. */
+const RATE_EPSILON = 0.005
 const RETRY_LIMIT = 4
 const RETRY_MS = 80
-/** YouTube's speed slider. Rates outside this stay on the video; the slider sits at the near end. */
+/** YouTube's speed slider. Rates outside this stay on the video. */
 const YT_SPEED_MIN = 0.25
 const YT_SPEED_MAX = 2
-/** Clamped player rate we last wrote, so a later read is not treated as a user edit. */
+/** Slider step when the control is not in the page yet. */
+const YT_SPEED_STEP = 0.05
+/** Player rate we left unchanged, so a later read of that same rate is not a user edit. */
 export const YT_ECHO_ATTR = "data-vee-yt-echo"
 /** Set while a player write is in progress, so the ratechange is not adopted as a user edit. */
 export const YT_HOLD_ATTR = "data-vee-yt-hold"
@@ -172,43 +175,44 @@ function applyYoutube(video: HTMLVideoElement, patch: NativeMirror, attempt: num
   speedLabelVideo = video
   ensureYoutubeSpeedLabelListener()
   const bounds = youtubeSpeedBounds(player)
-  // Inside 0.25–2 the player accepts steps the old rate list does not name.
-  // Outside that, the slider can only sit on the nearest end.
-  let match = clampSpeed(requested, bounds)
-  const outside = !nearRate(requested, match)
-  if (outside) video.setAttribute(YT_ECHO_ATTR, String(match))
-  else video.removeAttribute(YT_ECHO_ATTR)
-  const pushed = mirroredRate.get(video)
-  const live = readPlayerRate(player)
-  const already = pushed != null && nearRate(pushed, match) && live != null && nearRate(live, match)
-  if (!already) {
-    video.setAttribute(YT_HOLD_ATTR, "1")
-    try {
-      player.setPlaybackRate(match)
-    } catch {
-      video.removeAttribute(YT_HOLD_ATTR)
-      return
-    }
-    const applied = readPlayerRate(player)
-    if (applied != null && !nearRate(applied, match) && !outside) {
-      const nearest = nearestRate(readRates(player), match)
-      if (nearest != null) {
-        try {
-          player.setPlaybackRate(nearest)
-          match = nearest
-        } catch {
-          /* The listed rate can be rejected while an ad frame is locked. */
+  // A step the slider can keep (1, 1.05, 1.25) still goes through the player.
+  // 1.02 and anything outside 0.25–2 would be rounded, so the slider stays put.
+  const onStep = rateOnSliderStep(requested, bounds)
+  let match = requested
+  if (!onStep) {
+    const parked = parkedPlayerRate(player, requested)
+    if (parked != null) video.setAttribute(YT_ECHO_ATTR, String(parked))
+    else video.removeAttribute(YT_ECHO_ATTR)
+    holdElementRate(video, requested)
+  } else {
+    video.removeAttribute(YT_ECHO_ATTR)
+    const pushed = mirroredRate.get(video)
+    const live = readPlayerRate(player)
+    const already = pushed != null && nearRate(pushed, match) && live != null && nearRate(live, match)
+    if (!already) {
+      video.setAttribute(YT_HOLD_ATTR, "1")
+      try {
+        player.setPlaybackRate(match)
+      } catch {
+        video.removeAttribute(YT_HOLD_ATTR)
+        return
+      }
+      const applied = readPlayerRate(player)
+      if (applied != null && !nearRate(applied, match)) {
+        const nearest = nearestRate(readRates(player), match)
+        if (nearest != null && rateOnSliderStep(nearest, bounds)) {
+          try {
+            player.setPlaybackRate(nearest)
+            match = nearest
+          } catch {
+            /* The listed rate can be rejected while an ad frame is locked. */
+          }
         }
       }
+      mirroredRate.set(video, match)
+      video.removeAttribute(YT_HOLD_ATTR)
     }
-    mirroredRate.set(video, match)
-    if (outside) video.setAttribute(YT_ECHO_ATTR, String(match))
-    restoreElementRate(video, requested, match)
-    video.removeAttribute(YT_HOLD_ATTR)
-  } else {
-    restoreElementRate(video, requested, match)
   }
-  placeYoutubeSpeedSlider(match)
   paintYoutubeSpeedLabels(video)
   // Mute can clear the rate, and a rate change can clear loudness. Put both back.
   const keep = () => {
@@ -218,17 +222,17 @@ function applyYoutube(video: HTMLVideoElement, patch: NativeMirror, attempt: num
     }
     video.setAttribute(YT_HOLD_ATTR, "1")
     try {
-      const now = readPlayerRate(player)
-      if (now != null && !nearRate(now, match)) {
-        try {
-          player.setPlaybackRate?.(match)
-          mirroredRate.set(video, match)
-        } catch {
-          /* The player can reject the rate while an ad frame is locked. */
+      if (onStep) {
+        const now = readPlayerRate(player)
+        if (now != null && !nearRate(now, match)) {
+          try {
+            player.setPlaybackRate?.(match)
+            mirroredRate.set(video, match)
+          } catch {
+            /* The player can reject the rate while an ad frame is locked. */
+          }
         }
-      }
-      restoreElementRate(video, requested, match)
-      placeYoutubeSpeedSlider(match)
+      } else holdElementRate(video, requested)
       paintYoutubeSpeedLabels(video)
     } finally {
       video.removeAttribute(YT_HOLD_ATTR)
@@ -337,10 +341,41 @@ function youtubeSpeedBounds(player: YoutubePlayer): { min: number; max: number }
   return { min: YT_SPEED_MIN, max: YT_SPEED_MAX }
 }
 
-function clampSpeed(rate: number, bounds: { min: number; max: number }): number {
-  if (rate < bounds.min) return bounds.min
-  if (rate > bounds.max) return bounds.max
-  return rate
+function youtubeSpeedStep(): number {
+  const slider = youtubeSpeedSlider()
+  const step = slider ? Number(slider.step) : NaN
+  if (Number.isFinite(step) && step > 0) return step
+  return YT_SPEED_STEP
+}
+
+/** Player or slider rate that is still the old step, not the custom rate we are about to keep. */
+function parkedPlayerRate(player: YoutubePlayer, requested: number): number | null {
+  const api = readPlayerRate(player)
+  if (api != null && !nearRate(api, requested)) return api
+  const slider = youtubeSpeedSlider()
+  const value = slider ? Number(slider.value) : NaN
+  if (Number.isFinite(value) && !nearRate(value, requested)) return value
+  return api
+}
+
+/** True when YouTube's slider can keep this rate without rounding it. */
+function rateOnSliderStep(rate: number, bounds: { min: number; max: number }): boolean {
+  if (rate < bounds.min - RATE_EPSILON || rate > bounds.max + RATE_EPSILON) return false
+  const step = youtubeSpeedStep()
+  const offset = (rate - bounds.min) / step
+  return Math.abs(offset - Math.round(offset)) * step <= RATE_EPSILON
+}
+
+function holdElementRate(video: HTMLVideoElement, requested: number): void {
+  const holding = video.hasAttribute(YT_HOLD_ATTR)
+  if (!holding) video.setAttribute(YT_HOLD_ATTR, "1")
+  try {
+    if (!nearRate(video.playbackRate, requested)) video.playbackRate = requested
+  } catch {
+    /* The element can reject a rate while an ad frame is locked. */
+  } finally {
+    if (!holding) video.removeAttribute(YT_HOLD_ATTR)
+  }
 }
 
 function nearestRate(rates: number[], target: number): number | null {
@@ -354,38 +389,6 @@ function nearestRate(rates: number[], target: number): number | null {
     }
   }
   return best
-}
-
-/** The video keeps a speed the slider cannot show. The player API itself only accepts the clamped end. */
-function restoreElementRate(video: HTMLVideoElement, requested: number, applied: number): void {
-  if (nearRate(requested, applied)) return
-  try {
-    if (!nearRate(video.playbackRate, requested)) video.playbackRate = requested
-  } catch {
-    /* The element can reject a rate while an ad frame is locked. */
-  }
-}
-
-function placeYoutubeSpeedSlider(value: number): void {
-  const slider = youtubeSpeedSlider()
-  if (!slider) return
-  const min = Number(slider.min)
-  const max = Number(slider.max)
-  const lo = Number.isFinite(min) ? min : YT_SPEED_MIN
-  const hi = Number.isFinite(max) ? max : YT_SPEED_MAX
-  if (!(hi > lo)) return
-  const next = Math.min(hi, Math.max(lo, value))
-  const text = String(next)
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
-  try {
-    if (setter) setter.call(slider, text)
-    else slider.value = text
-  } catch {
-    return
-  }
-  slider.setAttribute("aria-valuenow", text)
-  slider.setAttribute("aria-valuetext", next.toFixed(2))
-  slider.style.setProperty("--yt-slider-shape-gradient-percent", `${((next - lo) / (hi - lo)) * 100}%`)
 }
 
 function formatMenuRate(rate: number): string {
@@ -403,14 +406,12 @@ function setLabel(node: Element | null | undefined, text: string): void {
   node.textContent = text
 }
 
-/** Playback-speed text in the gear menu and in the speed panel, when the rate is outside the slider. */
+/** Playback-speed text in the gear menu and in the open speed panel. The slider thumb stays put. */
 function paintYoutubeSpeedLabels(video: HTMLVideoElement): void {
   const wanted = desiredSpeed.get(video)
   if (typeof wanted !== "number" || !video.isConnected) return
   const player = youtubePlayer(video)
   if (!player) return
-  const bounds = youtubeSpeedBounds(player)
-  if (wanted >= bounds.min - RATE_EPSILON && wanted <= bounds.max + RATE_EPSILON) return
   const menuText = formatMenuRate(wanted)
   const panelText = formatPanelRate(wanted)
   for (const item of document.querySelectorAll(".ytp-menuitem")) {
@@ -949,9 +950,32 @@ function assignLive<T extends number | boolean>(
   next[key] = live as never
 }
 
+/**
+ * YouTube can copy its player rate back onto the element after we set 1.02×.
+ * Put the custom rate back while the slider thumb is still on the rate we left.
+ */
+function retainCustomYoutubeRate(video: HTMLVideoElement): void {
+  if (video.hasAttribute(YT_HOLD_ATTR)) return
+  const wanted = desiredSpeed.get(video)
+  if (typeof wanted !== "number") return
+  const player = youtubePlayer(video)
+  if (!player || rateOnSliderStep(wanted, youtubeSpeedBounds(player))) return
+  const echo = Number(video.getAttribute(YT_ECHO_ATTR))
+  if (!Number.isFinite(echo)) return
+  const api = readPlayerRate(player)
+  if (api != null && !nearRate(api, echo)) return
+  const slider = youtubeSpeedSlider()
+  if (slider) {
+    const value = Number(slider.value)
+    if (Number.isFinite(value) && !nearRate(value, echo)) return
+  }
+  holdElementRate(video, wanted)
+}
+
 /** Publish the site player's volume, mute, speed, and loop for this tab's custom bar. */
 export function publishSitePlayer(video: HTMLVideoElement): void {
   if (!video.isConnected || video.hasAttribute(NATIVE_MIRROR_ATTR)) return
+  if (onYoutube()) retainCustomYoutubeRate(video)
   const live = readSiteControls(video)
   if (!live) return
   const pushed = pushedPlayer.get(video) ?? {}

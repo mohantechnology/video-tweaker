@@ -314,9 +314,12 @@ export async function assembleDownload(
   fetchBytes: (url: string) => Promise<Uint8Array>
 ): Promise<Uint8Array> {
   if (request.combinedUrl) {
-    const file = await fetchBytes(request.combinedUrl)
-    if (!isIsoBmff(file)) throw new Error("media")
-    return file
+    try {
+      const file = await fetchBytes(request.combinedUrl)
+      if (isIsoBmff(file)) return file
+    } catch {
+      /* A progressive address can be forbidden. The separate tracks may still play. */
+    }
   }
   if (!request.videoUrl || !request.audioUrl) throw new Error("media")
   const video = await fetchBytes(request.videoUrl)
@@ -419,6 +422,41 @@ export function youtubeMediaSelfCheck(): string[] {
     audioUrl: ""
   })
   if (message) errors.push("reject bad url")
+  return errors
+}
+
+/** Combined file that is not a video falls through to the separate tracks. A real file is kept. */
+export async function assembleDownloadSelfCheck(): Promise<string[]> {
+  const errors: string[] = []
+  const seen: string[] = []
+  const text = new Uint8Array([70, 97, 105, 108])
+  try {
+    await assembleDownload(
+      { combinedUrl: "combined", videoUrl: "video", audioUrl: "audio" },
+      async (url) => {
+        seen.push(url)
+        return text
+      }
+    )
+    errors.push("rejected text")
+  } catch {
+    if (seen.join(",") !== "combined,video,audio") errors.push("pair fallback")
+  }
+  seen.length = 0
+  const file = new Uint8Array(16)
+  file[3] = 16
+  file[4] = 102
+  file[5] = 116
+  file[6] = 121
+  file[7] = 112
+  const kept = await assembleDownload(
+    { combinedUrl: "combined", videoUrl: "video", audioUrl: "audio" },
+    async (url) => {
+      seen.push(url)
+      return file
+    }
+  )
+  if (seen.length !== 1 || !isIsoBmff(kept)) errors.push("keep combined mp4")
   return errors
 }
 

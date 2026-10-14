@@ -58,6 +58,8 @@ const HIT_HEIGHT_PX = 20
 const WRITE_GUARD_MS = 280
 const POP_CLOSE_MS = 220
 const SPEED_STEP = 0.01
+/** Smaller than one speed step, so 1.00 and 1.02 stay different. */
+const RATE_MATCH = 0.005
 const SPEED_CHIPS = [1, 1.25, 1.5, 2, 3, 4] as const
 const FS_SHELL_ID = "vee-fs-shell"
 const QUALITY_WAIT_ID = "vee-quality-wait"
@@ -1046,7 +1048,7 @@ function armRateCheck(): void {
     if (!video || chosen === null || rateCorrected || performance.now() > heldRateUntil) return
     if (rateSource?.(video) === "hold") return
     const live = video.playbackRate || 1
-    if (Math.abs(live - chosen) <= 0.02) return
+    if (Math.abs(live - chosen) <= RATE_MATCH) return
     rateCorrected = true
     noteWrite()
     onControl?.({ type: "rate", playbackRate: chosen })
@@ -1310,11 +1312,11 @@ function shownRate(video: HTMLVideoElement, settings: EffectSettings): number {
   const publishedIsEcho =
     Number.isFinite(echo) &&
     typeof published?.playbackRate === "number" &&
-    Math.abs(published.playbackRate - echo) < 0.02
+    Math.abs(published.playbackRate - echo) < RATE_MATCH
   if (
     !publishedIsEcho &&
     typeof published?.playbackRate === "number" &&
-    Math.abs(published.playbackRate - live) >= 0.02
+    Math.abs(published.playbackRate - live) >= RATE_MATCH
   ) {
     return published.playbackRate
   }
@@ -2356,13 +2358,6 @@ function youtubeOfferForPage(): YtOffer | null {
   return ytOffer
 }
 
-function saveRemoteFile(url: string, title: string): Promise<boolean> {
-  return chrome.runtime
-    .sendMessage({ type: DOWNLOAD_MESSAGE, url, title })
-    .then((response) => response?.ok === true)
-    .catch(() => false)
-}
-
 function refreshPlayerOffer(previousUrl: string): Promise<YtOffer | null> {
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
@@ -2372,7 +2367,7 @@ function refreshPlayerOffer(previousUrl: string): Promise<YtOffer | null> {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return
       const offer = readYtOffer(event.data)
-      if (!offer || !offer.combinedUrl || offer.combinedUrl === previousUrl) return
+      if (!offer || !freshYoutubeOffer(offer, previousUrl)) return
       window.clearTimeout(timer)
       window.removeEventListener("message", onMessage)
       resolve(offer)
@@ -2380,6 +2375,11 @@ function refreshPlayerOffer(previousUrl: string): Promise<YtOffer | null> {
     window.addEventListener("message", onMessage)
     window.postMessage({ source: YT_MEDIA_SOURCE, kind: "refresh" }, "*")
   })
+}
+
+function freshYoutubeOffer(offer: YtOffer, previousUrl: string): boolean {
+  if (offer.combinedUrl && offer.combinedUrl !== previousUrl) return true
+  return Boolean(offer.videoUrl && offer.audioUrl && offer.videoUrl !== previousUrl && offer.audioUrl !== previousUrl)
 }
 
 function askYoutubeOffer(): void {
@@ -3075,21 +3075,22 @@ async function downloadCurrent(): Promise<void> {
     downloadBtn.title = "Downloading"
     try {
       let current = offer
-      let saved = false
-      if (current.combinedUrl) {
-        saved = await saveRemoteFile(current.combinedUrl, current.title || downloadTitle(boundVideo))
-        if (!saved) {
-          const next = await refreshPlayerOffer(current.combinedUrl)
-          if (next?.combinedUrl) {
-            current = next
-            saved = await saveRemoteFile(next.combinedUrl, next.title || downloadTitle(boundVideo))
-          }
+      let bytes: Uint8Array | null = null
+      try {
+        bytes = await assembleDownload(current, loadYoutubePlayback)
+      } catch {
+        const next = await refreshPlayerOffer(current.combinedUrl || current.videoUrl)
+        if (next) {
+          current = next
+          bytes = await assembleDownload(current, loadYoutubePlayback)
         }
       }
-      if (!saved) {
-        const bytes = await assembleDownload(current, loadYoutubePlayback)
-        saved = await saveDownloadBytes(bytes, downloadFilename(current.title || downloadTitle(boundVideo), "https://example.com/video.mp4"))
-      }
+      const saved = bytes
+        ? await saveDownloadBytes(
+            bytes,
+            downloadFilename(current.title || downloadTitle(boundVideo), "https://example.com/video.mp4")
+          )
+        : false
       if (downloadBtn) downloadBtn.title = saved ? "Download started" : "Could not save this video"
     } catch {
       if (downloadBtn) downloadBtn.title = "Could not save this video"
@@ -3882,7 +3883,7 @@ function reportMedia(): void {
   const editing = speedDrag || pendingRate !== null
   const chosen = heldRate
   const holding = chosen !== null && performance.now() < heldRateUntil
-  const reverted = holding && chosen !== null && Math.abs((video.playbackRate || 1) - chosen) > 0.02
+  const reverted = holding && chosen !== null && Math.abs((video.playbackRate || 1) - chosen) > RATE_MATCH
   if (editing || reverted) playbackRate = null
   if (reverted && !rateCorrected) {
     rateCorrected = true
