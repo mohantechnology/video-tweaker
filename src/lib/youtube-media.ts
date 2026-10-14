@@ -293,6 +293,30 @@ export function allowedFetchUrl(value: string): string | null {
   return restored.href
 }
 
+const FILENAME = /^[^\\/\u0000]{1,120}$/
+
+export function readYtSaveRequest(
+  data: unknown
+): { token: string; filename: string; combinedUrl: string; videoUrl: string; audioUrl: string } | null {
+  if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "save") return null
+  const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
+  const filename = typeof data.filename === "string" && FILENAME.test(data.filename) ? data.filename : ""
+  if (!token || !filename) return null
+  const combinedUrl = optionalPlayback(data.combinedUrl)
+  const videoUrl = optionalPlayback(data.videoUrl)
+  const audioUrl = optionalPlayback(data.audioUrl)
+  if (combinedUrl == null || videoUrl == null || audioUrl == null) return null
+  if (!combinedUrl && !(videoUrl && audioUrl)) return null
+  return { token, filename, combinedUrl, videoUrl, audioUrl }
+}
+
+export function readYtSaveResult(data: unknown): { token: string; ok: boolean } | null {
+  if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "saved") return null
+  const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
+  if (!token || typeof data.ok !== "boolean") return null
+  return { token, ok: data.ok }
+}
+
 export function readYtFetchRequest(data: unknown): { token: string; url: string } | null {
   if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "fetch") return null
   const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
@@ -422,6 +446,28 @@ export function youtubeMediaSelfCheck(): string[] {
     audioUrl: ""
   })
   if (message) errors.push("reject bad url")
+  const save = readYtSaveRequest({
+    source: YT_MEDIA_SOURCE,
+    kind: "save",
+    token: "abcd1234",
+    filename: "Sample.mp4",
+    combinedUrl: "https://rr1.googlevideo.com/videoplayback?expire=1&itag=18&sig=abc",
+    videoUrl: "",
+    audioUrl: ""
+  })
+  if (!save || save.filename !== "Sample.mp4" || !save.combinedUrl.includes("itag=18")) errors.push("save request")
+  const badSave = readYtSaveRequest({
+    source: YT_MEDIA_SOURCE,
+    kind: "save",
+    token: "abcd1234",
+    filename: "../x.mp4",
+    combinedUrl: "javascript:alert(1)",
+    videoUrl: "",
+    audioUrl: ""
+  })
+  if (badSave) errors.push("reject bad save")
+  const saved = readYtSaveResult({ source: YT_MEDIA_SOURCE, kind: "saved", token: "abcd1234", ok: true })
+  if (!saved?.ok) errors.push("save result")
   return errors
 }
 

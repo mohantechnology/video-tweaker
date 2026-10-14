@@ -8,14 +8,10 @@ import {
   domainSkin,
   readVideoTitle
 } from "./domains"
-import { directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath, SAVE_BYTES_MESSAGE } from "./media-file"
-import { isIsoBmff } from "./mp4-mux"
+import { directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath } from "./media-file"
 import {
-  allowedFetchUrl,
-  assembleDownload,
-  fullRangeUrl,
-  readYtFetchResult,
   readYtOffer,
+  readYtSaveResult,
   youtubeVideoId,
   YT_MEDIA_SOURCE,
   type YtOffer
@@ -904,7 +900,6 @@ let playerObserver: MutationObserver | null = null
 let suppressingControls = false
 let downloadBusy = false
 let ytOffer: YtOffer | null = null
-const pendingYoutubeFetch = new Map<string, (bytes: Uint8Array | null) => void>()
 let layoutStamp = ""
 let shownMediaStamp = ""
 let shownPlayerMark = ""
@@ -3075,22 +3070,14 @@ async function downloadCurrent(): Promise<void> {
     downloadBtn.title = "Downloading"
     try {
       let current = offer
-      let bytes: Uint8Array | null = null
-      try {
-        bytes = await assembleDownload(current, loadYoutubePlayback)
-      } catch {
+      let saved = await saveYoutubeOffer(current)
+      if (!saved) {
         const next = await refreshPlayerOffer(current.combinedUrl || current.videoUrl)
         if (next) {
           current = next
-          bytes = await assembleDownload(current, loadYoutubePlayback)
+          saved = await saveYoutubeOffer(current)
         }
       }
-      const saved = bytes
-        ? await saveDownloadBytes(
-            bytes,
-            downloadFilename(current.title || downloadTitle(boundVideo), "https://example.com/video.mp4")
-          )
-        : false
       if (downloadBtn) downloadBtn.title = saved ? "Download started" : "Could not save this video"
     } catch {
       if (downloadBtn) downloadBtn.title = "Could not save this video"
@@ -3118,90 +3105,40 @@ async function downloadCurrent(): Promise<void> {
   }
 }
 
-async function loadYoutubePlayback(url: string): Promise<Uint8Array> {
-  const ranged = fullRangeUrl(url)
-  const candidates = ranged && ranged !== url ? [url, ranged] : [url]
-  let last: unknown = new Error("media")
-  for (const candidate of candidates) {
-    try {
-      return await loadYoutubeCandidate(candidate)
-    } catch (error) {
-      last = error
-    }
-  }
-  throw last instanceof Error ? last : new Error("media")
-}
-
-async function loadYoutubeCandidate(url: string): Promise<Uint8Array> {
-  let last: unknown = new Error("media")
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const bytes = await fetchYoutubeFromPage(url)
-      if (bytes) return bytes
-    } catch (error) {
-      last = error
-    }
-    try {
-      return await readYoutubeBody(await fetch(url, { credentials: "omit" }))
-    } catch (error) {
-      last = error
-    }
-  }
-  throw last instanceof Error ? last : new Error("media")
-}
-
-async function readYoutubeBody(response: Response): Promise<Uint8Array> {
-  if (!response.ok) throw new Error(String(response.status))
-  const length = Number(response.headers.get("content-length") || "")
-  if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (bytes.byteLength > 500_000_000 || !isIsoBmff(bytes)) throw new Error("media")
-  return bytes
-}
-
-function fetchYoutubeFromPage(url: string): Promise<Uint8Array | null> {
-  const safe = allowedFetchUrl(url)
-  if (!safe) return Promise.resolve(null)
+function saveYoutubeOffer(offer: YtOffer): Promise<boolean> {
+  const filename = downloadFilename(offer.title || downloadTitle(boundVideo), "https://example.com/video.mp4")
   const token = youtubeToken()
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
-      pendingYoutubeFetch.delete(token)
-      resolve(null)
+      window.removeEventListener("message", onMessage)
+      resolve(false)
     }, 180_000)
-    pendingYoutubeFetch.set(token, (bytes) => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return
+      const saved = readYtSaveResult(event.data)
+      if (!saved || saved.token !== token) return
       window.clearTimeout(timer)
-      pendingYoutubeFetch.delete(token)
-      resolve(bytes)
-    })
-    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "fetch", token, url: safe }, "*")
+      window.removeEventListener("message", onMessage)
+      resolve(saved.ok)
+    }
+    window.addEventListener("message", onMessage)
+    window.postMessage(
+      {
+        source: YT_MEDIA_SOURCE,
+        kind: "save",
+        token,
+        filename,
+        combinedUrl: offer.combinedUrl,
+        videoUrl: offer.videoUrl,
+        audioUrl: offer.audioUrl
+      },
+      "*"
+    )
   })
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ""
-  const step = 0x2000
-  for (let index = 0; index < bytes.length; index += step) {
-    const slice = bytes.subarray(index, index + step)
-    binary += String.fromCharCode.apply(null, slice as unknown as number[])
-  }
-  return btoa(binary)
-}
-
-function saveDownloadBytes(bytes: Uint8Array, filename: string): Promise<boolean> {
-  return chrome.runtime
-    .sendMessage({ type: SAVE_BYTES_MESSAGE, filename, data: bytesToBase64(bytes) })
-    .then((response) => response?.ok === true)
-    .catch(() => false)
 }
 
 function onRenditionMessage(event: MessageEvent): void {
   if (event.source !== window) return
-  const fetched = readYtFetchResult(event.data)
-  if (fetched) {
-    const bytes = fetched.buffer ? new Uint8Array(fetched.buffer) : null
-    pendingYoutubeFetch.get(fetched.token)?.(bytes && isIsoBmff(bytes) ? bytes : null)
-    return
-  }
   const offer = readYtOffer(event.data)
   if (offer) {
     ytOffer = offer
@@ -4749,8 +4686,6 @@ export function stopSeekBar(): void {
   pipBtn = null
   downloadBtn = null
   ytOffer = null
-  for (const done of pendingYoutubeFetch.values()) done(null)
-  pendingYoutubeFetch.clear()
   qualityAnchor = null
   qualityBtn = null
   qualityPop = null

@@ -22,14 +22,18 @@ import {
   downloadOffer,
   extractAssignedObject,
   mergeTracks,
+  allowedFetchUrl,
+  assembleDownload,
+  fullRangeUrl,
   readYtAsk,
   readYtRefresh,
-  readYtFetchRequest,
+  readYtSaveRequest,
   rememberPlayback,
   youtubeVideoId,
   YT_MEDIA_SOURCE,
   type YtTrack
 } from "~lib/youtube-media"
+import { isIsoBmff } from "~lib/mp4-mux"
 
 export const config: PlasmoCSConfig = {
   matches: ["http://*/*", "https://*/*"],
@@ -1158,19 +1162,53 @@ function installYoutubeWatch(): void {
   refreshYoutubeSoon()
 }
 
-async function onYoutubeFetch(data: unknown): Promise<void> {
-  const request = readYtFetchRequest(data)
-  if (!request || !ytNativeFetch) return
+async function loadYoutubeFile(url: string): Promise<Uint8Array> {
+  if (!ytNativeFetch) throw new Error("media")
+  const ranged = fullRangeUrl(url)
+  const candidates = ranged && ranged !== url ? [url, ranged] : [url]
+  let last: unknown = new Error("media")
+  for (const candidate of candidates) {
+    const safe = allowedFetchUrl(candidate)
+    if (!safe) continue
+    for (const credentials of ["include", "omit"] as const) {
+      try {
+        const response = await ytNativeFetch.call(window, safe, { credentials, referrer: location.href })
+        if (!response.ok) throw new Error(String(response.status))
+        const length = Number(response.headers.get("content-length") || "")
+        if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
+        const bytes = new Uint8Array(await response.arrayBuffer())
+        if (bytes.byteLength > 500_000_000 || !isIsoBmff(bytes)) throw new Error("media")
+        return bytes
+      } catch (error) {
+        last = error
+      }
+    }
+  }
+  throw last instanceof Error ? last : new Error("media")
+}
+
+function saveVideoBlob(bytes: Uint8Array, filename: string): void {
+  const blob = new Blob([bytes], { type: "video/mp4" })
+  const href = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = href
+  link.download = filename
+  link.rel = "noopener"
+  document.documentElement.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(href), 60_000)
+}
+
+async function onYoutubeSave(data: unknown): Promise<void> {
+  const request = readYtSaveRequest(data)
+  if (!request) return
   try {
-    const response = await ytNativeFetch.call(window, request.url, { credentials: "omit", referrer: location.href })
-    if (!response.ok) throw new Error(String(response.status))
-    const length = Number(response.headers.get("content-length") || "")
-    if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
-    const buffer = await response.arrayBuffer()
-    if (buffer.byteLength > 500_000_000) throw new Error("large")
-    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "data", token: request.token, ok: true, buffer }, "*")
+    const bytes = await assembleDownload(request, loadYoutubeFile)
+    saveVideoBlob(bytes, request.filename)
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: true }, "*")
   } catch {
-    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "data", token: request.token, ok: false }, "*")
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: false }, "*")
   }
 }
 
@@ -1277,8 +1315,8 @@ window.addEventListener("message", (event) => {
     requestPlayerFile(true)
     return
   }
-  if (readYtFetchRequest(event.data)) {
-    void onYoutubeFetch(event.data)
+  if (readYtSaveRequest(event.data)) {
+    void onYoutubeSave(event.data)
     return
   }
   const renditions = readRenditionMessage(event.data)
