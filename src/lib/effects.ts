@@ -1,3 +1,4 @@
+import { queueNativeMirror, type NativeMirrorPatch } from "./native-mirror"
 import {
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
@@ -393,6 +394,7 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
   if (!playbackOn && !audioOn && !existing?.playback && !existing?.audio) return
 
   const state = existing ?? mediaState(video)
+  const patch: NativeMirrorPatch = {}
   try {
     // Remember the player loudness before a rate write can replace it.
     if (audioOn && !state.audio) {
@@ -413,7 +415,11 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
       }
       disturbed = writeTransport(video, settings.playbackRate, settings.loop)
       disturbed = writePitch(video, settings.preservePitch) || disturbed
+      patch.playbackRate = clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
+      patch.loop = settings.loop
     } else if (state.playback) {
+      patch.playbackRate = state.playbackRate
+      patch.loop = state.loop
       disturbed = writeTransport(video, state.playbackRate, state.loop)
       disturbed = writePitch(video, state.preservesPitch) || disturbed
       state.playback = false
@@ -422,14 +428,19 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
     if (audioOn) {
       writeAudio(video, settings.volume, settings.muted)
       if (disturbed) protectMediaLevel(video, settings.volume, settings.muted)
+      patch.volume = clamp(settings.volume, 0, 1)
+      patch.muted = settings.muted
     } else if (state.audio) {
       const saved = { volume: state.volume, muted: state.muted }
       writeAudio(video, saved.volume, saved.muted)
       state.audio = false
       if (disturbed) protectMediaLevel(video, saved.volume, saved.muted)
+      patch.volume = saved.volume
+      patch.muted = saved.muted
     } else if (disturbed) {
       protectMediaLevel(video, level.volume, level.muted)
     }
+    queueNativeMirror(video, patch)
   } catch {
     /* Some players reject rate or volume changes while a frame is locked. */
   }

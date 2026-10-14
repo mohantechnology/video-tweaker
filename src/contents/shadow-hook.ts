@@ -16,6 +16,7 @@ import {
   type RenditionMessage
 } from "~lib/renditions"
 import { fileUrl, mediaPath } from "~lib/media-file"
+import { applyNativeMirror, NATIVE_MIRROR_ATTR } from "~lib/native-mirror"
 import {
   collectPlayers,
   downloadOffer,
@@ -1194,6 +1195,35 @@ function installRenditionWatch(): void {
 
 installRenditionWatch()
 installYoutubeWatch()
+watchNativeMirror()
+
+function watchNativeMirror(): void {
+  let mirrorObserver: MutationObserver | null = null
+  const drain = () => {
+    document.querySelectorAll(`video[${NATIVE_MIRROR_ATTR}]`).forEach((node) => {
+      if (node instanceof HTMLVideoElement) applyNativeMirror(node)
+    })
+  }
+  const start = () => {
+    if (mirrorObserver || !document.documentElement) return
+    mirrorObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        const node = record.target
+        if (node instanceof HTMLVideoElement && node.hasAttribute(NATIVE_MIRROR_ATTR)) {
+          applyNativeMirror(node)
+        }
+      }
+    })
+    mirrorObserver.observe(document.documentElement, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: [NATIVE_MIRROR_ATTR]
+    })
+    drain()
+  }
+  if (document.documentElement) start()
+  else document.addEventListener("DOMContentLoaded", start, { once: true })
+}
 
 function readPendingRendition(): RenditionMessage | null {
   const root = document.documentElement

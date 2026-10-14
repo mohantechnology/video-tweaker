@@ -121,6 +121,19 @@ export function isSkipBoosted(video: HTMLVideoElement): boolean {
   return boosted.has(video)
 }
 
+/** True while an ad is playing at the boosted rate, or is about to. The site speed menu must stay put. */
+export function skipSpeedOwnsRate(
+  video: HTMLVideoElement,
+  roots: ParentNode[],
+  settings: EffectSettings,
+  allowed: boolean
+): boolean {
+  if (isSkipBoosted(video)) return true
+  const flags = skipMethodFlags(settings, allowed)
+  if (!flags.speed) return false
+  return findAdRoot(video, roots) != null
+}
+
 export function releaseSkipBoost(video: HTMLVideoElement | null, settings?: EffectSettings): void {
   if (!video) return
   const saved = boosted.get(video)

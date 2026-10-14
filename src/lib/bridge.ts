@@ -10,9 +10,10 @@ import {
 } from "./effects"
 import { findMainVideo, scanPage } from "./find-video"
 import { isHoldBoosting, maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
+import { setNativeMirrorSuspended } from "./native-mirror"
 import { createProgressTracker } from "./progress"
 import { startSeekBar, type DockControl, type DockMedia } from "./seek-bar"
-import { applySkipMethods, isSkipBoosted, releaseSkipBoost } from "./skip-ads"
+import { applySkipMethods, isSkipBoosted, releaseSkipBoost, skipSpeedOwnsRate } from "./skip-ads"
 import { dockLayoutStamp, type EffectSettings } from "./types"
 
 /** How often to rescan while a main video is already selected. */
@@ -268,7 +269,14 @@ export function startVideoBridge(options: {
     if (next && allowed) {
       const nextStamp = playbackStamp(settings)
       if (nextStamp !== stamp) {
-        applyPlayback(next, settings)
+        // Hold and ad boost write the video element themselves. Mirroring that
+        // rate into the site menu would fight the boost.
+        setNativeMirrorSuspended(isHoldBoosting(next) || skipSpeedOwnsRate(next, roots, settings, true))
+        try {
+          applyPlayback(next, settings)
+        } finally {
+          setNativeMirrorSuspended(false)
+        }
         stamp = nextStamp
       }
     }
