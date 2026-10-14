@@ -1,4 +1,10 @@
-import { queueNativeMirror, type NativeMirrorPatch } from "./native-mirror"
+import {
+  nativePlayerSeq,
+  queueNativeMirror,
+  readNativePlayer,
+  YT_ECHO_ATTR,
+  type NativeMirrorPatch
+} from "./native-mirror"
 import {
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
@@ -374,6 +380,123 @@ export function protectMediaLevel(video: HTMLVideoElement, volume: number, muted
   }
 }
 
+const VOLUME_DRIFT = 0.01
+const RATE_DRIFT = 0.02
+
+type MediaBaseline = {
+  volume?: number
+  muted?: boolean
+  playbackRate?: number
+  loop?: boolean
+  seq: number
+}
+
+const mediaBaseline = new WeakMap<HTMLVideoElement, MediaBaseline>()
+
+function rememberBaseline(video: HTMLVideoElement, patch: NativeMirrorPatch): void {
+  const prev = mediaBaseline.get(video)
+  mediaBaseline.set(video, {
+    volume: typeof patch.volume === "number" ? patch.volume : prev?.volume,
+    muted: typeof patch.muted === "boolean" ? patch.muted : prev?.muted,
+    playbackRate: typeof patch.playbackRate === "number" ? patch.playbackRate : prev?.playbackRate,
+    loop: typeof patch.loop === "boolean" ? patch.loop : prev?.loop,
+    seq: nativePlayerSeq(video)
+  })
+}
+
+function forgetBaseline(video: HTMLVideoElement, volume: boolean, playback: boolean): void {
+  const prev = mediaBaseline.get(video)
+  if (!prev) return
+  if (volume) {
+    delete prev.volume
+    delete prev.muted
+  }
+  if (playback) {
+    delete prev.playbackRate
+    delete prev.loop
+  }
+}
+
+/** Drop remembered loudness and speed without writing them back onto a new clip. */
+export function releaseOwnedMedia(video: HTMLVideoElement): void {
+  ownedMedia.delete(video)
+  mediaBaseline.delete(video)
+}
+
+function driftedNumber(
+  base: number | undefined,
+  element: number | undefined,
+  published: number | undefined,
+  epsilon: number
+): number | undefined {
+  if (typeof base !== "number") return undefined
+  let live = element
+  if (typeof published === "number" && (typeof element !== "number" || Math.abs(published - element) >= epsilon)) {
+    live = published
+  }
+  if (typeof live !== "number" || Math.abs(live - base) < epsilon) return undefined
+  return live
+}
+
+function driftedBool(
+  base: boolean | undefined,
+  element: boolean | undefined,
+  published: boolean | undefined
+): boolean | undefined {
+  if (typeof base !== "boolean") return undefined
+  const live = typeof published === "boolean" && published !== element ? published : element
+  if (typeof live !== "boolean" || live === base) return undefined
+  return live
+}
+
+/**
+ * YouTube pins the slider at 0.25 or 2 when the real speed is outside that.
+ * That pinned rate is not a user edit.
+ */
+function publishedRateIsEcho(video: HTMLVideoElement, published: number | undefined): boolean {
+  if (typeof published !== "number") return false
+  const echo = Number(video.getAttribute(YT_ECHO_ATTR))
+  return Number.isFinite(echo) && Math.abs(published - echo) < RATE_DRIFT
+}
+
+/**
+ * Fields we last wrote that the site player has since changed.
+ * A speed the site slider cannot show stays on the element.
+ * A newer site rate wins when the element itself did not move, which is how
+ * speeds below 1× come back from YouTube's slider.
+ * Loop can live only on the site control, so a newer published loop wins.
+ */
+export function mediaDrift(video: HTMLVideoElement, live: NativeMirrorPatch): NativeMirrorPatch | null {
+  const base = mediaBaseline.get(video)
+  if (!base) return null
+  const published = nativePlayerSeq(video) > base.seq ? readNativePlayer(video) : null
+  const patch: NativeMirrorPatch = {}
+  const volume = driftedNumber(base.volume, live.volume, published?.volume, VOLUME_DRIFT)
+  const muted = driftedBool(base.muted, live.muted, published?.muted)
+  const publishedRate = publishedRateIsEcho(video, published?.playbackRate) ? undefined : published?.playbackRate
+  let playbackRate: number | undefined
+  if (typeof base.playbackRate === "number") {
+    const elementRate = live.playbackRate
+    const elementMoved =
+      typeof elementRate === "number" && Math.abs(elementRate - base.playbackRate) >= RATE_DRIFT
+    if (elementMoved) playbackRate = elementRate
+    else if (typeof publishedRate === "number" && Math.abs(publishedRate - base.playbackRate) >= RATE_DRIFT) {
+      playbackRate = publishedRate
+    }
+  }
+  const loop = driftedBool(base.loop, live.loop, published?.loop)
+  if (typeof volume === "number") patch.volume = volume
+  if (typeof muted === "boolean") patch.muted = muted
+  if (typeof playbackRate === "number") patch.playbackRate = playbackRate
+  if (typeof loop === "boolean") patch.loop = loop
+  return typeof patch.volume === "number" ||
+    typeof patch.muted === "boolean" ||
+    typeof patch.playbackRate === "number" ||
+    typeof patch.loop === "boolean"
+    ? patch
+    : null
+}
+
 function playbackControlled(settings: EffectSettings): boolean {
   return settings.enabled && settings.playbackEnabled !== false && settings.playbackTouched
 }
@@ -413,11 +536,25 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
         state.preservesPitch = readPitch(video)
         state.playback = true
       }
-      disturbed = writeTransport(video, settings.playbackRate, settings.loop)
+      const liveRate = video.playbackRate || 1
+      const nextRate =
+        liveRate > PLAYBACK_RATE_MAX
+          ? liveRate
+          : clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
+      // Record the write before the media event, so our own change is not a player edit.
+      // An ad boost is above the normal range. Leave that rate alone and only keep loop.
+      if (liveRate > PLAYBACK_RATE_MAX) {
+        rememberBaseline(video, { loop: settings.loop })
+        if (video.loop !== settings.loop) video.loop = settings.loop
+      } else {
+        rememberBaseline(video, { playbackRate: nextRate, loop: settings.loop })
+        disturbed = writeTransport(video, nextRate, settings.loop)
+      }
       disturbed = writePitch(video, settings.preservePitch) || disturbed
-      patch.playbackRate = clamp(settings.playbackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX)
+      if (liveRate <= PLAYBACK_RATE_MAX) patch.playbackRate = nextRate
       patch.loop = settings.loop
     } else if (state.playback) {
+      forgetBaseline(video, false, true)
       patch.playbackRate = state.playbackRate
       patch.loop = state.loop
       disturbed = writeTransport(video, state.playbackRate, state.loop)
@@ -426,11 +563,14 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
     }
 
     if (audioOn) {
-      writeAudio(video, settings.volume, settings.muted)
-      if (disturbed) protectMediaLevel(video, settings.volume, settings.muted)
-      patch.volume = clamp(settings.volume, 0, 1)
+      const nextVolume = clamp(settings.volume, 0, 1)
+      rememberBaseline(video, { volume: nextVolume, muted: settings.muted })
+      writeAudio(video, nextVolume, settings.muted)
+      if (disturbed) protectMediaLevel(video, nextVolume, settings.muted)
+      patch.volume = nextVolume
       patch.muted = settings.muted
     } else if (state.audio) {
+      forgetBaseline(video, true, false)
       const saved = { volume: state.volume, muted: state.muted }
       writeAudio(video, saved.volume, saved.muted)
       state.audio = false
@@ -466,6 +606,7 @@ export function releasePlayback(video: HTMLVideoElement): void {
     /* The element can already be detached from the player. */
   }
   ownedMedia.delete(video)
+  mediaBaseline.delete(video)
 }
 
 export function applyNativeControls(video: HTMLVideoElement, _settings: EffectSettings): void {

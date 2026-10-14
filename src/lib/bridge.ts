@@ -12,7 +12,7 @@ import { findMainVideo, scanPage } from "./find-video"
 import { isHoldBoosting, maintainHold, releaseHold, startHoldSpeed } from "./hold-speed"
 import { setNativeMirrorSuspended } from "./native-mirror"
 import { createProgressTracker } from "./progress"
-import { startSeekBar, type DockControl, type DockMedia } from "./seek-bar"
+import { startSeekBar, suppressDockMedia, type DockControl, type DockMedia } from "./seek-bar"
 import { applySkipMethods, isSkipBoosted, releaseSkipBoost, skipSpeedOwnsRate } from "./skip-ads"
 import { dockLayoutStamp, type EffectSettings } from "./types"
 
@@ -123,6 +123,8 @@ export function startVideoBridge(options: {
   isAllowed?: () => boolean
   onPresence: (present: boolean) => void
   onVideo?: (video: HTMLVideoElement | null) => void
+  /** Called before playback is written, so a new clip can drop tab-only choices. */
+  onClip?: () => void
   onControl?: (control: DockControl) => void
   onMedia?: (media: DockMedia) => void
 }): VideoBridge {
@@ -263,6 +265,7 @@ export function startVideoBridge(options: {
     }
 
     placeDock(next)
+    if (allowed) options.onClip?.()
     const settings = options.getSettings()
     // Write speed, loop, and loudness before the bar reads the video.
     // Otherwise the bar copies the old loop back into the domain settings.
@@ -273,6 +276,8 @@ export function startVideoBridge(options: {
         // rate into the site menu would fight the boost.
         setNativeMirrorSuspended(isHoldBoosting(next) || skipSpeedOwnsRate(next, roots, settings, true))
         try {
+          // Our write fires volume and rate events. Don't adopt those as player edits.
+          suppressDockMedia()
           applyPlayback(next, settings)
         } finally {
           setNativeMirrorSuspended(false)

@@ -77,6 +77,8 @@ import {
   cropCssToControl,
   effectiveSettings,
   isVisualIdentity,
+  mediaDrift,
+  releaseOwnedMedia,
   seekBy,
   togglePictureInPicture,
   type SectionFlag
@@ -111,13 +113,12 @@ import {
   NO_VIDEO_NOTICE_DELAY_MS
 } from "~settings"
 import {
+  clipKey,
   emptyTabMedia,
   mergeTabMedia,
   releaseTabMedia,
   releaseTabMediaFromDomain,
-  tabAudioOwned,
-  tabLoopOwned,
-  tabRateOwned,
+  sameClip,
   withTabAudio,
   withTabLoop,
   withTabRate,
@@ -497,6 +498,7 @@ function Overlay() {
   }))
   const settingsRef = useRef(settings)
   const tabMediaRef = useRef<TabMedia>(emptyTabMedia())
+  const clipRef = useRef("")
   const policyRef = useRef(policy)
   const globallyEnabledRef = useRef(false)
   const appliedRef = useRef(settings)
@@ -664,6 +666,19 @@ function Overlay() {
 
   useEffect(() => {
     if (!ready || !policyReady || !globallyEnabled) return
+    const adoptClip = () => {
+      const video = getActiveVideo()
+      const key = clipKey(video)
+      if (sameClip(clipRef.current, key)) {
+        if (key.length > clipRef.current.length) clipRef.current = key
+        return
+      }
+      clipRef.current = key
+      tabMediaRef.current = emptyTabMedia()
+      if (video) releaseOwnedMedia(video)
+      // Ignore the player's own reset while this clip's saved panel values are applied.
+      suppressDockMedia(600)
+    }
     const bridge = startVideoBridge({
       getSettings: () => mergeTabMedia(effectiveSettings(appliedRef.current), tabMediaRef.current),
       getUiSettings: () =>
@@ -675,24 +690,8 @@ function Overlay() {
       onPresence: setHasVideo,
       onControl: (control) => dockBridge.current.onControl(control),
       onMedia: (media) => dockBridge.current.onMedia(media),
-      onVideo: (video) => {
-        if (!video) return
-        const current = settingsRef.current
-        const tab = tabMediaRef.current
-        const next: EffectSettings = { ...current }
-        if (!current.playbackTouched) {
-          if (!tabRateOwned(tab)) next.playbackRate = video.playbackRate || 1
-          if (!tabLoopOwned(tab)) next.loop = video.loop
-        }
-        if (!current.audioTouched && !tabAudioOwned(tab)) {
-          if (Math.abs(current.volume - video.volume) >= 0.005) next.volume = video.volume
-          if (current.muted !== video.muted) next.muted = video.muted
-        }
-        if (settingsEqual(current, next)) return
-        settingsRef.current = next
-        if (!applyTimer.current) appliedRef.current = next
-        setSettings(next)
-      }
+      onClip: () => adoptClip(),
+      onVideo: () => adoptClip()
     })
     bridgeRef.current = bridge
     return () => {
@@ -1062,53 +1061,57 @@ function Overlay() {
   }
 
   dockBridge.current.onControl = (control) => {
-    const tab = tabMediaRef.current
+    const video = getActiveVideo()
+    const panel = settingsRef.current
+    let next = tabMediaRef.current
     if (control.type === "audio") {
-      tabMediaRef.current = withTabAudio(tab, control.volume, control.muted)
+      next = withTabAudio(next, control.volume, control.muted)
+      if (video && !panel.audioTouched) {
+        if (next.volume == null) next = withTabAudio(next, video.volume, undefined)
+        if (next.muted == null) next = withTabAudio(next, undefined, video.muted)
+      }
     } else if (control.type === "rate") {
-      tabMediaRef.current = withTabRate(tab, control.playbackRate)
+      next = withTabRate(next, control.playbackRate)
     } else {
-      tabMediaRef.current = withTabLoop(tab, control.loop)
+      next = withTabLoop(next, control.loop)
+      const liveRate = video?.playbackRate || 1
+      if (video && !panel.playbackTouched && next.playbackRate == null && liveRate <= PLAYBACK_RATE_MAX) {
+        next = withTabRate(next, liveRate)
+      }
     }
+    tabMediaRef.current = next
     bridgeRef.current?.applyNow()
   }
 
   dockBridge.current.onMedia = (media) => {
-    const current = settingsRef.current
-    const tab = tabMediaRef.current
-    const audioOwned = tabAudioOwned(tab)
-    const rateOwned = tabRateOwned(tab)
-    const loopOwned = tabLoopOwned(tab)
-    let volume = current.volume
-    let muted = current.muted
-    let playbackRate = current.playbackRate
-    let loop = current.loop
-    let changed = false
-    if (!audioOwned && Math.abs(current.volume - media.volume) >= 0.005) {
-      volume = media.volume
-      changed = true
+    const video = getActiveVideo()
+    if (!video) return
+    const drift = mediaDrift(video, {
+      volume: media.volume,
+      muted: media.muted,
+      ...(media.playbackRate !== null ? { playbackRate: media.playbackRate } : {}),
+      loop: media.loop
+    })
+    if (!drift) return
+    const panel = settingsRef.current
+    let next = tabMediaRef.current
+    if (typeof drift.volume === "number" || typeof drift.muted === "boolean") {
+      next = withTabAudio(next, drift.volume, drift.muted)
+      if (!panel.audioTouched) {
+        if (next.volume == null) next = withTabAudio(next, video.volume, undefined)
+        if (next.muted == null) next = withTabAudio(next, undefined, video.muted)
+      }
     }
-    if (!audioOwned && current.muted !== media.muted) {
-      muted = media.muted
-      changed = true
+    if (typeof drift.playbackRate === "number") next = withTabRate(next, drift.playbackRate)
+    if (typeof drift.loop === "boolean" && (media.playbackRate !== null || panel.playbackTouched)) {
+      next = withTabLoop(next, drift.loop)
+      if (!panel.playbackTouched && next.playbackRate == null && media.playbackRate !== null) {
+        next = withTabRate(next, media.playbackRate)
+      }
     }
-    if (
-      !rateOwned &&
-      media.playbackRate !== null &&
-      Math.abs(current.playbackRate - media.playbackRate) >= 0.001
-    ) {
-      playbackRate = media.playbackRate
-      changed = true
-    }
-    if (!loopOwned && current.loop !== media.loop) {
-      loop = media.loop
-      changed = true
-    }
-    if (!changed) return
-    const next: EffectSettings = { ...current, volume, muted, playbackRate, loop }
-    settingsRef.current = next
-    appliedRef.current = { ...appliedRef.current, volume, muted, playbackRate, loop }
-    setSettings(next)
+    tabMediaRef.current = next
+    suppressDockMedia()
+    bridgeRef.current?.applyNow()
   }
 
   const resetCurrentTab = () => {

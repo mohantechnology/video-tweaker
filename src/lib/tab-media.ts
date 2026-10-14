@@ -1,8 +1,9 @@
+import { youtubeVideoId } from "./youtube-media"
 import { PLAYBACK_RATE_MAX, PLAYBACK_RATE_MIN, type EffectSettings } from "./types"
 
 /**
- * Loudness, mute, loop, and speed chosen from this tab's custom player bar.
- * Kept in the tab's memory so it is not stored for the domain or the extension.
+ * Loudness, mute, loop, and speed shared by this tab's custom bar and the
+ * site player. Kept in memory so it is not stored for the site or the extension.
  */
 export type TabMedia = {
   volume: number | null
@@ -105,4 +106,26 @@ export function releaseTabMediaFromDomain(
   if (Math.abs(previous.playbackRate - incoming.playbackRate) >= RATE_EPSILON) next.playbackRate = null
   if (previous.loop !== incoming.loop) next.loop = null
   return next
+}
+
+/** Identifies the clip playing in this tab. A new clip must not keep the previous tab choice. */
+export function clipKey(video: HTMLVideoElement | null): string {
+  const yt = youtubeVideoId(location.href)
+  if (yt) return `yt:${yt}`
+  const host = location.hostname.replace(/^www\./, "")
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
+    const match = location.pathname.match(/^\/(?:reel|reels|p|tv)\/([^/?#]+)/)
+    if (match) return `ig:${match[1]}`
+  }
+  const src = video?.currentSrc || video?.src || ""
+  return src ? `${host}${location.pathname}|${src}` : `${host}${location.pathname}`
+}
+
+/** True when the source was filled in for the clip already playing. */
+export function sameClip(previous: string, next: string): boolean {
+  if (previous === next) return true
+  if (!previous || !next) return false
+  const longer = previous.length > next.length ? previous : next
+  const shorter = previous.length > next.length ? next : previous
+  return longer.startsWith(`${shorter}|`)
 }

@@ -16,7 +16,7 @@ import {
   type RenditionMessage
 } from "~lib/renditions"
 import { fileUrl, mediaPath } from "~lib/media-file"
-import { applyNativeMirror, NATIVE_MIRROR_ATTR } from "~lib/native-mirror"
+import { applyNativeMirror, NATIVE_MIRROR_ATTR, publishSitePlayer } from "~lib/native-mirror"
 import {
   collectPlayers,
   downloadOffer,
@@ -1196,6 +1196,27 @@ function installRenditionWatch(): void {
 installRenditionWatch()
 installYoutubeWatch()
 watchNativeMirror()
+watchSitePlayer()
+
+function watchSitePlayer(): void {
+  let timer = 0
+  const sample = () => {
+    if (document.hidden) return
+    document.querySelectorAll("video").forEach((node) => {
+      if (node instanceof HTMLVideoElement) publishSitePlayer(node)
+    })
+  }
+  const soon = () => {
+    window.clearTimeout(timer)
+    timer = window.setTimeout(sample, 80)
+  }
+  window.setInterval(sample, 400)
+  document.addEventListener("click", soon, true)
+  document.addEventListener("input", soon, true)
+  const start = () => sample()
+  if (document.documentElement) start()
+  else document.addEventListener("DOMContentLoaded", start, { once: true })
+}
 
 function watchNativeMirror(): void {
   let mirrorObserver: MutationObserver | null = null

@@ -10,6 +10,13 @@ const OURS = "#vee-seek-bar, #vee-csui"
 const RATE_EPSILON = 0.02
 const RETRY_LIMIT = 4
 const RETRY_MS = 80
+/** YouTube's speed slider. Rates outside this stay on the video; the slider sits at the near end. */
+const YT_SPEED_MIN = 0.25
+const YT_SPEED_MAX = 2
+/** Clamped player rate we last wrote, so a later read is not treated as a user edit. */
+export const YT_ECHO_ATTR = "data-vee-yt-echo"
+/** Set while a player write is in progress, so the ratechange is not adopted as a user edit. */
+export const YT_HOLD_ATTR = "data-vee-yt-hold"
 
 export type NativeMirrorPatch = {
   volume?: number
@@ -47,6 +54,11 @@ let instagramRatesPath = ""
 const latestSeq = new WeakMap<HTMLVideoElement, number>()
 const mirroredLevel = new WeakMap<HTMLVideoElement, string>()
 const mirroredRate = new WeakMap<HTMLVideoElement, number>()
+const desiredSpeed = new WeakMap<HTMLVideoElement, number>()
+let speedLabelVideo: HTMLVideoElement | null = null
+let speedLabelListener = false
+let speedLabelObserver: MutationObserver | null = null
+let speedLabelObserverTimer = 0
 
 export function setNativeMirrorSuspended(suspended: boolean): void {
   mirrorSuspended = suspended
@@ -150,41 +162,76 @@ function applyYoutube(video: HTMLVideoElement, patch: NativeMirror, attempt: num
     if (attempt < RETRY_LIMIT) window.setTimeout(() => applyYoutube(video, patch, attempt + 1), RETRY_MS)
     return
   }
+  noteMirroredPlayer(video, patch)
   const level = youtubeLevel(video, patch)
   if (level) pushYoutubeAudio(player, video, level.volume, level.muted, false)
   if (typeof patch.loop === "boolean") pushYoutubeLoop(player, patch.loop)
   if (typeof patch.playbackRate !== "number" || typeof player.setPlaybackRate !== "function") return
-  const rates = readRates(player)
-  if (!rates.length) {
-    if (attempt < RETRY_LIMIT) window.setTimeout(() => applyYoutube(video, patch, attempt + 1), RETRY_MS)
-    return
-  }
-  const match = rates.find((rate) => nearRate(rate, patch.playbackRate as number))
-  if (match == null) return
-  // Mute can put the player rate back. Skip only when the player still shows this rate.
+  const requested = patch.playbackRate
+  desiredSpeed.set(video, requested)
+  speedLabelVideo = video
+  ensureYoutubeSpeedLabelListener()
+  const bounds = youtubeSpeedBounds(player)
+  // Inside 0.25–2 the player accepts steps the old rate list does not name.
+  // Outside that, the slider can only sit on the nearest end.
+  let match = clampSpeed(requested, bounds)
+  const outside = !nearRate(requested, match)
+  if (outside) video.setAttribute(YT_ECHO_ATTR, String(match))
+  else video.removeAttribute(YT_ECHO_ATTR)
   const pushed = mirroredRate.get(video)
   const live = readPlayerRate(player)
-  if (pushed != null && nearRate(pushed, match) && live != null && nearRate(live, match)) return
-  try {
-    player.setPlaybackRate(match)
-  } catch {
-    return
+  const already = pushed != null && nearRate(pushed, match) && live != null && nearRate(live, match)
+  if (!already) {
+    video.setAttribute(YT_HOLD_ATTR, "1")
+    try {
+      player.setPlaybackRate(match)
+    } catch {
+      video.removeAttribute(YT_HOLD_ATTR)
+      return
+    }
+    const applied = readPlayerRate(player)
+    if (applied != null && !nearRate(applied, match) && !outside) {
+      const nearest = nearestRate(readRates(player), match)
+      if (nearest != null) {
+        try {
+          player.setPlaybackRate(nearest)
+          match = nearest
+        } catch {
+          /* The listed rate can be rejected while an ad frame is locked. */
+        }
+      }
+    }
+    mirroredRate.set(video, match)
+    if (outside) video.setAttribute(YT_ECHO_ATTR, String(match))
+    restoreElementRate(video, requested, match)
+    video.removeAttribute(YT_HOLD_ATTR)
+  } else {
+    restoreElementRate(video, requested, match)
   }
-  mirroredRate.set(video, match)
+  placeYoutubeSpeedSlider(match)
+  paintYoutubeSpeedLabels(video)
   // Mute can clear the rate, and a rate change can clear loudness. Put both back.
   const keep = () => {
     if (!stillCurrent(video, patch.seq) || !video.isConnected) return
     if (level && levelDrifted(player, level.volume, level.muted)) {
       pushYoutubeAudio(player, video, level.volume, level.muted, true)
     }
-    const now = readPlayerRate(player)
-    if (now != null && !nearRate(now, match)) {
-      try {
-        player.setPlaybackRate?.(match)
-        mirroredRate.set(video, match)
-      } catch {
-        /* The player can reject the rate while an ad frame is locked. */
+    video.setAttribute(YT_HOLD_ATTR, "1")
+    try {
+      const now = readPlayerRate(player)
+      if (now != null && !nearRate(now, match)) {
+        try {
+          player.setPlaybackRate?.(match)
+          mirroredRate.set(video, match)
+        } catch {
+          /* The player can reject the rate while an ad frame is locked. */
+        }
       }
+      restoreElementRate(video, requested, match)
+      placeYoutubeSpeedSlider(match)
+      paintYoutubeSpeedLabels(video)
+    } finally {
+      video.removeAttribute(YT_HOLD_ATTR)
     }
   }
   keep()
@@ -273,6 +320,181 @@ function readRates(player: YoutubePlayer): number[] {
   }
 }
 
+function youtubeSpeedSlider(): HTMLInputElement | null {
+  const slider = document.querySelector("input.ytp-speedslider")
+  return slider instanceof HTMLInputElement ? slider : null
+}
+
+function youtubeSpeedBounds(player: YoutubePlayer): { min: number; max: number } {
+  const slider = youtubeSpeedSlider()
+  if (slider) {
+    const min = Number(slider.min)
+    const max = Number(slider.max)
+    if (Number.isFinite(min) && Number.isFinite(max) && max > min) return { min, max }
+  }
+  const rates = readRates(player)
+  if (rates.length >= 2) return { min: Math.min(...rates), max: Math.max(...rates) }
+  return { min: YT_SPEED_MIN, max: YT_SPEED_MAX }
+}
+
+function clampSpeed(rate: number, bounds: { min: number; max: number }): number {
+  if (rate < bounds.min) return bounds.min
+  if (rate > bounds.max) return bounds.max
+  return rate
+}
+
+function nearestRate(rates: number[], target: number): number | null {
+  let best: number | null = null
+  let bestDist = Infinity
+  for (const rate of rates) {
+    const dist = Math.abs(rate - target)
+    if (dist < bestDist) {
+      best = rate
+      bestDist = dist
+    }
+  }
+  return best
+}
+
+/** The video keeps a speed the slider cannot show. The player API itself only accepts the clamped end. */
+function restoreElementRate(video: HTMLVideoElement, requested: number, applied: number): void {
+  if (nearRate(requested, applied)) return
+  try {
+    if (!nearRate(video.playbackRate, requested)) video.playbackRate = requested
+  } catch {
+    /* The element can reject a rate while an ad frame is locked. */
+  }
+}
+
+function placeYoutubeSpeedSlider(value: number): void {
+  const slider = youtubeSpeedSlider()
+  if (!slider) return
+  const min = Number(slider.min)
+  const max = Number(slider.max)
+  const lo = Number.isFinite(min) ? min : YT_SPEED_MIN
+  const hi = Number.isFinite(max) ? max : YT_SPEED_MAX
+  if (!(hi > lo)) return
+  const next = Math.min(hi, Math.max(lo, value))
+  const text = String(next)
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+  try {
+    if (setter) setter.call(slider, text)
+    else slider.value = text
+  } catch {
+    return
+  }
+  slider.setAttribute("aria-valuenow", text)
+  slider.setAttribute("aria-valuetext", next.toFixed(2))
+  slider.style.setProperty("--yt-slider-shape-gradient-percent", `${((next - lo) / (hi - lo)) * 100}%`)
+}
+
+function formatMenuRate(rate: number): string {
+  const rounded = Math.round(rate * 100) / 100
+  return rounded.toFixed(2).replace(/\.?0+$/, "")
+}
+
+function formatPanelRate(rate: number): string {
+  const rounded = Math.round(rate * 100) / 100
+  return `${rounded.toFixed(2)}x`
+}
+
+function setLabel(node: Element | null | undefined, text: string): void {
+  if (!node || node.textContent === text) return
+  node.textContent = text
+}
+
+/** Playback-speed text in the gear menu and in the speed panel, when the rate is outside the slider. */
+function paintYoutubeSpeedLabels(video: HTMLVideoElement): void {
+  const wanted = desiredSpeed.get(video)
+  if (typeof wanted !== "number" || !video.isConnected) return
+  const player = youtubePlayer(video)
+  if (!player) return
+  const bounds = youtubeSpeedBounds(player)
+  if (wanted >= bounds.min - RATE_EPSILON && wanted <= bounds.max + RATE_EPSILON) return
+  const menuText = formatMenuRate(wanted)
+  const panelText = formatPanelRate(wanted)
+  for (const item of document.querySelectorAll(".ytp-menuitem")) {
+    if (!(item instanceof HTMLElement)) continue
+    const label = [...item.children].find(
+      (node) => node.classList.contains("ytp-menuitem-label") && node.textContent?.trim().toLowerCase() === "playback speed"
+    )
+    if (!label) continue
+    const content = [...item.children].find((node) => node.classList.contains("ytp-menuitem-content"))
+    setLabel(content, menuText)
+  }
+  const display = document.querySelector(".ytp-variable-speed-panel-display")
+  if (display) {
+    const span = [...display.children].find((node) => node.tagName === "SPAN")
+    setLabel(span, panelText)
+  }
+  setLabel(document.querySelector(".ytp-speedslider-text"), panelText)
+}
+
+function activeYoutubeVideo(): HTMLVideoElement | null {
+  const main = document.querySelector("#movie_player video, .html5-video-player video")
+  if (main instanceof HTMLVideoElement) return main
+  return speedLabelVideo?.isConnected ? speedLabelVideo : null
+}
+
+function watchOpenSpeedMenu(video: HTMLVideoElement): void {
+  const menu = document.querySelector(".ytp-settings-menu")
+  if (!(menu instanceof HTMLElement)) return
+  speedLabelObserver?.disconnect()
+  speedLabelObserver = new MutationObserver(() => paintYoutubeSpeedLabels(video))
+  speedLabelObserver.observe(menu, { subtree: true, childList: true, characterData: true })
+  window.clearTimeout(speedLabelObserverTimer)
+  speedLabelObserverTimer = window.setTimeout(() => {
+    speedLabelObserver?.disconnect()
+    speedLabelObserver = null
+  }, 2000)
+}
+
+function refreshYoutubeSpeedLabels(): void {
+  const video = speedLabelVideo?.isConnected ? speedLabelVideo : activeYoutubeVideo()
+  if (!video) return
+  paintYoutubeSpeedLabels(video)
+  watchOpenSpeedMenu(video)
+}
+
+function ensureYoutubeSpeedLabelListener(): void {
+  if (speedLabelListener) return
+  speedLabelListener = true
+  document.addEventListener(
+    "click",
+    (event) => {
+      if (!onYoutube()) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const gear = target.closest(".ytp-settings-button")
+      const back = target.closest(".ytp-panel-back-button")
+      const row = target.closest(".ytp-menuitem")
+      const rowLabel = row
+        ? [...row.children].find((node) => node.classList.contains("ytp-menuitem-label"))?.textContent
+        : ""
+      const speedRow = (rowLabel || "").trim().toLowerCase() === "playback speed"
+      if (!gear && !back && !speedRow) return
+      refreshYoutubeSpeedLabels()
+      window.setTimeout(refreshYoutubeSpeedLabels, 0)
+      window.setTimeout(refreshYoutubeSpeedLabels, 50)
+      window.setTimeout(refreshYoutubeSpeedLabels, 180)
+      window.setTimeout(refreshYoutubeSpeedLabels, 400)
+    },
+    true
+  )
+}
+
+function readYoutubeSpeed(video: HTMLVideoElement, player: YoutubePlayer): number | null {
+  const api = readPlayerRate(player)
+  const slider = youtubeSpeedSlider()
+  if (!slider) return api
+  const value = Number(slider.value)
+  if (!Number.isFinite(value)) return api
+  const echo = Number(video.getAttribute(YT_ECHO_ATTR))
+  // The thumb moved off the end we pinned, so this is the user's rate, not the clamp.
+  if (Number.isFinite(echo) && api != null && nearRate(api, echo) && !nearRate(value, echo)) return value
+  return api
+}
+
 function pushYoutubeLoop(player: YoutubePlayer, loop: boolean): void {
   const record = player as unknown as Record<string, unknown>
   for (const [readName, writeName] of LOOP_PAIRS) {
@@ -296,6 +518,7 @@ function pushYoutubeLoop(player: YoutubePlayer, loop: boolean): void {
 }
 
 function applyInstagram(video: HTMLVideoElement, patch: NativeMirror): void {
+  noteMirroredPlayer(video, patch)
   if (typeof patch.volume === "number" || typeof patch.muted === "boolean") {
     pushInstagramAudio(video, patch)
   }
@@ -545,6 +768,200 @@ function visibleRates(button: HTMLElement): number[] {
 
 function speedMenuOpen(button: HTMLElement): boolean {
   return visibleRates(button).length > 0
+}
+
+function readYoutubeLoop(player: YoutubePlayer): boolean | null {
+  const record = player as unknown as Record<string, unknown>
+  for (const [readName] of LOOP_PAIRS) {
+    const read = record[readName]
+    if (typeof read !== "function") continue
+    try {
+      const current = (read as () => unknown).call(player)
+      if (typeof current === "boolean") return current
+      if (current === 1 || current === 0) return current === 1
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
+function readYoutubeControls(video: HTMLVideoElement): NativeMirrorPatch | null {
+  const player = youtubePlayer(video)
+  if (!player) return null
+  const patch: NativeMirrorPatch = {}
+  try {
+    if (typeof player.getVolume === "function") {
+      const percent = Number(player.getVolume())
+      if (Number.isFinite(percent)) patch.volume = clamp01(percent / 100)
+    }
+  } catch {
+    /* The player can reject a read while an ad frame is locked. */
+  }
+  try {
+    if (typeof player.isMuted === "function") patch.muted = Boolean(player.isMuted())
+  } catch {
+    /* The player can reject a read while an ad frame is locked. */
+  }
+  const rate = readYoutubeSpeed(video, player)
+  if (rate != null) patch.playbackRate = rate
+  let loop = readYoutubeLoop(player)
+  if (loop === null) {
+    const button = nearestControl(video, (node) => loopState(node) !== null)
+    if (button) loop = loopState(button)
+  }
+  if (loop !== null) patch.loop = loop
+  return hasField(patch) ? patch : null
+}
+
+function readRangeVolume(input: HTMLInputElement): number | null {
+  const max = Number(input.max)
+  const min = Number(input.min)
+  const hi = input.max !== "" && Number.isFinite(max) ? max : 1
+  const lo = input.min !== "" && Number.isFinite(min) ? min : 0
+  const span = hi - lo
+  if (!(span > 0)) return null
+  const raw = Number(input.value)
+  if (!Number.isFinite(raw)) return null
+  return clamp01((raw - lo) / span)
+}
+
+function readInstagramControls(video: HTMLVideoElement): NativeMirrorPatch | null {
+  const patch: NativeMirrorPatch = {}
+  const muteButton = nearestControl(video, (node) => labelMeansMuted(node) !== null)
+  if (muteButton) {
+    const muted = labelMeansMuted(muteButton)
+    if (muted !== null) patch.muted = muted
+  }
+  const slider = nearestControl(video, (node) => node instanceof HTMLInputElement && isVolumeSlider(node))
+  if (slider instanceof HTMLInputElement) {
+    const volume = readRangeVolume(slider)
+    if (volume !== null) patch.volume = volume
+  }
+  const speedButton = nearestControl(video, (node) => rateOf(node) != null)
+  if (speedButton && !speedMenuOpen(speedButton)) {
+    const rate = rateOf(speedButton)
+    if (rate != null) patch.playbackRate = rate
+  }
+  const loopButton = nearestControl(video, (node) => loopState(node) !== null)
+  if (loopButton) {
+    const loop = loopState(loopButton)
+    if (loop !== null) patch.loop = loop
+  }
+  return hasField(patch) ? patch : null
+}
+
+function readSiteControls(video: HTMLVideoElement): NativeMirrorPatch | null {
+  if (onYoutube()) return readYoutubeControls(video)
+  if (onInstagram()) return readInstagramControls(video)
+  return null
+}
+
+export const NATIVE_PLAYER_ATTR = "data-vee-player"
+
+const PLAYER_QUIET_MS = 450
+const pushedPlayer = new WeakMap<HTMLVideoElement, NativeMirrorPatch>()
+const quietUntil = new WeakMap<HTMLVideoElement, number>()
+let publishSeq = 0
+
+export function nativePlayerSeq(video: HTMLVideoElement): number {
+  const raw = video.getAttribute(NATIVE_PLAYER_ATTR)
+  if (!raw) return 0
+  try {
+    const value = JSON.parse(raw) as { seq?: unknown }
+    return typeof value.seq === "number" ? value.seq : 0
+  } catch {
+    return 0
+  }
+}
+
+export function readNativePlayer(video: HTMLVideoElement): NativeMirrorPatch | null {
+  const raw = video.getAttribute(NATIVE_PLAYER_ATTR)
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw) as Partial<NativeMirrorPatch>
+    const patch: NativeMirrorPatch = {}
+    if (typeof value.volume === "number" && Number.isFinite(value.volume)) patch.volume = clamp01(value.volume)
+    if (typeof value.muted === "boolean") patch.muted = value.muted
+    if (typeof value.playbackRate === "number" && Number.isFinite(value.playbackRate)) {
+      patch.playbackRate = value.playbackRate
+    }
+    if (typeof value.loop === "boolean") patch.loop = value.loop
+    return hasField(patch) ? patch : null
+  } catch {
+    return null
+  }
+}
+
+function playerFieldsEqual(a: NativeMirrorPatch, b: NativeMirrorPatch): boolean {
+  const volumeSame =
+    typeof a.volume === "number" && typeof b.volume === "number"
+      ? Math.abs(a.volume - b.volume) < 0.01
+      : a.volume === b.volume
+  const rateSame =
+    typeof a.playbackRate === "number" && typeof b.playbackRate === "number"
+      ? nearRate(a.playbackRate, b.playbackRate)
+      : a.playbackRate === b.playbackRate
+  return volumeSame && a.muted === b.muted && rateSame && a.loop === b.loop
+}
+
+function writePlayerSnapshot(video: HTMLVideoElement, snapshot: NativeMirrorPatch): void {
+  if (!hasField(snapshot)) return
+  const current = readNativePlayer(video)
+  if (current && playerFieldsEqual(current, snapshot)) return
+  try {
+    video.setAttribute(NATIVE_PLAYER_ATTR, JSON.stringify({ ...snapshot, seq: ++publishSeq }))
+  } catch {
+    /* The element can already be detached. */
+  }
+}
+
+/** Remember a value we just pushed so the next read is not treated as a user edit. */
+export function noteMirroredPlayer(video: HTMLVideoElement, patch: NativeMirrorPatch): void {
+  const prev = pushedPlayer.get(video) ?? {}
+  const next: NativeMirrorPatch = { ...prev }
+  if (typeof patch.volume === "number") next.volume = clamp01(patch.volume)
+  if (typeof patch.muted === "boolean") next.muted = patch.muted
+  if (typeof patch.playbackRate === "number") next.playbackRate = patch.playbackRate
+  if (typeof patch.loop === "boolean") next.loop = patch.loop
+  pushedPlayer.set(video, next)
+  quietUntil.set(video, performance.now() + PLAYER_QUIET_MS)
+  writePlayerSnapshot(video, { ...(readNativePlayer(video) ?? {}), ...next })
+}
+
+function assignLive<T extends number | boolean>(
+  next: NativeMirrorPatch,
+  key: keyof NativeMirrorPatch,
+  live: T | undefined,
+  pushed: T | undefined,
+  quiet: boolean,
+  equal: (a: T, b: T) => boolean
+): void {
+  if (live === undefined) return
+  if (pushed !== undefined && equal(live, pushed)) {
+    next[key] = pushed as never
+    return
+  }
+  if (pushed !== undefined && quiet) {
+    next[key] = pushed as never
+    return
+  }
+  next[key] = live as never
+}
+
+/** Publish the site player's volume, mute, speed, and loop for this tab's custom bar. */
+export function publishSitePlayer(video: HTMLVideoElement): void {
+  if (!video.isConnected || video.hasAttribute(NATIVE_MIRROR_ATTR)) return
+  const live = readSiteControls(video)
+  if (!live) return
+  const pushed = pushedPlayer.get(video) ?? {}
+  const quiet = performance.now() < (quietUntil.get(video) ?? 0)
+  const next: NativeMirrorPatch = { ...(readNativePlayer(video) ?? {}) }
+  assignLive(next, "volume", live.volume, pushed.volume, quiet, (a, b) => Math.abs(a - b) < 0.01)
+  assignLive(next, "muted", live.muted, pushed.muted, quiet, (a, b) => a === b)
+  assignLive(next, "playbackRate", live.playbackRate, pushed.playbackRate, quiet, nearRate)
+  assignLive(next, "loop", live.loop, pushed.loop, quiet, (a, b) => a === b)
+  writePlayerSnapshot(video, next)
 }
 
 function loopState(node: HTMLElement): boolean | null {

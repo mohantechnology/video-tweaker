@@ -34,6 +34,7 @@ import {
   type RenditionMessage
 } from "./renditions"
 import { seekBy, togglePictureInPicture } from "./effects"
+import { NATIVE_PLAYER_ATTR, readNativePlayer, YT_ECHO_ATTR, YT_HOLD_ATTR } from "./native-mirror"
 import { formatClock } from "./progress"
 import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
 import {
@@ -897,12 +898,14 @@ let fsOpening = false
 let fsEntered = false
 let controlsBeforeFullscreen: boolean | null = null
 let controlsObserver: MutationObserver | null = null
+let playerObserver: MutationObserver | null = null
 let suppressingControls = false
 let downloadBusy = false
 let ytOffer: YtOffer | null = null
 const pendingYoutubeFetch = new Map<string, (bytes: Uint8Array | null) => void>()
 let layoutStamp = ""
 let shownMediaStamp = ""
+let shownPlayerMark = ""
 let qualityToken = 0
 let qualityNonce = ""
 let qualityStamp = ""
@@ -1205,8 +1208,9 @@ function stepSpeed(delta: number): void {
 
 function toggleLoop(): void {
   const settings = readSettings()
-  if (!settings) return
-  const next = !(pendingLoop ?? settings.loop)
+  const video = boundVideo
+  if (!settings || !video) return
+  const next = !shownLoop(video, settings)
   pendingLoop = next
   noteWrite()
   onControl?.({ type: "loop", loop: next })
@@ -1299,7 +1303,30 @@ function onWindowActUp(event: PointerEvent): void {
 
 function shownRate(video: HTMLVideoElement, settings: EffectSettings): number {
   if (rateSource?.(video) === "hold") return video.playbackRate || settings.playbackRate
-  return settings.playbackRate
+  if (settings.playbackTouched) return settings.playbackRate
+  const published = readNativePlayer(video)
+  const live = video.playbackRate || 1
+  const echo = Number(video.getAttribute(YT_ECHO_ATTR))
+  const publishedIsEcho =
+    Number.isFinite(echo) &&
+    typeof published?.playbackRate === "number" &&
+    Math.abs(published.playbackRate - echo) < 0.02
+  if (
+    !publishedIsEcho &&
+    typeof published?.playbackRate === "number" &&
+    Math.abs(published.playbackRate - live) >= 0.02
+  ) {
+    return published.playbackRate
+  }
+  return live
+}
+
+function shownLoop(video: HTMLVideoElement, settings: EffectSettings): boolean {
+  if (pendingLoop !== null) return pendingLoop
+  if (settings.playbackTouched) return settings.loop
+  const published = readNativePlayer(video)
+  if (typeof published?.loop === "boolean") return published.loop
+  return video.loop
 }
 
 function videoIsFullscreen(video: HTMLVideoElement): boolean {
@@ -1525,7 +1552,12 @@ function shownAudio(video: HTMLVideoElement, settings: EffectSettings): { volume
   const policy = domainAudio(location.hostname)
   if (settings.audioTouched) return { volume: settings.volume, muted: settings.muted }
   if (policy.followLive) return liveAudible(video)
-  return { volume: settings.volume, muted: settings.muted }
+  const published = readNativePlayer(video)
+  let volume = video.volume
+  let muted = video.muted
+  if (typeof published?.volume === "number" && Math.abs(published.volume - volume) >= 0.01) volume = published.volume
+  if (typeof published?.muted === "boolean" && published.muted !== muted) muted = published.muted
+  return { volume, muted }
 }
 
 function userHoldsMute(): boolean {
@@ -1662,7 +1694,7 @@ function paintControls(): void {
   }
   if (volumeInput && !volumeDrag) volumeInput.value = String(volumeNow)
   if (loopBtn) {
-    const loopOn = pendingLoop ?? settings.loop
+    const loopOn = shownLoop(video, settings)
     setIcon(loopBtn, loopOn ? "on" : "off", loopOn ? ICON_LOOP : ICON_LOOP_OFF)
     loopBtn.dataset.on = String(loopOn)
     loopBtn.setAttribute("aria-pressed", String(loopOn))
@@ -3836,23 +3868,14 @@ function setPlaybackRate(rate: number): void {
 }
 
 function reportLoop(): void {
-  const video = boundVideo
-  const settings = readSettings()
-  if (!video || !settings || !onMedia || root?.dataset.visible !== "true") return
-  if (volumeDrag || speedDrag || performance.now() < ignoreUntil) return
-  if (video.loop === settings.loop) return
-  onMedia({
-    volume: settings.volume,
-    muted: settings.muted,
-    playbackRate: null,
-    loop: video.loop
-  })
+  reportMedia()
 }
 
 function reportMedia(): void {
   const video = boundVideo
-  if (!video || !onMedia || root?.dataset.visible !== "true") return
-  if (volumeDrag || performance.now() < ignoreUntil) return
+  if (!video || !onMedia) return
+  if (video.hasAttribute(YT_HOLD_ATTR)) return
+  if (volumeDrag || speedDrag || performance.now() < ignoreUntil) return
   const source = rateSource?.(video) ?? "live"
   if (source === "hold") return
   let playbackRate: number | null = source === "live" ? video.playbackRate || 1 : null
@@ -3866,15 +3889,9 @@ function reportMedia(): void {
     noteWrite()
     onControl?.({ type: "rate", playbackRate: chosen })
   }
-  const settings = readSettings()
-  const policy = domainAudio(location.hostname)
-  const heard =
-    policy.followLive && settings && !settings.audioTouched && !pendingVolume
-      ? liveAudible(video)
-      : pendingVolume ?? { volume: video.volume, muted: video.muted }
   onMedia({
-    volume: heard.volume,
-    muted: heard.muted,
+    volume: video.volume,
+    muted: video.muted,
     playbackRate,
     loop: video.loop
   })
@@ -3968,7 +3985,8 @@ function fileControlsChanged(video: HTMLVideoElement): boolean {
 
 function onMediaSignal(): void {
   const video = boundVideo
-  if (video) enforceHeldMute(video)
+  const siteClick = performance.now() - siteMuteClickAt < 800
+  if (video && !siteClick) enforceHeldMute(video)
   reportMedia()
   paintControls()
   updateFill()
@@ -4164,16 +4182,18 @@ function ensureBar(): HTMLDivElement {
   })
   muteBtn?.addEventListener("click", (event) => {
     stopAct(event)
+    const video = boundVideo
     const settings = readSettings()
-    if (!settings) return
+    if (!video || !settings) return
     cancelVolumeApply()
     noteWrite()
-    const silent = settings.muted || settings.volume <= 0.001
+    const level = shownAudio(video, settings)
+    const silent = level.muted || level.volume <= 0.001
     if (silent) {
-      const volume = settings.volume > 0.001 ? settings.volume : lastAudible > 0.001 ? lastAudible : 1
+      const volume = level.volume > 0.001 ? level.volume : lastAudible > 0.001 ? lastAudible : 1
       onControl?.({ type: "audio", volume, muted: false })
     } else {
-      onControl?.({ type: "audio", muted: true })
+      onControl?.({ type: "audio", volume: level.volume, muted: true })
     }
     paintControls()
   })
@@ -4643,8 +4663,10 @@ export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSett
     settings.audioTouched,
     settings.playbackTouched
   ].join("|")
-  if (mediaStamp !== shownMediaStamp) {
+  const playerMark = video.getAttribute(NATIVE_PLAYER_ATTR) || ""
+  if (mediaStamp !== shownMediaStamp || playerMark !== shownPlayerMark) {
     shownMediaStamp = mediaStamp
+    shownPlayerMark = playerMark
     paintControls()
   }
   reportLoop()
@@ -4658,6 +4680,8 @@ export function stopSeekBar(): void {
   restorePlayerFullscreen()
   controlsObserver?.disconnect()
   controlsObserver = null
+  playerObserver?.disconnect()
+  playerObserver = null
   suppressingControls = false
   document.removeEventListener("pointermove", onPointerMove, true)
   document.removeEventListener("pointermove", onDocumentHover)
@@ -4734,6 +4758,7 @@ export function stopSeekBar(): void {
   downloadBusy = false
   layoutStamp = ""
   shownMediaStamp = ""
+  shownPlayerMark = ""
   qualityStamp = ""
   catalogSeen = false
   renditionGroups = []
@@ -4764,6 +4789,21 @@ export function startSeekBar(options: {
   rateSource = options.rateSource ?? null
   installFullscreenHook()
   ensureBar()
+  if (!playerObserver && document.documentElement) {
+    playerObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        const node = record.target
+        if (!(node instanceof HTMLVideoElement) || node !== boundVideo) continue
+        reportMedia()
+        paintControls()
+      }
+    })
+    playerObserver.observe(document.documentElement, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: [NATIVE_PLAYER_ATTR]
+    })
+  }
   document.addEventListener("pointermove", onPointerMove, true)
   document.addEventListener("pointermove", onDocumentHover)
   document.addEventListener("pointerup", onPointerUp, true)
