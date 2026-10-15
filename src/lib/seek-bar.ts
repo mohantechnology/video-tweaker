@@ -38,8 +38,10 @@ import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
 import {
   DOCK_CONTROL_KEYS,
   DOCK_ICON_ORDER,
+  HOLD_RATE_MIN,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
+  clampHoldPlaybackRate,
   type DockEdge,
   type DockPlaceId,
   type DockPlacement,
@@ -68,6 +70,7 @@ export type DockControl =
   | { type: "audio"; volume?: number; muted?: boolean }
   | { type: "rate"; playbackRate: number }
   | { type: "loop"; loop: boolean }
+  | { type: "hold"; holdPlaybackRate: number }
 
 export type DockMedia = {
   volume: number
@@ -450,6 +453,49 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-speed-chips button[data-on="true"] {
   background: rgba(255, 255, 255, 0.34);
   color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-hold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 8px 0 2px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#${SEEK_BAR_ID} .vee-speed-hold svg {
+  display: block;
+  flex: none;
+}
+#${SEEK_BAR_ID} .vee-speed-hold:hover:not([data-disabled="true"]) {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-hold[data-on="true"] {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-hold[data-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+#${SEEK_BAR_ID} .vee-speed-hold[data-disabled="true"]:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+#${SEEK_BAR_ID} .vee-speed-hold:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline-offset: 2px;
 }
 #${SEEK_BAR_ID} .vee-quality-pop .vee-pop-card {
   display: flex;
@@ -847,6 +893,8 @@ const ICON_EXIT_FULL =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
 const ICON_DOWNLOAD =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>'
+const ICON_MOUSE =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></svg>'
 const ICON_QUALITY =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg>'
 
@@ -872,6 +920,7 @@ let speedReadout: HTMLDivElement | null = null
 let speedCaption: HTMLDivElement | null = null
 let speedInput: HTMLInputElement | null = null
 let speedChips: HTMLButtonElement[] = []
+let speedHoldBtn: HTMLButtonElement | null = null
 let volumeAnchor: HTMLDivElement | null = null
 let muteBtn: HTMLButtonElement | null = null
 let volumePop: HTMLDivElement | null = null
@@ -1008,6 +1057,11 @@ function formatRate(value: number): string {
 
 function formatChip(value: number): string {
   return value.toFixed(value === 1.25 ? 2 : 1)
+}
+
+function formatPressRate(value: number): string {
+  const rounded = Math.round(value * 100) / 100
+  return `${rounded.toFixed(2).replace(/\.?0+$/, "")}x`
 }
 
 function noteWrite(): void {
@@ -1251,7 +1305,14 @@ function actFromTarget(target: EventTarget | null): { act: string; node: HTMLEle
   const node = target.closest("[data-act]")
   if (!(node instanceof HTMLElement)) return null
   const act = node.dataset.act || ""
-  if (act === "loop" || act === "speed-btn" || act === "speed-minus" || act === "speed-plus" || act === "download") {
+  if (
+    act === "loop" ||
+    act === "speed-btn" ||
+    act === "speed-minus" ||
+    act === "speed-plus" ||
+    act === "speed-hold" ||
+    act === "download"
+  ) {
     return { act, node }
   }
   return null
@@ -1329,6 +1390,7 @@ function onWindowActUp(event: PointerEvent): void {
   else if (pending.act === "speed-minus") stepSpeed(-SPEED_STEP)
   else if (pending.act === "speed-plus") stepSpeed(SPEED_STEP)
   else if (pending.act === "speed-chip") setPlaybackRate(Number(released.node.dataset.rate))
+  else if (pending.act === "speed-hold") setHoldFromCurrent()
   else if (pending.act === "speed-btn") {
     alignSpeedCard()
     if (speedPop) speedPop.dataset.open = "true"
@@ -1784,9 +1846,47 @@ function paintSpeed(rate: number): void {
     const chipRate = Number(chip.dataset.rate)
     chip.dataset.on = String(Math.abs(shown - chipRate) < 0.005)
   }
-  if (!speedInput) return
-  speedInput.style.setProperty("--p", ratePortion(shown))
-  speedInput.value = String(shown)
+  if (speedInput) {
+    speedInput.style.setProperty("--p", ratePortion(shown))
+    speedInput.value = String(shown)
+  }
+  paintHoldSpeed(shown)
+}
+
+function paintHoldSpeed(rate: number): void {
+  const button = speedHoldBtn
+  if (!button) return
+  const label = button.querySelector("span")
+  const settings = readSettings()
+  const current = clampRate(rate)
+  const tooSlow = current < HOLD_RATE_MIN
+  const hold = clampHoldPlaybackRate(settings?.holdPlaybackRate ?? Number.NaN)
+  const same = !tooSlow && Math.abs(clampHoldPlaybackRate(current) - hold) < 0.001
+  const text = tooSlow
+    ? "Mouse press starts at 1x"
+    : same
+      ? `Mouse press is ${formatPressRate(current)}`
+      : `Use ${formatPressRate(current)} for mouse press`
+  const title = tooSlow
+    ? "Mouse press speed starts at 1×"
+    : "Set current speed as mouse press speed"
+  button.disabled = false
+  button.dataset.disabled = String(tooSlow)
+  button.setAttribute("aria-disabled", String(tooSlow))
+  button.dataset.on = String(same)
+  button.title = title
+  button.setAttribute("aria-label", title)
+  if (label) label.textContent = text
+}
+
+function setHoldFromCurrent(): void {
+  const video = boundVideo
+  const settings = readSettings()
+  if (!video || !settings) return
+  const current = clampRate(pendingRate ?? shownRate(video, settings))
+  if (current < HOLD_RATE_MIN) return
+  onControl?.({ type: "hold", holdPlaybackRate: clampHoldPlaybackRate(current) })
+  paintSpeed(current)
 }
 
 function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
@@ -4122,6 +4222,7 @@ function ensureBar(): HTMLDivElement {
               <button type="button" class="vee-speed-step" data-act="speed-plus" aria-label="Faster">+</button>
             </div>
             <div class="vee-speed-chips">${chips}</div>
+            <button type="button" class="vee-speed-hold" data-act="speed-hold" title="Set current speed as mouse press speed" aria-label="Set current speed as mouse press speed">${ICON_MOUSE}<span>Use for mouse press</span></button>
             <div class="vee-speed-caption"><span>Normal</span></div>
           </div>
         </div>
@@ -4180,6 +4281,7 @@ function ensureBar(): HTMLDivElement {
   speedCaption = node.querySelector(".vee-speed-caption")
   speedInput = node.querySelector(".vee-speed-adjust input")
   speedChips = [...node.querySelectorAll<HTMLButtonElement>(".vee-speed-chips button")]
+  speedHoldBtn = node.querySelector("[data-act='speed-hold']")
   volumeAnchor = node.querySelector("[data-act='volume']")
   muteBtn = node.querySelector("[data-act='mute']")
   volumePop = node.querySelector("[data-pop='volume']")
@@ -4233,6 +4335,11 @@ function ensureBar(): HTMLDivElement {
       setPlaybackRate(Number(chip.dataset.rate))
     })
   }
+  speedHoldBtn?.addEventListener("click", (event) => {
+    if (recentAct()) return
+    stopAct(event)
+    setHoldFromCurrent()
+  })
   speedInput?.addEventListener("pointerdown", (event) => {
     event.stopPropagation()
     speedDrag = true
@@ -4839,6 +4946,7 @@ export function stopSeekBar(): void {
   speedCaption = null
   speedInput = null
   speedChips = []
+  speedHoldBtn = null
   volumeAnchor = null
   muteBtn = null
   volumePop = null

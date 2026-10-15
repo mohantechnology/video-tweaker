@@ -13,6 +13,7 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
+  MousePointerClick,
   Layers,
   RectangleHorizontal,
   PictureInPicture2,
@@ -1215,6 +1216,10 @@ function Overlay() {
   }
 
   dockBridge.current.onControl = (control) => {
+    if (control.type === "hold") {
+      patch({ holdPlaybackRate: clampHoldPlaybackRate(control.holdPlaybackRate) })
+      return
+    }
     if (settingsRef.current.syncCustomController) {
       if (control.type === "audio") {
         const next: Partial<EffectSettings> = {}
@@ -1590,6 +1595,16 @@ function Overlay() {
       (settings.playbackTouched && settings.playbackEnabled))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
   const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
+  const holdTooSlow = rate < HOLD_RATE_MIN
+  const holdMatches = !holdTooSlow && Math.abs(clampHoldPlaybackRate(rate) - holdSpeed) < 0.001
+  const holdCopyLabel = holdTooSlow
+    ? "Mouse press starts at 1×"
+    : holdMatches
+      ? `Mouse press is ${formatRate(rate)}`
+      : `Use ${formatRate(rate)} for mouse press`
+  const holdCopyTitle = holdTooSlow
+    ? "Mouse press speed starts at 1×"
+    : "Set current speed as mouse press speed"
 
   if (!globallyEnabled || !allowed || !layout || layout.mode === "closed") return null
   if (!hasVideo && !forcedOpen) return null
@@ -2191,6 +2206,17 @@ function Overlay() {
                       </button>
                     ))}
                   </div>
+                  <button
+                    type="button"
+                    className="vee-hold-set"
+                    title={holdCopyTitle}
+                    aria-label={holdCopyTitle}
+                    disabled={holdTooSlow}
+                    data-on={String(holdMatches)}
+                    onClick={() => patch({ holdPlaybackRate: clampHoldPlaybackRate(rate) })}>
+                    <MousePointerClick size={14} strokeWidth={1.75} />
+                    {holdCopyLabel}
+                  </button>
                 </Group>
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
@@ -2258,7 +2284,7 @@ function Overlay() {
                     display={formatRate(holdSpeed)}
                     onChange={(value) =>
                       patch({
-                        holdPlaybackRate: clampHoldPlaybackRate(readRange(String(value), 1))
+                        holdPlaybackRate: clampHoldPlaybackRate(readRange(String(value), 2))
                       })
                     }
                   />

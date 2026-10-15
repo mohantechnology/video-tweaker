@@ -20,7 +20,7 @@ export const PLAYBACK_RATE_MAX = 4
 export const HOLD_PLAYBACK_RATE = 2
 export const HOLD_RATE_MIN = 1
 export const HOLD_RATE_MAX = 4
-export const HOLD_RATE_STEP = 0.1
+export const HOLD_RATE_STEP = 0.01
 
 /** Seconds before a saved moment that resume starts. */
 export const RESUME_LEAD_DEFAULT = 3
@@ -33,12 +33,12 @@ export function clampResumeLead(value: number): number {
   return Math.min(RESUME_LEAD_MAX, Math.max(RESUME_LEAD_MIN, Math.round(value)))
 }
 
-/** Snaps a hold speed onto the 1×–4× slider, one tenth at a time. */
+/** Snaps a hold speed onto the 1×–4× range, one hundredth at a time. */
 export function clampHoldPlaybackRate(value: number): number {
   if (!Number.isFinite(value)) return HOLD_PLAYBACK_RATE
   const stepped = Math.round(value / HOLD_RATE_STEP) * HOLD_RATE_STEP
-  const tenths = Math.round(stepped * 10) / 10
-  return Math.min(HOLD_RATE_MAX, Math.max(HOLD_RATE_MIN, tenths))
+  const hundredths = Math.round(stepped * 100) / 100
+  return Math.min(HOLD_RATE_MAX, Math.max(HOLD_RATE_MIN, hundredths))
 }
 
 export type EffectSettings = ColorSettings & {

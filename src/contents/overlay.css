@@ -951,13 +951,54 @@ a.vee-progress-link:hover {
   padding: 7px 8px;
 }
 
+.vee-hold-set {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: -4px 0 10px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(246, 243, 255, 0.88);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.vee-hold-set:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.vee-hold-set[data-on="true"] {
+  border-color: transparent;
+  background: rgba(141, 115, 255, 0.35);
+  color: white;
+}
+
+.vee-hold-set:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.vee-hold-set:focus-visible {
+  outline: 2px solid rgba(180, 164, 255, 0.8);
+  outline-offset: 2px;
+}
+
 .vee-action svg,
 .vee-jump svg,
 .vee-tab svg,
 .vee-icon-btn svg,
 .vee-group-toggle svg,
 .vee-switch-row svg,
-.vee-dock-pick svg {
+.vee-dock-pick svg,
+.vee-hold-set svg {
   display: block;
   flex: none;
 }
