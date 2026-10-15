@@ -17,6 +17,7 @@ import {
   RectangleHorizontal,
   PictureInPicture2,
   Play,
+  RefreshCw,
   Repeat,
   Link2,
   Maximize2,
@@ -95,6 +96,17 @@ import {
   type ProgressGroup,
   type SavedProgress
 } from "~lib/progress"
+import { YT_ECHO_ATTR } from "~lib/native-mirror"
+import {
+  AUDIO_OPEN_TAB_KEYS,
+  VIDEO_OPEN_TAB_KEYS,
+  adoptOpenTabSettings,
+  editsAudioGroup,
+  editsVideoGroup,
+  groupDiffers,
+  mergeUneditedGroups,
+  takeGroup
+} from "~lib/open-tab-sync"
 import { PRESETS, PRESET_SNAPSHOT_KEYS, builtinSnapshot, exactPresetId, presetById, snapshotFrom, type UserPreset } from "~lib/presets"
 import { type DockControl, type DockMedia, suppressDockMedia } from "~lib/seek-bar"
 import {
@@ -119,6 +131,9 @@ import {
   releaseTabMedia,
   releaseTabMediaFromDomain,
   sameClip,
+  tabAudioOwned,
+  tabLoopOwned,
+  tabRateOwned,
   withTabAudio,
   withTabLoop,
   withTabRate,
@@ -466,6 +481,21 @@ function hostsMatch(messageHost: string | undefined, pageHost: string): boolean 
   return (messageHost ?? "").trim().toLowerCase() === pageHost.trim().toLowerCase()
 }
 
+type SeenMedia = {
+  volume: number
+  muted: boolean
+  playbackRate: number | null
+  loop: boolean
+}
+
+const SEEN_VOLUME_EPS = 0.005
+const SEEN_RATE_EPS = 0.001
+
+function echoedPlayerRate(video: HTMLVideoElement, rate: number): boolean {
+  const echo = Number(video.getAttribute(YT_ECHO_ATTR))
+  return Number.isFinite(echo) && Math.abs(rate - echo) <= SEEN_RATE_EPS
+}
+
 function Overlay() {
   const hostname = location.hostname
   const [settings, setSettings] = useState<EffectSettings>(() => ({
@@ -497,7 +527,12 @@ function Overlay() {
     height: window.innerHeight
   }))
   const settingsRef = useRef(settings)
+  const domainRef = useRef<EffectSettings | null>(null)
+  const domainAheadRef = useRef(false)
+  const audioEditedRef = useRef(false)
+  const videoEditedRef = useRef(false)
   const tabMediaRef = useRef<TabMedia>(emptyTabMedia())
+  const seenMediaRef = useRef<SeenMedia | null>(null)
   const clipRef = useRef("")
   const policyRef = useRef(policy)
   const globallyEnabledRef = useRef(false)
@@ -562,13 +597,23 @@ function Overlay() {
 
   const commitSiteSettings = (snapshot: EffectSettings) => {
     const seq = ++saveSeq.current
-    inflightSaves.current = [...inflightSaves.current, snapshot]
+    const domain = domainRef.current
+    const outgoing = domain
+      ? mergeUneditedGroups(snapshot, domain, audioEditedRef.current, videoEditedRef.current)
+      : snapshot
+    domainRef.current = outgoing
+    inflightSaves.current = [...inflightSaves.current, outgoing]
     dirtyRef.current = false
-    void saveSiteSettings(hostname, snapshot).then(() => {
+    void saveSiteSettings(hostname, outgoing).then(() => {
       if (seq >= adoptedSeq.current) return
+      const latestDomain = domainRef.current
       const latest = settingsRef.current
-      inflightSaves.current = [...inflightSaves.current, latest]
-      void saveSiteSettings(hostname, latest)
+      const again = latestDomain
+        ? mergeUneditedGroups(latest, latestDomain, audioEditedRef.current, videoEditedRef.current)
+        : latest
+      domainRef.current = again
+      inflightSaves.current = [...inflightSaves.current, again]
+      void saveSiteSettings(hostname, again)
     })
   }
 
@@ -604,6 +649,10 @@ function Overlay() {
         settingsSynced.current = true
         const loaded = stored ?? settingsFromGlobalPreset(globalPreset, hostname)
         siteOverrideRef.current = stored != null
+        domainRef.current = loaded
+        domainAheadRef.current = false
+        audioEditedRef.current = false
+        videoEditedRef.current = false
         settingsRef.current = loaded
         appliedRef.current = loaded
         setSettings(loaded)
@@ -675,6 +724,7 @@ function Overlay() {
       }
       clipRef.current = key
       tabMediaRef.current = emptyTabMedia()
+      seenMediaRef.current = null
       if (video) releaseOwnedMedia(video)
       // Ignore the player's own reset while this clip's saved panel values are applied.
       suppressDockMedia(600)
@@ -788,47 +838,65 @@ function Overlay() {
         globallyEnabledRef.current = enabled
         setGloballyEnabled(enabled)
       }
+      const noteEcho = (incoming: EffectSettings) => {
+        if (!groupDiffers(settingsRef.current, incoming, AUDIO_OPEN_TAB_KEYS)) {
+          audioEditedRef.current = false
+        }
+        if (!groupDiffers(settingsRef.current, incoming, VIDEO_OPEN_TAB_KEYS)) {
+          videoEditedRef.current = false
+        }
+      }
       const adoptExternal = (incoming: EffectSettings) => {
-        tabMediaRef.current = releaseTabMediaFromDomain(
-          tabMediaRef.current,
-          settingsRef.current,
-          incoming
-        )
-        adoptedSeq.current = saveSeq.current + 1
-        dirtyRef.current = false
-        window.clearTimeout(applyTimer.current)
-        applyTimer.current = 0
-        applyDelayRef.current = 0
-        settingsRef.current = incoming
-        appliedRef.current = incoming
-        setSettings(incoming)
+        const current = settingsRef.current
+        const next = adoptOpenTabSettings(current, incoming)
+        if (!groupDiffers(next, incoming, AUDIO_OPEN_TAB_KEYS)) audioEditedRef.current = false
+        if (!groupDiffers(next, incoming, VIDEO_OPEN_TAB_KEYS)) videoEditedRef.current = false
+        if (next.syncCustomController !== current.syncCustomController) seenMediaRef.current = null
+        if (settingsEqual(current, next)) return
+        const holding = audioEditedRef.current || videoEditedRef.current
+        tabMediaRef.current = releaseTabMediaFromDomain(tabMediaRef.current, current, next)
+        if (!holding) {
+          adoptedSeq.current = saveSeq.current + 1
+          dirtyRef.current = false
+          window.clearTimeout(applyTimer.current)
+          applyTimer.current = 0
+          applyDelayRef.current = 0
+        }
+        settingsRef.current = next
+        appliedRef.current = next
+        setSettings(next)
         // The bar reports the video's current loop before playback is written.
         // Hold that report so this domain update is not copied back as a local edit.
         suppressDockMedia(LIGHT_APPLY_DELAY_MS + 280)
         if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
       }
-      const siteChange = changes[siteStorageKey(hostname)]
-      if (siteChange?.newValue != null) {
-        settingsSynced.current = true
-        siteOverrideRef.current = true
-        const incoming = normalizeSettings(siteChange.newValue, hostname)
+      const takeSiteSettings = (incoming: EffectSettings) => {
         const pending = inflightSaves.current
         const index = pending.findIndex((item) => settingsEqual(item, incoming))
         if (index >= 0) {
           inflightSaves.current = pending.slice(index + 1)
-        } else if (!settingsEqual(settingsRef.current, incoming)) {
-          adoptExternal(incoming)
+          if (!domainAheadRef.current) domainRef.current = incoming
+          if (inflightSaves.current.length === 0) domainAheadRef.current = false
+          noteEcho(incoming)
+          return
         }
+        if (inflightSaves.current.length > 0) domainAheadRef.current = true
+        domainRef.current = incoming
+        if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming)
+      }
+      const siteChange = changes[siteStorageKey(hostname)]
+      if (siteChange?.newValue != null) {
+        settingsSynced.current = true
+        siteOverrideRef.current = true
+        takeSiteSettings(normalizeSettings(siteChange.newValue, hostname))
       } else if (
         Object.prototype.hasOwnProperty.call(changes, GLOBAL_PRESET_KEY) &&
         !siteOverrideRef.current
       ) {
         settingsSynced.current = true
-        const incoming = settingsFromGlobalPreset(
-          readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue),
-          hostname
+        takeSiteSettings(
+          settingsFromGlobalPreset(readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue), hostname)
         )
-        if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming)
       }
       if (changes[SITE_POLICY_KEY]) {
         const incoming = sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue)
@@ -1018,6 +1086,8 @@ function Overlay() {
     const resolved: Partial<EffectSettings> =
       snapshotChanged && !applyingPreset ? { ...next, presetId: "" } : next
     const touchAudio = touchesAudio(resolved)
+    if (editsAudioGroup(resolved)) audioEditedRef.current = true
+    if (editsVideoGroup(resolved)) videoEditedRef.current = true
     tabMediaRef.current = releaseTabMedia(tabMediaRef.current, resolved)
     if (
       "volume" in resolved ||
@@ -1028,11 +1098,23 @@ function Overlay() {
       suppressDockMedia(LIGHT_APPLY_DELAY_MS + 280)
     }
     dirtyRef.current = true
+    const playbackTouched =
+      typeof resolved.playbackTouched === "boolean"
+        ? resolved.playbackTouched
+        : touchPlayback
+          ? true
+          : settingsRef.current.playbackTouched
+    const audioTouched =
+      typeof resolved.audioTouched === "boolean"
+        ? resolved.audioTouched
+        : touchAudio
+          ? true
+          : settingsRef.current.audioTouched
     const merged: EffectSettings = {
       ...settingsRef.current,
       ...resolved,
-      playbackTouched: touchPlayback ? true : settingsRef.current.playbackTouched,
-      audioTouched: touchAudio ? true : settingsRef.current.audioTouched
+      playbackTouched,
+      audioTouched
     }
     settingsRef.current = merged
     setSettings(merged)
@@ -1044,8 +1126,8 @@ function Overlay() {
       appliedRef.current = {
         ...appliedRef.current,
         ...resolved,
-        playbackTouched: touchPlayback ? true : appliedRef.current.playbackTouched,
-        audioTouched: touchAudio ? true : appliedRef.current.audioTouched
+        playbackTouched,
+        audioTouched
       }
       bridgeRef.current?.applyNow()
       if (!pendingDelay) return
@@ -1060,7 +1142,98 @@ function Overlay() {
     }, wait)
   }
 
+  const rememberSeen = (sample: Partial<SeenMedia>) => {
+    const panel = settingsRef.current
+    const prev = seenMediaRef.current
+    seenMediaRef.current = {
+      volume: sample.volume ?? prev?.volume ?? panel.volume,
+      muted: sample.muted ?? prev?.muted ?? panel.muted,
+      playbackRate:
+        sample.playbackRate !== undefined ? sample.playbackRate : (prev?.playbackRate ?? panel.playbackRate),
+      loop: sample.loop ?? prev?.loop ?? panel.loop
+    }
+  }
+
+  const seedSeenFromVideo = () => {
+    const video = getActiveVideo()
+    const panel = settingsRef.current
+    if (!video) {
+      seenMediaRef.current = null
+      return
+    }
+    const rate = video.playbackRate || 1
+    seenMediaRef.current = {
+      volume: video.volume,
+      muted: video.muted,
+      playbackRate: rate <= PLAYBACK_RATE_MAX && !echoedPlayerRate(video, rate) ? rate : panel.playbackRate,
+      loop: video.loop
+    }
+  }
+
+  const toggleCustomSync = () => {
+    const current = settingsRef.current
+    if (current.syncCustomController) {
+      seenMediaRef.current = null
+      patch({ syncCustomController: false })
+      return
+    }
+    const tab = tabMediaRef.current
+    const merged = mergeTabMedia(current, tab)
+    const next: Partial<EffectSettings> = { syncCustomController: true }
+    let touchPlayback = false
+    if (tabAudioOwned(tab)) {
+      next.volume = merged.volume
+      next.muted = merged.muted
+    }
+    if (tabRateOwned(tab)) {
+      next.playbackRate = merged.playbackRate
+      touchPlayback = true
+    }
+    if (tabLoopOwned(tab)) {
+      next.loop = merged.loop
+      touchPlayback = true
+    }
+    patch(next, touchPlayback, "now")
+    seedSeenFromVideo()
+  }
+
+  const setOpenTabSync = (flag: "syncOpenTabsAudio" | "syncOpenTabsVideo") => {
+    const current = settingsRef.current
+    if (current[flag]) {
+      patch({ [flag]: false })
+      return
+    }
+    const domain = domainRef.current
+    if (!domain) {
+      patch({ [flag]: true })
+      return
+    }
+    const keys = flag === "syncOpenTabsAudio" ? AUDIO_OPEN_TAB_KEYS : VIDEO_OPEN_TAB_KEYS
+    patch({ [flag]: true, presetId: domain.presetId, ...takeGroup(domain, keys) }, false, "now")
+    if (flag === "syncOpenTabsAudio") audioEditedRef.current = false
+    else videoEditedRef.current = false
+  }
+
   dockBridge.current.onControl = (control) => {
+    if (settingsRef.current.syncCustomController) {
+      if (control.type === "audio") {
+        const next: Partial<EffectSettings> = {}
+        if (typeof control.volume === "number") next.volume = control.volume
+        if (typeof control.muted === "boolean") next.muted = control.muted
+        if (!("volume" in next) && !("muted" in next)) return
+        rememberSeen(next)
+        patch(next, false, "now")
+        return
+      }
+      if (control.type === "rate") {
+        rememberSeen({ playbackRate: control.playbackRate })
+        patch({ playbackRate: control.playbackRate }, true, "now")
+        return
+      }
+      rememberSeen({ loop: control.loop })
+      patch({ loop: control.loop }, true, "now")
+      return
+    }
     const video = getActiveVideo()
     const panel = settingsRef.current
     let next = tabMediaRef.current
@@ -1092,8 +1265,64 @@ function Overlay() {
       ...(media.playbackRate !== null ? { playbackRate: media.playbackRate } : {}),
       loop: media.loop
     })
-    if (!drift) return
     const panel = settingsRef.current
+    if (panel.syncCustomController) {
+      const elementRate =
+        media.playbackRate !== null &&
+        media.playbackRate <= PLAYBACK_RATE_MAX &&
+        !echoedPlayerRate(video, media.playbackRate)
+          ? media.playbackRate
+          : null
+      const sample: SeenMedia = {
+        volume: typeof drift?.volume === "number" ? drift.volume : media.volume,
+        muted: typeof drift?.muted === "boolean" ? drift.muted : media.muted,
+        playbackRate: typeof drift?.playbackRate === "number" ? drift.playbackRate : elementRate,
+        loop: typeof drift?.loop === "boolean" ? drift.loop : media.loop
+      }
+      const seen = seenMediaRef.current
+      if (!seen) {
+        seenMediaRef.current = sample
+        return
+      }
+      const next: Partial<EffectSettings> = {}
+      let touchPlayback = false
+      const volumeMoved =
+        Math.abs(seen.volume - sample.volume) >= SEEN_VOLUME_EPS || seen.muted !== sample.muted
+      if (
+        volumeMoved &&
+        (Math.abs(panel.volume - sample.volume) >= SEEN_VOLUME_EPS || panel.muted !== sample.muted)
+      ) {
+        next.volume = sample.volume
+        next.muted = sample.muted
+      }
+      const rateMoved =
+        sample.playbackRate !== null &&
+        (seen.playbackRate === null || Math.abs(seen.playbackRate - sample.playbackRate) >= SEEN_RATE_EPS)
+      if (rateMoved && sample.playbackRate !== null && Math.abs(panel.playbackRate - sample.playbackRate) >= SEEN_RATE_EPS) {
+        next.playbackRate = sample.playbackRate
+        touchPlayback = true
+        if (!panel.playbackTouched && !("loop" in next)) next.loop = sample.loop
+      }
+      const loopMoved = seen.loop !== sample.loop
+      if (
+        loopMoved &&
+        panel.loop !== sample.loop &&
+        (sample.playbackRate !== null || panel.playbackTouched || typeof drift?.loop === "boolean")
+      ) {
+        next.loop = sample.loop
+        touchPlayback = true
+      }
+      seenMediaRef.current = {
+        volume: sample.volume,
+        muted: sample.muted,
+        playbackRate: sample.playbackRate !== null ? sample.playbackRate : seen.playbackRate,
+        loop: sample.loop
+      }
+      if (!("volume" in next) && !("muted" in next) && !("playbackRate" in next) && !("loop" in next)) return
+      patch(next, touchPlayback, "now")
+      return
+    }
+    if (!drift) return
     let next = tabMediaRef.current
     if (typeof drift.volume === "number" || typeof drift.muted === "boolean") {
       next = withTabAudio(next, drift.volume, drift.muted)
@@ -1963,6 +2192,51 @@ function Overlay() {
                     ))}
                   </div>
                 </Group>
+                <div className="vee-switch-row vee-switch-solo">
+                  <div>
+                    <span>Sync with custom controller</span>
+                    <small>
+                      On saves speed, volume, mute, and playback speed from the on-video bar and the site
+                      player into this panel. Off keeps those changes on this tab.
+                    </small>
+                  </div>
+                  <button
+                    className="vee-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.syncCustomController}
+                    aria-label="Sync with custom controller"
+                    title="On saves speed, volume, mute, and playback speed from the on-video bar and the site player into this panel. Off keeps those changes on this tab."
+                    data-on={String(settings.syncCustomController)}
+                    onClick={toggleCustomSync}>
+                    <i />
+                  </button>
+                </div>
+                <Group
+                  id="playback-open-tabs"
+                  title="Auto-sync already open tab"
+                  icon={RefreshCw}
+                  open={sectionOpen("playback-open-tabs")}
+                  onToggle={() => toggleSection("playback-open-tabs")}>
+                  <p className="vee-hint">
+                    On sends that kind of change to every open tab on this site. Off leaves tabs that are
+                    already open unchanged. A new tab or a refresh uses the saved change.
+                  </p>
+                  <SwitchRow
+                    icon={AudioLines}
+                    label="Audio"
+                    detail="Speed, volume, mute, and playback speed."
+                    checked={settings.syncOpenTabsAudio}
+                    onClick={() => setOpenTabSync("syncOpenTabsAudio")}
+                  />
+                  <SwitchRow
+                    icon={Video}
+                    label="Video"
+                    detail="Color, frame, position, and the other picture effects."
+                    checked={settings.syncOpenTabsVideo}
+                    onClick={() => setOpenTabSync("syncOpenTabsVideo")}
+                  />
+                </Group>
                 <Group
                   id="playback-hold"
                   title="Hold"
@@ -2561,17 +2835,22 @@ function SwitchRow({
   label,
   detail,
   checked,
-  onClick
+  onClick,
+  icon: Icon
 }: {
   label: string
   detail: string
   checked: boolean
   onClick: () => void
+  icon?: typeof Video
 }) {
   return (
     <div className="vee-switch-row">
       <div>
-        <span>{label}</span>
+        <span>
+          {Icon ? <Icon size={14} strokeWidth={1.75} /> : null}
+          {label}
+        </span>
         <small>{detail}</small>
       </div>
       <button

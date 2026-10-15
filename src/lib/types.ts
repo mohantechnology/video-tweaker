@@ -76,6 +76,21 @@ export type EffectSettings = ColorSettings & {
    * and the on/off switch leave the player loudness alone.
    */
   audioTouched: boolean
+  /**
+   * When true, speed, volume, mute, and loop from the on-video bar and the
+   * site player are saved into this panel. When false they stay on this tab.
+   */
+  syncCustomController: boolean
+  /**
+   * When true, sound and speed changes update every open tab on this site.
+   * When false, a tab that is already open keeps its sound until refresh.
+   */
+  syncOpenTabsAudio: boolean
+  /**
+   * When true, picture changes update every open tab on this site.
+   * When false, a tab that is already open keeps its picture until refresh.
+   */
+  syncOpenTabsVideo: boolean
   presetId: string
   rememberProgress: boolean
   videoEnabled: boolean
@@ -365,6 +380,9 @@ export function defaultSettings(): EffectSettings {
     loop: false,
     playbackTouched: false,
     audioTouched: false,
+    syncCustomController: false,
+    syncOpenTabsAudio: false,
+    syncOpenTabsVideo: true,
     presetId: "default",
     rememberProgress: true,
     videoEnabled: true,
