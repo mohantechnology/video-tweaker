@@ -1172,7 +1172,11 @@ async function loadYoutubeFile(url: string): Promise<Uint8Array> {
     if (!safe) continue
     for (const credentials of ["include", "omit"] as const) {
       try {
-        const response = await ytNativeFetch.call(window, safe, { credentials, referrer: location.href })
+        const response = await ytNativeFetch.call(window, safe, {
+          credentials,
+          referrer: location.href,
+          signal: AbortSignal.timeout(45_000)
+        })
         if (!response.ok) throw new Error(String(response.status))
         const length = Number(response.headers.get("content-length") || "")
         if (Number.isFinite(length) && length > 500_000_000) throw new Error("large")
@@ -1185,6 +1189,57 @@ async function loadYoutubeFile(url: string): Promise<Uint8Array> {
     }
   }
   throw last instanceof Error ? last : new Error("media")
+}
+
+function trackStamp(): string {
+  return ytTracks.map((track) => `${track.itag}:${track.url}`).join("|")
+}
+
+function waitForTracks(before: string, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const started = performance.now()
+    const timer = window.setInterval(() => {
+      if (trackStamp() !== before || performance.now() - started >= ms) {
+        window.clearInterval(timer)
+        resolve()
+      }
+    }, 250)
+  })
+}
+
+async function loadYoutubeDownload(request: {
+  combinedUrl: string
+  videoUrl: string
+  audioUrl: string
+}): Promise<Uint8Array> {
+  try {
+    return await assembleDownload(request, loadYoutubeFile)
+  } catch {
+    /* A signed address can be rejected until the player refreshes it. */
+  }
+  const before = trackStamp()
+  ytPlayerAsked = ""
+  ytPlayerTries = 0
+  readYoutubeGlobals()
+  readYoutubeScripts()
+  requestPlayerFile(true)
+  await waitForTracks(before, 6000)
+  const offer = downloadOffer(ytVideoId, ytTitle, ytLive, ytTracks)
+  if (!offer.combinedUrl && !(offer.videoUrl && offer.audioUrl)) throw new Error("media")
+  return assembleDownload(
+    { combinedUrl: offer.combinedUrl, videoUrl: offer.videoUrl, audioUrl: offer.audioUrl },
+    loadYoutubeFile
+  )
+}
+
+function deliverVideo(bytes: Uint8Array, filename: string, token: string): void {
+  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  if (copy.byteLength > 120 * 1024 * 1024) {
+    saveVideoBlob(bytes, filename)
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token, ok: true }, "*")
+    return
+  }
+  window.postMessage({ source: YT_MEDIA_SOURCE, kind: "file", token, filename, buffer: copy }, "*")
 }
 
 function saveVideoBlob(bytes: Uint8Array, filename: string): void {
@@ -1204,9 +1259,8 @@ async function onYoutubeSave(data: unknown): Promise<void> {
   const request = readYtSaveRequest(data)
   if (!request) return
   try {
-    const bytes = await assembleDownload(request, loadYoutubeFile)
-    saveVideoBlob(bytes, request.filename)
-    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: true }, "*")
+    const bytes = await loadYoutubeDownload(request)
+    deliverVideo(bytes, request.filename, request.token)
   } catch {
     window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: false }, "*")
   }

@@ -317,6 +317,15 @@ export function readYtSaveResult(data: unknown): { token: string; ok: boolean } 
   return { token, ok: data.ok }
 }
 
+export function readYtFile(data: unknown): { token: string; filename: string; buffer: ArrayBuffer } | null {
+  if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "file") return null
+  const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
+  const filename = typeof data.filename === "string" && FILENAME.test(data.filename) ? data.filename : ""
+  const buffer = data.buffer instanceof ArrayBuffer ? data.buffer : null
+  if (!token || !filename || !buffer || buffer.byteLength < 16 || buffer.byteLength > MAX_FILE_BYTES) return null
+  return { token, filename, buffer }
+}
+
 export function readYtFetchRequest(data: unknown): { token: string; url: string } | null {
   if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "fetch") return null
   const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
@@ -468,6 +477,22 @@ export function youtubeMediaSelfCheck(): string[] {
   if (badSave) errors.push("reject bad save")
   const saved = readYtSaveResult({ source: YT_MEDIA_SOURCE, kind: "saved", token: "abcd1234", ok: true })
   if (!saved?.ok) errors.push("save result")
+  const file = readYtFile({
+    source: YT_MEDIA_SOURCE,
+    kind: "file",
+    token: "abcd1234",
+    filename: "Sample.mp4",
+    buffer: new ArrayBuffer(16)
+  })
+  if (!file || file.filename !== "Sample.mp4" || file.buffer.byteLength !== 16) errors.push("file message")
+  const badFile = readYtFile({
+    source: YT_MEDIA_SOURCE,
+    kind: "file",
+    token: "abcd1234",
+    filename: "../x.mp4",
+    buffer: new ArrayBuffer(16)
+  })
+  if (badFile) errors.push("reject bad file")
   return errors
 }
 

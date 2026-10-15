@@ -9,7 +9,9 @@ import {
   readVideoTitle
 } from "./domains"
 import { directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath } from "./media-file"
+import { isIsoBmff } from "./mp4-mux"
 import {
+  readYtFile,
   readYtOffer,
   readYtSaveResult,
   youtubeVideoId,
@@ -208,6 +210,23 @@ const BAR_STYLE = `
 }
 #${SEEK_BAR_ID} .vee-chrome-btn svg {
   display: block;
+}
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"] {
+  position: relative;
+}
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"][data-busy="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: vee-download-spin 0.75s linear infinite;
+}
+@keyframes vee-download-spin {
+  to { transform: rotate(360deg); }
 }
 #${SEEK_BAR_ID} .vee-chrome-time {
   padding: 0 4px;
@@ -1111,7 +1130,7 @@ function armChromeHide(): void {
 
 function hideChromeIfIdle(): void {
   if (!root) return
-  if (dragging || volumeDrag || speedDrag || root.matches(":hover")) {
+  if (dragging || volumeDrag || speedDrag || downloadBusy || root.matches(":hover")) {
     armChromeHide()
     return
   }
@@ -1238,18 +1257,22 @@ function actFromTarget(target: EventTarget | null): { act: string; node: HTMLEle
   return null
 }
 
+function downloadHit(event: MouseEvent): boolean {
+  if (actFromTarget(event.target)?.act === "download") return true
+  const top = document.elementFromPoint(event.clientX, event.clientY)
+  return actFromTarget(top)?.act === "download"
+}
+
 function onWindowActDown(event: PointerEvent): void {
-  const hit = actFromTarget(event.target)
-  if (!hit) return
-  if (hit.act === "download") {
-    if (event.button !== 0 || !event.isPrimary) return
-    event.preventDefault()
+  if (event.button === 0 && downloadHit(event)) {
     event.stopPropagation()
     event.stopImmediatePropagation()
     showChrome()
     void downloadCurrent()
     return
   }
+  const hit = actFromTarget(event.target)
+  if (!hit) return
   event.preventDefault()
   event.stopPropagation()
   event.stopImmediatePropagation()
@@ -1273,7 +1296,22 @@ function onWindowActMove(event: PointerEvent): void {
   applySpeedFromPointer(event)
 }
 
+function onWindowActClick(event: MouseEvent): void {
+  if (!downloadHit(event)) return
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+  if (downloadBusy) return
+  showChrome()
+  void downloadCurrent()
+}
+
 function onWindowActUp(event: PointerEvent): void {
+  if (!actPointer && event.button === 0 && downloadHit(event)) {
+    event.stopPropagation()
+    event.stopImmediatePropagation()
+    return
+  }
   const pending = actPointer
   if (!pending || pending.id !== event.pointerId) return
   actPointer = null
@@ -2382,6 +2420,34 @@ function askYoutubeOffer(): void {
   window.postMessage({ source: YT_MEDIA_SOURCE, kind: "ask" }, "*")
 }
 
+function resolveYoutubeOffer(): Promise<YtOffer | null> {
+  if (domainSkin(location.hostname, location.pathname) !== "youtube") return Promise.resolve(null)
+  const ready = youtubeOfferForPage()
+  if (ready) return Promise.resolve(ready)
+  askYoutubeOffer()
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (offer: YtOffer | null) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      window.removeEventListener("message", onMessage)
+      resolve(offer)
+    }
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return
+      const offer = readYtOffer(event.data)
+      if (!offer || offer.live || offer.videoId !== youtubeVideoId(location.href)) return
+      if (youtubeBlocked(boundVideo)) return
+      if (!offer.combinedUrl && !(offer.videoUrl && offer.audioUrl)) return
+      finish(offer)
+    }
+    const timer = window.setTimeout(() => finish(youtubeOfferForPage()), 3000)
+    window.addEventListener("message", onMessage)
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "refresh" }, "*")
+  })
+}
+
 function youtubeToken(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9]/gi, "").slice(0, 32).padEnd(8, "0")
 }
@@ -3060,49 +3126,136 @@ function onQualityResult(message: RenditionMessage): void {
   paintControls()
 }
 
-async function downloadCurrent(): Promise<void> {
-  if (downloadBusy) return
-  const offer = youtubeOfferForPage()
-  if (offer) {
-    if (!downloadBtn) return
-    downloadBusy = true
-    markAct()
-    downloadBtn.title = "Downloading"
-    try {
-      let current = offer
-      let saved = await saveYoutubeOffer(current)
-      if (!saved) {
-        const next = await refreshPlayerOffer(current.combinedUrl || current.videoUrl)
-        if (next) {
-          current = next
-          saved = await saveYoutubeOffer(current)
-        }
-      }
-      if (downloadBtn) downloadBtn.title = saved ? "Download started" : "Could not save this video"
-    } catch {
-      if (downloadBtn) downloadBtn.title = "Could not save this video"
-    } finally {
-      downloadBusy = false
-    }
-    return
-  }
-  const url = fileForDownload(boundVideo)
-  if (!url || !downloadBtn) return
+function armDownload(): void {
   downloadBusy = true
   markAct()
+  if (!downloadBtn) return
+  downloadBtn.dataset.busy = "true"
+  downloadBtn.setAttribute("aria-busy", "true")
+  downloadBtn.setAttribute("aria-label", "Downloading")
   downloadBtn.title = "Downloading"
+}
+
+function finishDownload(message: string): void {
+  downloadBusy = false
+  if (!downloadBtn) return
+  delete downloadBtn.dataset.busy
+  downloadBtn.setAttribute("aria-busy", "false")
+  downloadBtn.setAttribute("aria-label", "Download")
+  downloadBtn.title = message
+}
+
+async function downloadCurrent(): Promise<void> {
+  if (downloadBusy || !downloadBtn) return
+  armDownload()
+  let message = "Could not save this video"
   try {
+    if (domainSkin(location.hostname, location.pathname) === "youtube") {
+      const offer = (await resolveYoutubeOffer()) ?? youtubeOfferForPage()
+      if (offer) {
+        let saved = await saveYoutubeOffer(offer)
+        if (!saved) {
+          const next = await refreshPlayerOffer(offer.combinedUrl || offer.videoUrl)
+          if (next) saved = await saveYoutubeOffer(next)
+        }
+        message = saved ? "Download started" : "Could not save this video"
+        return
+      }
+    }
+    const url = fileForDownload(boundVideo)
+    if (!url) return
     const response = await chrome.runtime.sendMessage({
       type: DOWNLOAD_MESSAGE,
       url,
       title: downloadTitle(boundVideo)
     })
-    downloadBtn.title = response?.ok ? "Download started" : "Could not save this video"
+    message = response?.ok ? "Download started" : "Could not save this video"
   } catch {
-    downloadBtn.title = "Could not save this video"
+    message = "Could not save this video"
   } finally {
-    downloadBusy = false
+    finishDownload(message)
   }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const parts: string[] = []
+  const chunk = 0x8000
+  for (let index = 0; index < bytes.length; index += chunk) {
+    const slice = bytes.subarray(index, index + chunk)
+    parts.push(String.fromCharCode.apply(null, slice as unknown as number[]))
+  }
+  return btoa(parts.join(""))
+}
+
+function saveAnchor(bytes: Uint8Array, filename: string): void {
+  const blob = new Blob([bytes], { type: "video/mp4" })
+  const href = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = href
+  link.download = filename
+  link.rel = "noopener"
+  document.documentElement.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(href), 60_000)
+}
+
+function watchDownload(id: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const done = (delta: chrome.downloads.DownloadDelta) => {
+      if (delta.id !== id || !delta.state?.current) return
+      if (delta.state.current !== "complete" && delta.state.current !== "interrupted") return
+      chrome.downloads.onChanged.removeListener(done)
+      resolve(delta.state.current === "complete")
+    }
+    chrome.downloads.onChanged.addListener(done)
+  })
+}
+
+function storeDownload(buffer: ArrayBuffer, filename: string): Promise<boolean> {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.byteLength < 16 || !isIsoBmff(bytes)) return Promise.resolve(false)
+  let url = ""
+  try {
+    url = `data:video/mp4;base64,${bytesToBase64(bytes)}`
+  } catch {
+    saveAnchor(bytes, filename)
+    return Promise.resolve(true)
+  }
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = 0
+    const finish = (saved: boolean) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      if (!saved) saveAnchor(bytes, filename)
+      resolve(true)
+    }
+    timer = window.setTimeout(() => finish(false), 20_000)
+    try {
+      chrome.downloads.download({ url, filename, conflictAction: "uniquify" }, (id) => {
+        if (chrome.runtime.lastError || typeof id !== "number") {
+          finish(false)
+          return
+        }
+        chrome.downloads.search({ id }, (items) => {
+          const state = items?.[0]?.state
+          if (state === "complete") {
+            finish(true)
+            return
+          }
+          if (state === "interrupted") {
+            finish(false)
+            return
+          }
+          void watchDownload(id).then((saved) => finish(saved))
+        })
+      })
+    } catch {
+      finish(false)
+    }
+  })
 }
 
 function saveYoutubeOffer(offer: YtOffer): Promise<boolean> {
@@ -3115,6 +3268,13 @@ function saveYoutubeOffer(offer: YtOffer): Promise<boolean> {
     }, 180_000)
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return
+      const file = readYtFile(event.data)
+      if (file && file.token === token) {
+        window.clearTimeout(timer)
+        window.removeEventListener("message", onMessage)
+        void storeDownload(file.buffer, file.filename).then(resolve)
+        return
+      }
       const saved = readYtSaveResult(event.data)
       if (!saved || saved.token !== token) return
       window.clearTimeout(timer)
@@ -4190,7 +4350,7 @@ function ensureBar(): HTMLDivElement {
   })
   downloadBtn?.addEventListener("click", (event) => {
     stopAct(event)
-    if (recentAct()) return
+    if (downloadBusy) return
     void downloadCurrent()
   })
   const openQuality = () => {
@@ -4627,6 +4787,7 @@ export function stopSeekBar(): void {
   document.removeEventListener("pointercancel", onPointerUp, true)
   document.removeEventListener("pointerdown", onDocPointerDown, true)
   window.removeEventListener("pointerdown", onWindowActDown, true)
+  window.removeEventListener("click", onWindowActClick, true)
   window.removeEventListener("pointermove", onWindowActMove, true)
   window.removeEventListener("pointerup", onWindowActUp, true)
   window.removeEventListener("pointercancel", onWindowActUp, true)
@@ -4746,6 +4907,7 @@ export function startSeekBar(options: {
   document.addEventListener("pointercancel", onPointerUp, true)
   document.addEventListener("pointerdown", onDocPointerDown, true)
   window.addEventListener("pointerdown", onWindowActDown, true)
+  window.addEventListener("click", onWindowActClick, true)
   window.addEventListener("pointermove", onWindowActMove, true)
   window.addEventListener("pointerup", onWindowActUp, true)
   window.addEventListener("pointercancel", onWindowActUp, true)
