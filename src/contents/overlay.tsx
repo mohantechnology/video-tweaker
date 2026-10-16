@@ -288,6 +288,12 @@ const DOCK_PICKS: {
     icon: Download
   },
   {
+    key: "dockAudio",
+    label: "Audio",
+    title: "Save only the sound of this video as an M4A file",
+    icon: AudioLines
+  },
+  {
     key: "dockQuality",
     label: "Resolution",
     title: "Choose a resolution when the page already lists more than one",
@@ -308,6 +314,7 @@ const DOCK_PLACE_BY_KEY: Record<DockPickKey, DockPlaceId> = {
   dockPip: "pip",
   dockFullscreen: "fullscreen",
   dockDownload: "download",
+  dockAudio: "audio",
   dockQuality: "quality",
   dockSkip: "skip"
 }

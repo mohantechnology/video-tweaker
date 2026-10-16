@@ -1,6 +1,6 @@
 /** Streams YouTube already opened for a watch page or a Short. */
 
-import { isIsoBmff, muxAvcAac } from "./mp4-mux"
+import { audioOnlyFile, isIsoBmff, muxAvcAac } from "./mp4-mux"
 
 export const YT_MEDIA_SOURCE = "vee-youtube-media"
 
@@ -245,6 +245,29 @@ export function downloadOffer(videoId: string, title: string, live: boolean, tra
   return { ...empty, live: false, videoUrl: pick.videoUrl, audioUrl: pick.audioUrl }
 }
 
+/** AAC file when one is open, otherwise the combined file the sound can be taken from. */
+export function audioDownloadOffer(
+  videoId: string,
+  title: string,
+  live: boolean,
+  tracks: readonly YtTrack[]
+): { videoId: string; title: string; live: boolean; audioUrl: string; combinedUrl: string } {
+  const empty = { videoId, title, live, audioUrl: "", combinedUrl: "" }
+  if (!videoId || live) return empty
+  const audios = tracks.filter((track) => track.url && !track.muxed && isAac(track))
+  const audio = bestAudio(audios.filter((track) => track.played)) || bestAudio(audios)
+  const files = tracks.filter((track) => track.url && track.muxed && track.hasAudio && track.mime === "video/mp4")
+  const combined = bestFile(files.filter((track) => track.played)) || bestFile(files)
+  if (!audio && !combined) return empty
+  return {
+    videoId,
+    title,
+    live: false,
+    audioUrl: audio?.url || "",
+    combinedUrl: combined?.url || ""
+  }
+}
+
 export function readYtAsk(data: unknown): boolean {
   return isRecord(data) && data.source === YT_MEDIA_SOURCE && data.kind === "ask"
 }
@@ -310,6 +333,20 @@ export function readYtSaveRequest(
   return { token, filename, combinedUrl, videoUrl, audioUrl }
 }
 
+export function readYtAudioSaveRequest(
+  data: unknown
+): { token: string; filename: string; audioUrl: string; combinedUrl: string } | null {
+  if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "audio") return null
+  const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
+  const filename = typeof data.filename === "string" && FILENAME.test(data.filename) ? data.filename : ""
+  if (!token || !filename || !filename.toLowerCase().endsWith(".m4a")) return null
+  const audioUrl = optionalPlayback(data.audioUrl)
+  const combinedUrl = optionalPlayback(data.combinedUrl)
+  if (audioUrl == null || combinedUrl == null) return null
+  if (!audioUrl && !combinedUrl) return null
+  return { token, filename, audioUrl, combinedUrl }
+}
+
 export function readYtSaveResult(data: unknown): { token: string; ok: boolean } | null {
   if (!isRecord(data) || data.source !== YT_MEDIA_SOURCE || data.kind !== "saved") return null
   const token = typeof data.token === "string" && TOKEN.test(data.token) ? data.token : ""
@@ -359,6 +396,29 @@ export async function assembleDownload(
   const audio = await fetchBytes(request.audioUrl)
   if (!isIsoBmff(video) || !isIsoBmff(audio)) throw new Error("media")
   return muxAvcAac(video, audio)
+}
+
+/** AAC track when it can be fetched, otherwise the sound inside the combined file. */
+export async function assembleAudio(
+  request: { audioUrl: string; combinedUrl: string },
+  fetchBytes: (url: string) => Promise<Uint8Array>
+): Promise<Uint8Array> {
+  let last: unknown = new Error("media")
+  if (request.audioUrl) {
+    try {
+      return audioOnlyFile(await fetchBytes(request.audioUrl))
+    } catch (error) {
+      last = error
+    }
+  }
+  if (request.combinedUrl && request.combinedUrl !== request.audioUrl) {
+    try {
+      return audioOnlyFile(await fetchBytes(request.combinedUrl))
+    } catch (error) {
+      last = error
+    }
+  }
+  throw last instanceof Error ? last : new Error("media")
 }
 
 export function youtubeMediaSelfCheck(): string[] {
@@ -426,6 +486,16 @@ export function youtubeMediaSelfCheck(): string[] {
     played.filter((track) => track.itag !== 18)
   )
   if (pair.combinedUrl || !pair.videoUrl.includes("itag=137") || !pair.audioUrl.includes("sig=sound")) errors.push("played pair")
+  const sound = audioDownloadOffer("dQw4w9WgXcQ", "Sample", false, played)
+  if (!sound.audioUrl.includes("itag=140") || !sound.combinedUrl.includes("itag=18")) errors.push("audio offer")
+  const combinedOnly = audioDownloadOffer(
+    "dQw4w9WgXcQ",
+    "Sample",
+    false,
+    played.filter((track) => track.itag === 18)
+  )
+  if (combinedOnly.audioUrl || !combinedOnly.combinedUrl.includes("itag=18")) errors.push("audio from combined")
+  if (audioDownloadOffer("dQw4w9WgXcQ", "Sample", true, played).audioUrl) errors.push("live audio")
   const onlyCombined = downloadOffer("dQw4w9WgXcQ", "Sample", false, player?.tracks || [])
   if (!onlyCombined.combinedUrl.includes("itag=18")) errors.push("combined fallback")
   const tall = downloadOffer("dQw4w9WgXcQ", "Sample", false, [
@@ -475,6 +545,24 @@ export function youtubeMediaSelfCheck(): string[] {
     audioUrl: ""
   })
   if (badSave) errors.push("reject bad save")
+  const audioSave = readYtAudioSaveRequest({
+    source: YT_MEDIA_SOURCE,
+    kind: "audio",
+    token: "abcd1234",
+    filename: "Sample.m4a",
+    audioUrl: "https://rr1.googlevideo.com/videoplayback?expire=1&itag=140&sig=sound",
+    combinedUrl: ""
+  })
+  if (!audioSave || !audioSave.audioUrl.includes("itag=140") || audioSave.combinedUrl) errors.push("audio save")
+  const badAudio = readYtAudioSaveRequest({
+    source: YT_MEDIA_SOURCE,
+    kind: "audio",
+    token: "abcd1234",
+    filename: "Sample.mp3",
+    audioUrl: "javascript:alert(1)",
+    combinedUrl: ""
+  })
+  if (badAudio) errors.push("reject bad audio save")
   const saved = readYtSaveResult({ source: YT_MEDIA_SOURCE, kind: "saved", token: "abcd1234", ok: true })
   if (!saved?.ok) errors.push("save result")
   const file = readYtFile({

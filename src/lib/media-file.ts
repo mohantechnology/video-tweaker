@@ -3,7 +3,9 @@
 export const DOWNLOAD_MESSAGE = "VEE_DOWNLOAD"
 export const SAVE_BYTES_MESSAGE = "VEE_SAVE_BYTES"
 
-const MEDIA_EXTENSIONS = ["mp4", "webm", "mkv", "mov", "m4v", "ogv", "ogg"] as const
+const MEDIA_EXTENSIONS = ["mp4", "m4a", "webm", "mkv", "mov", "m4v", "ogv", "ogg"] as const
+
+export const AUDIO_EXTRACT_MESSAGE = "VEE_AUDIO"
 
 /** Http or https file address. Playlists and non-file schemes are not a video file. */
 export function fileUrl(value: string): string | null {
@@ -46,14 +48,19 @@ function mediaExtension(url: string): string {
 }
 
 /** Title plus a file extension chrome.downloads will accept. */
-export function downloadFilename(title: string, file: string): string {
+export function downloadFilename(title: string, file: string, fallback = "video"): string {
   let base = title
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^\p{L}\p{N}\s.'-]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
-  if (!base) base = "video"
+  if (!base) base = fallback
   if (base.length > 80) base = base.slice(0, 80).trim()
-  return `${base || "video"}.${mediaExtension(file)}`
+  return `${base || fallback}.${mediaExtension(file)}`
+}
+
+/** AAC sound from a video, saved with the extension players already open. */
+export function audioFilename(title: string): string {
+  return downloadFilename(title, "https://example.com/track.m4a", "audio")
 }

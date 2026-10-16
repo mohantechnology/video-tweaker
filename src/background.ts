@@ -1,5 +1,6 @@
 import { FRAME_SAMPLE_MESSAGE, measurePixels, type HistogramBins } from "~lib/luminance"
-import { DOWNLOAD_MESSAGE, downloadFilename, fileUrl, SAVE_BYTES_MESSAGE } from "~lib/media-file"
+import { AUDIO_EXTRACT_MESSAGE, audioFilename, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, SAVE_BYTES_MESSAGE } from "~lib/media-file"
+import { audioOnlyFile, isIsoBmff } from "~lib/mp4-mux"
 import {
   AD_BLOCK_CANCELLED,
   AD_BLOCK_CHECK,
@@ -95,6 +96,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     void allowPlaybackReferrer()
       .then(() => downloadRemote(url, downloadFilename(title, url)))
       .then((ok) => sendResponse({ ok }))
+    return true
+  }
+  if (type === AUDIO_EXTRACT_MESSAGE) {
+    const title = String((message as { title?: string }).title ?? "")
+    const urls = readAudioUrls((message as { urls?: unknown }).urls)
+    if (!urls.length) {
+      sendResponse({ ok: false })
+      return
+    }
+    void extractAndSaveAudio(urls, audioFilename(title)).then((saved) => sendResponse(saved))
     return true
   }
   if (type === SAVE_BYTES_MESSAGE) {
@@ -252,6 +263,92 @@ async function allowPlaybackReferrer(): Promise<void> {
     })
   } catch {
     /* A download can still be fetched by the page. */
+  }
+}
+
+function audioFetchInit(url: string): RequestInit {
+  const init: RequestInit = { credentials: "include", signal: AbortSignal.timeout(120_000) }
+  try {
+    const host = new URL(url).hostname
+    if (host.endsWith("cdninstagram.com") || host.endsWith("fbcdn.net") || host.endsWith("instagram.com")) {
+      init.referrer = "https://www.instagram.com/"
+    }
+  } catch {
+    /* fileUrl already checked the address. */
+  }
+  return init
+}
+
+function readAudioUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const urls: string[] = []
+  for (const item of value) {
+    if (urls.length >= 6) break
+    if (typeof item !== "string") continue
+    const url = fileUrl(item)
+    if (!url || urls.includes(url)) continue
+    urls.push(url)
+  }
+  return urls
+}
+
+async function extractAndSaveAudio(
+  urls: string[],
+  filename: string
+): Promise<{ ok: boolean; buffer?: ArrayBuffer }> {
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, audioFetchInit(url))
+      if (!response.ok) continue
+      const length = Number(response.headers.get("content-length") || "")
+      if (Number.isFinite(length) && (length < 16 || length > 500_000_000)) continue
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (bytes.byteLength < 16 || bytes.byteLength > 500_000_000 || !isIsoBmff(bytes)) continue
+      const audio = audioOnlyFile(bytes)
+      if (await saveAudioFile(audio, filename)) return { ok: true }
+      if (audio.byteLength > 48_000_000) return { ok: false }
+      const buffer = new ArrayBuffer(audio.byteLength)
+      new Uint8Array(buffer).set(audio)
+      return { ok: false, buffer }
+    } catch {
+      /* The next address may still be a file with a sound track. */
+    }
+  }
+  return { ok: false }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const parts: string[] = []
+  const chunk = 0x8000
+  for (let index = 0; index < bytes.length; index += chunk) {
+    const slice = bytes.subarray(index, index + chunk)
+    parts.push(String.fromCharCode.apply(null, slice as unknown as number[]))
+  }
+  return btoa(parts.join(""))
+}
+
+async function saveAudioFile(bytes: Uint8Array, filename: string): Promise<boolean> {
+  if (await saveBlobAudio(bytes, filename)) return true
+  if (bytes.byteLength > 32_000_000) return false
+  try {
+    return await downloadRemote(`data:audio/mp4;base64,${bytesToBase64(bytes)}`, filename)
+  } catch {
+    return false
+  }
+}
+
+async function saveBlobAudio(bytes: Uint8Array, filename: string): Promise<boolean> {
+  let url = ""
+  try {
+    url = URL.createObjectURL(new Blob([bytes], { type: "audio/mp4" }))
+  } catch {
+    return false
+  }
+  try {
+    return await downloadRemote(url, filename)
+  } finally {
+    const current = url
+    setTimeout(() => URL.revokeObjectURL(current), 60_000)
   }
 }
 

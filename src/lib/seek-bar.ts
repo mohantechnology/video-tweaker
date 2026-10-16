@@ -8,7 +8,7 @@ import {
   domainSkin,
   readVideoTitle
 } from "./domains"
-import { directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath } from "./media-file"
+import { AUDIO_EXTRACT_MESSAGE, audioFilename, directMediaUrl, DOWNLOAD_MESSAGE, downloadFilename, fileUrl, mediaPath } from "./media-file"
 import { isIsoBmff } from "./mp4-mux"
 import {
   readYtFile,
@@ -214,10 +214,11 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-chrome-btn svg {
   display: block;
 }
-#${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"] {
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"],
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="audio"] {
   position: relative;
 }
-#${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"][data-busy="true"]::after {
+#${SEEK_BAR_ID} .vee-chrome-btn[data-busy="true"]::after {
   content: "";
   position: absolute;
   inset: 2px;
@@ -893,6 +894,8 @@ const ICON_EXIT_FULL =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
 const ICON_DOWNLOAD =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>'
+const ICON_AUDIO =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor" stroke="none"/><circle cx="16.5" cy="16" r="2.5" fill="currentColor" stroke="none"/></svg>'
 const ICON_MOUSE =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></svg>'
 const ICON_QUALITY =
@@ -928,6 +931,7 @@ let volumeInput: HTMLInputElement | null = null
 let loopBtn: HTMLButtonElement | null = null
 let pipBtn: HTMLButtonElement | null = null
 let downloadBtn: HTMLButtonElement | null = null
+let audioBtn: HTMLButtonElement | null = null
 let qualityAnchor: HTMLDivElement | null = null
 let qualityBtn: HTMLButtonElement | null = null
 let qualityPop: HTMLDivElement | null = null
@@ -967,6 +971,7 @@ let controlsObserver: MutationObserver | null = null
 let playerObserver: MutationObserver | null = null
 let suppressingControls = false
 let downloadBusy = false
+let audioBusy = false
 let ytOffer: YtOffer | null = null
 let layoutStamp = ""
 let shownMediaStamp = ""
@@ -1311,26 +1316,34 @@ function actFromTarget(target: EventTarget | null): { act: string; node: HTMLEle
     act === "speed-minus" ||
     act === "speed-plus" ||
     act === "speed-hold" ||
-    act === "download"
+    act === "download" ||
+    act === "audio"
   ) {
     return { act, node }
   }
   return null
 }
 
-function downloadHit(event: MouseEvent): boolean {
-  if (actFromTarget(event.target)?.act === "download") return true
+function saveAct(event: MouseEvent): "download" | "audio" | "" {
+  const direct = actFromTarget(event.target)?.act || ""
+  if (direct === "download" || direct === "audio") return direct
   const top = document.elementFromPoint(event.clientX, event.clientY)
-  return actFromTarget(top)?.act === "download"
+  const over = actFromTarget(top)?.act || ""
+  if (over === "download" || over === "audio") return over
+  return ""
 }
 
 function onWindowActDown(event: PointerEvent): void {
-  if (event.button === 0 && downloadHit(event)) {
-    event.stopPropagation()
-    event.stopImmediatePropagation()
-    showChrome()
-    void downloadCurrent()
-    return
+  if (event.button === 0) {
+    const saving = saveAct(event)
+    if (saving) {
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+      showChrome()
+      if (saving === "audio") void downloadAudio()
+      else void downloadCurrent()
+      return
+    }
   }
   const hit = actFromTarget(event.target)
   if (!hit) return
@@ -1358,17 +1371,19 @@ function onWindowActMove(event: PointerEvent): void {
 }
 
 function onWindowActClick(event: MouseEvent): void {
-  if (!downloadHit(event)) return
+  const saving = saveAct(event)
+  if (!saving) return
   event.preventDefault()
   event.stopPropagation()
   event.stopImmediatePropagation()
-  if (downloadBusy) return
+  if (saving === "audio" ? audioBusy : downloadBusy) return
   showChrome()
-  void downloadCurrent()
+  if (saving === "audio") void downloadAudio()
+  else void downloadCurrent()
 }
 
 function onWindowActUp(event: PointerEvent): void {
-  if (!actPointer && event.button === 0 && downloadHit(event)) {
+  if (!actPointer && event.button === 0 && saveAct(event)) {
     event.stopPropagation()
     event.stopImmediatePropagation()
     return
@@ -1909,6 +1924,8 @@ function controlShown(id: DockPlaceId, settings: EffectSettings): boolean {
       return settings.dockPip && document.pictureInPictureEnabled
     case "download":
       return settings.dockDownload && fileForDownload(boundVideo) != null
+    case "audio":
+      return settings.dockAudio && audioAvailable(boundVideo)
     case "quality":
       return settings.dockQuality && qualityShown(boundVideo)
     case "fullscreen":
@@ -2571,6 +2588,34 @@ function fileForDownload(video: HTMLVideoElement | null): string | null {
   return sortRenditions(group)[0]?.url || null
 }
 
+function audioAvailable(video: HTMLVideoElement | null): boolean {
+  if (domainSkin(location.hostname, location.pathname) === "youtube") return youtubeOfferForPage() != null
+  return audioCandidates(video).length > 0
+}
+
+function audioCandidates(video: HTMLVideoElement | null): string[] {
+  const found: string[] = []
+  const add = (value: string | undefined) => {
+    const url = value ? fileUrl(value) : null
+    if (!url || found.includes(url)) return
+    found.push(url)
+  }
+  if (!video || domainSkin(location.hostname, location.pathname) === "youtube") return found
+  const group = matchedGroup(video)
+  const active = group.length ? activeRendition(video, group) : undefined
+  add(active?.soundtrack)
+  add(active?.audioUrl)
+  for (const item of group) {
+    add(item.soundtrack)
+    add(item.audioUrl)
+  }
+  add(fileForDownload(video) || undefined)
+  add(directMediaUrl(video) || undefined)
+  const remembered = rememberedSrc.get(video)
+  add(remembered)
+  return found.slice(0, 6)
+}
+
 function paintQuality(video: HTMLVideoElement): void {
   const choices = choicesFor(video)
   const active = activeRendition(video, choices)
@@ -3226,23 +3271,41 @@ function onQualityResult(message: RenditionMessage): void {
   paintControls()
 }
 
+function setSaveBusy(button: HTMLButtonElement | null, busy: boolean, idleLabel: string, message: string): void {
+  if (!button) return
+  if (busy) {
+    button.dataset.busy = "true"
+    button.setAttribute("aria-busy", "true")
+    button.setAttribute("aria-label", "Downloading")
+    button.title = "Downloading"
+    return
+  }
+  delete button.dataset.busy
+  button.setAttribute("aria-busy", "false")
+  button.setAttribute("aria-label", idleLabel)
+  button.title = message
+}
+
 function armDownload(): void {
   downloadBusy = true
   markAct()
-  if (!downloadBtn) return
-  downloadBtn.dataset.busy = "true"
-  downloadBtn.setAttribute("aria-busy", "true")
-  downloadBtn.setAttribute("aria-label", "Downloading")
-  downloadBtn.title = "Downloading"
+  setSaveBusy(downloadBtn, true, "Download", "Downloading")
 }
 
 function finishDownload(message: string): void {
   downloadBusy = false
-  if (!downloadBtn) return
-  delete downloadBtn.dataset.busy
-  downloadBtn.setAttribute("aria-busy", "false")
-  downloadBtn.setAttribute("aria-label", "Download")
-  downloadBtn.title = message
+  setSaveBusy(downloadBtn, false, "Download", message)
+}
+
+function armAudio(): void {
+  audioBusy = true
+  markAct()
+  setSaveBusy(audioBtn, true, "Download audio", "Downloading")
+}
+
+function finishAudio(message: string): void {
+  audioBusy = false
+  setSaveBusy(audioBtn, false, "Download audio", message)
 }
 
 async function downloadCurrent(): Promise<void> {
@@ -3277,6 +3340,44 @@ async function downloadCurrent(): Promise<void> {
   }
 }
 
+async function downloadAudio(): Promise<void> {
+  if (audioBusy || !audioBtn) return
+  armAudio()
+  let message = "Could not save this audio"
+  try {
+    if (domainSkin(location.hostname, location.pathname) === "youtube") {
+      const offer = (await resolveYoutubeOffer()) ?? youtubeOfferForPage()
+      if (offer) {
+        let saved = await saveYoutubeAudio(offer)
+        if (!saved) {
+          const next = await refreshPlayerOffer(offer.combinedUrl || offer.videoUrl || offer.audioUrl)
+          if (next) saved = await saveYoutubeAudio(next)
+        }
+        message = saved ? "Audio download started" : "Could not save this audio"
+        return
+      }
+    }
+    const urls = audioCandidates(boundVideo)
+    if (!urls.length) return
+    const filename = audioFilename(downloadTitle(boundVideo))
+    const response = await chrome.runtime.sendMessage({
+      type: AUDIO_EXTRACT_MESSAGE,
+      urls,
+      title: downloadTitle(boundVideo)
+    })
+    if (response?.ok) {
+      message = "Audio download started"
+      return
+    }
+    const buffer = response?.buffer instanceof ArrayBuffer ? response.buffer : null
+    if (buffer && (await storeDownload(buffer, filename))) message = "Audio download started"
+  } catch {
+    message = "Could not save this audio"
+  } finally {
+    finishAudio(message)
+  }
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   const parts: string[] = []
   const chunk = 0x8000
@@ -3288,7 +3389,8 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 function saveAnchor(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes], { type: "video/mp4" })
+  const mime = filename.toLowerCase().endsWith(".m4a") ? "audio/mp4" : "video/mp4"
+  const blob = new Blob([bytes], { type: mime })
   const href = URL.createObjectURL(blob)
   const link = document.createElement("a")
   link.href = href
@@ -3315,9 +3417,10 @@ function watchDownload(id: number): Promise<boolean> {
 function storeDownload(buffer: ArrayBuffer, filename: string): Promise<boolean> {
   const bytes = new Uint8Array(buffer)
   if (bytes.byteLength < 16 || !isIsoBmff(bytes)) return Promise.resolve(false)
+  const mime = filename.toLowerCase().endsWith(".m4a") ? "audio/mp4" : "video/mp4"
   let url = ""
   try {
-    url = `data:video/mp4;base64,${bytesToBase64(bytes)}`
+    url = `data:${mime};base64,${bytesToBase64(bytes)}`
   } catch {
     saveAnchor(bytes, filename)
     return Promise.resolve(true)
@@ -3391,6 +3494,44 @@ function saveYoutubeOffer(offer: YtOffer): Promise<boolean> {
         combinedUrl: offer.combinedUrl,
         videoUrl: offer.videoUrl,
         audioUrl: offer.audioUrl
+      },
+      "*"
+    )
+  })
+}
+
+function saveYoutubeAudio(offer: YtOffer): Promise<boolean> {
+  const filename = audioFilename(offer.title || downloadTitle(boundVideo))
+  const token = youtubeToken()
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      window.removeEventListener("message", onMessage)
+      resolve(false)
+    }, 180_000)
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return
+      const file = readYtFile(event.data)
+      if (file && file.token === token) {
+        window.clearTimeout(timer)
+        window.removeEventListener("message", onMessage)
+        void storeDownload(file.buffer, file.filename).then(resolve)
+        return
+      }
+      const saved = readYtSaveResult(event.data)
+      if (!saved || saved.token !== token) return
+      window.clearTimeout(timer)
+      window.removeEventListener("message", onMessage)
+      resolve(saved.ok)
+    }
+    window.addEventListener("message", onMessage)
+    window.postMessage(
+      {
+        source: YT_MEDIA_SOURCE,
+        kind: "audio",
+        token,
+        filename,
+        audioUrl: offer.audioUrl,
+        combinedUrl: offer.combinedUrl
       },
       "*"
     )
@@ -4175,10 +4316,16 @@ function fileControlsChanged(video: HTMLVideoElement): boolean {
   if (!settings) return false
   touchQualitySearch(video)
   const downloadEl = controlNodes.get("download")
+  const audioEl = controlNodes.get("audio")
   const qualityEl = controlNodes.get("quality")
   const downloadOn = settings.dockDownload && fileForDownload(video) != null
+  const audioOn = settings.dockAudio && audioAvailable(video)
   const qualityOn = settings.dockQuality && qualityShown(video)
-  return (!!downloadEl && downloadEl.hidden === downloadOn) || (!!qualityEl && qualityEl.hidden === qualityOn)
+  return (
+    (!!downloadEl && downloadEl.hidden === downloadOn) ||
+    (!!audioEl && audioEl.hidden === audioOn) ||
+    (!!qualityEl && qualityEl.hidden === qualityOn)
+  )
 }
 
 function onMediaSignal(): void {
@@ -4247,6 +4394,9 @@ function ensureBar(): HTMLDivElement {
     <div class="vee-control" data-place="download">
       <button type="button" class="vee-chrome-btn" data-act="download" aria-label="Download">${ICON_DOWNLOAD}</button>
     </div>
+    <div class="vee-control" data-place="audio">
+      <button type="button" class="vee-chrome-btn" data-act="audio" aria-label="Download audio" title="Download audio as M4A">${ICON_AUDIO}</button>
+    </div>
     <div class="vee-control" data-place="quality">
       <div class="vee-pop-anchor" data-act="quality" data-out="up">
         <button type="button" class="vee-chrome-btn" data-act="quality-btn" aria-label="Resolution">${ICON_QUALITY}</button>
@@ -4289,6 +4439,7 @@ function ensureBar(): HTMLDivElement {
   loopBtn = node.querySelector("[data-act='loop']")
   pipBtn = node.querySelector("[data-act='pip']")
   downloadBtn = node.querySelector("[data-act='download']")
+  audioBtn = node.querySelector("[data-act='audio']")
   qualityAnchor = node.querySelector("[data-act='quality']")
   qualityBtn = node.querySelector("[data-act='quality-btn']")
   qualityPop = node.querySelector("[data-pop='quality']")
@@ -4459,6 +4610,11 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     if (downloadBusy) return
     void downloadCurrent()
+  })
+  audioBtn?.addEventListener("click", (event) => {
+    stopAct(event)
+    if (audioBusy) return
+    void downloadAudio()
   })
   const openQuality = () => {
     cancelPopClose("quality")
@@ -4954,6 +5110,7 @@ export function stopSeekBar(): void {
   loopBtn = null
   pipBtn = null
   downloadBtn = null
+  audioBtn = null
   ytOffer = null
   qualityAnchor = null
   qualityBtn = null
@@ -4961,6 +5118,7 @@ export function stopSeekBar(): void {
   qualityList = null
   fullBtn = null
   downloadBusy = false
+  audioBusy = false
   layoutStamp = ""
   shownMediaStamp = ""
   shownPlayerMark = ""

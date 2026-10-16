@@ -20,12 +20,15 @@ import { applyNativeMirror, NATIVE_MIRROR_ATTR, publishSitePlayer } from "~lib/n
 import {
   collectPlayers,
   downloadOffer,
+  audioDownloadOffer,
   extractAssignedObject,
   mergeTracks,
   allowedFetchUrl,
+  assembleAudio,
   assembleDownload,
   fullRangeUrl,
   readYtAsk,
+  readYtAudioSaveRequest,
   readYtRefresh,
   readYtSaveRequest,
   rememberPlayback,
@@ -1232,18 +1235,18 @@ async function loadYoutubeDownload(request: {
   )
 }
 
-function deliverVideo(bytes: Uint8Array, filename: string, token: string): void {
+function deliverVideo(bytes: Uint8Array, filename: string, token: string, mime = "video/mp4"): void {
   const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   if (copy.byteLength > 120 * 1024 * 1024) {
-    saveVideoBlob(bytes, filename)
+    saveVideoBlob(bytes, filename, mime)
     window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token, ok: true }, "*")
     return
   }
   window.postMessage({ source: YT_MEDIA_SOURCE, kind: "file", token, filename, buffer: copy }, "*")
 }
 
-function saveVideoBlob(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes], { type: "video/mp4" })
+function saveVideoBlob(bytes: Uint8Array, filename: string, mime = "video/mp4"): void {
+  const blob = new Blob([bytes], { type: mime })
   const href = URL.createObjectURL(blob)
   const link = document.createElement("a")
   link.href = href
@@ -1261,6 +1264,44 @@ async function onYoutubeSave(data: unknown): Promise<void> {
   try {
     const bytes = await loadYoutubeDownload(request)
     deliverVideo(bytes, request.filename, request.token)
+  } catch {
+    window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: false }, "*")
+  }
+}
+
+async function loadYoutubeAudio(request: { audioUrl: string; combinedUrl: string }): Promise<Uint8Array> {
+  const local = audioDownloadOffer(ytVideoId, ytTitle, ytLive, ytTracks)
+  const first = {
+    audioUrl: local.audioUrl || request.audioUrl,
+    combinedUrl: local.combinedUrl || request.combinedUrl
+  }
+  try {
+    if (first.audioUrl || first.combinedUrl) return await assembleAudio(first, loadYoutubeFile)
+  } catch {
+    /* A signed address can be rejected until the player refreshes it. */
+  }
+  const before = trackStamp()
+  ytPlayerAsked = ""
+  ytPlayerTries = 0
+  readYoutubeGlobals()
+  readYoutubeScripts()
+  requestPlayerFile(true)
+  await waitForTracks(before, 6000)
+  const offer = audioDownloadOffer(ytVideoId, ytTitle, ytLive, ytTracks)
+  const next = {
+    audioUrl: offer.audioUrl || request.audioUrl,
+    combinedUrl: offer.combinedUrl || request.combinedUrl
+  }
+  if (!next.audioUrl && !next.combinedUrl) throw new Error("media")
+  return assembleAudio(next, loadYoutubeFile)
+}
+
+async function onYoutubeAudio(data: unknown): Promise<void> {
+  const request = readYtAudioSaveRequest(data)
+  if (!request) return
+  try {
+    const bytes = await loadYoutubeAudio(request)
+    deliverVideo(bytes, request.filename, request.token, "audio/mp4")
   } catch {
     window.postMessage({ source: YT_MEDIA_SOURCE, kind: "saved", token: request.token, ok: false }, "*")
   }
@@ -1371,6 +1412,10 @@ window.addEventListener("message", (event) => {
   }
   if (readYtSaveRequest(event.data)) {
     void onYoutubeSave(event.data)
+    return
+  }
+  if (readYtAudioSaveRequest(event.data)) {
+    void onYoutubeAudio(event.data)
     return
   }
   const renditions = readRenditionMessage(event.data)

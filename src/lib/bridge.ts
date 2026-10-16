@@ -88,6 +88,7 @@ function playbackStamp(settings: EffectSettings): string {
     settings.dockPip,
     settings.dockFullscreen,
     settings.dockDownload,
+    settings.dockAudio,
     settings.dockQuality,
     settings.dockSkip
   ].join("|")

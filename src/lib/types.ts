@@ -148,6 +148,8 @@ export type EffectSettings = ColorSettings & {
   dockFullscreen: boolean
   /** Save the video when it is already a normal file link. */
   dockDownload: boolean
+  /** Save only the sound of the current video as an M4A file. */
+  dockAudio: boolean
   /** Choose a resolution when the page already lists more than one. */
   dockQuality: boolean
   /** Skip back and forward 10 seconds on the on-video bar. */
@@ -190,6 +192,7 @@ export const DOCK_PLACE_IDS = [
   "loop",
   "pip",
   "download",
+  "audio",
   "quality",
   "fullscreen"
 ] as const
@@ -206,6 +209,7 @@ export const DOCK_ICON_ORDER = [
   "loop",
   "pip",
   "download",
+  "audio",
   "quality",
   "fullscreen"
 ] as const satisfies readonly DockPlaceId[]
@@ -318,6 +322,7 @@ export const DOCK_CONTROL_KEYS = [
   "dockPip",
   "dockFullscreen",
   "dockDownload",
+  "dockAudio",
   "dockQuality",
   "dockSkip"
 ] as const satisfies readonly (keyof EffectSettings)[]
@@ -412,6 +417,7 @@ export function defaultSettings(): EffectSettings {
     dockPip: false,
     dockFullscreen: false,
     dockDownload: false,
+    dockAudio: false,
     dockQuality: false,
     dockSkip: false,
     skipAdsEnabled: false,

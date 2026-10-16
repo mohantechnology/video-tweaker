@@ -72,6 +72,38 @@ export function muxAvcAac(video: Uint8Array, audio: Uint8Array): Uint8Array {
   return out
 }
 
+/** Sound track from a video or audio MP4, written as a standalone M4A file. */
+export function audioOnlyFile(bytes: Uint8Array): Uint8Array {
+  if (!isIsoBmff(bytes)) throw new Error("media")
+  const sound = extract(bytes, "soun")
+  if (!sound) throw new Error("media")
+  const payload = sampleBytes(sound)
+  if (payload <= 0 || payload > MAX_OUTPUT_BYTES) throw new Error("media")
+  const moov = new Bin()
+  writeAudioMoov(moov, sound)
+  const moovBytes = moov.finish()
+  const ftyp = m4aFtypBytes()
+  const total = ftyp.length + moovBytes.length + 8 + payload
+  if (total > MAX_OUTPUT_BYTES) throw new Error("media")
+  const out = new Uint8Array(total)
+  out.set(ftyp, 0)
+  out.set(moovBytes, ftyp.length)
+  const mdat = ftyp.length + moovBytes.length
+  putU32(out, mdat, 8 + payload)
+  out.set(typeBytes("mdat"), mdat + 4)
+  const audioAt = mdat + 8
+  copySamples(out, audioAt, sound)
+  putU32(out, ftyp.length + moov.marks.audio, audioAt)
+  return out
+}
+
+function writeAudioMoov(bin: Bin, audio: Prepared): void {
+  const root = openBox(bin, "moov")
+  writeMvhd(bin, movieUnits(audio))
+  writeTrak(bin, audio, 1, movieUnits(audio), "audio")
+  closeBox(bin, root)
+}
+
 class Bin {
   private data = new Uint8Array(4096)
   length = 0
@@ -823,6 +855,18 @@ function ftypBytes(): Uint8Array {
   return bin.finish()
 }
 
+function m4aFtypBytes(): Uint8Array {
+  const bin = new Bin()
+  const start = openBox(bin, "ftyp")
+  bin.text("M4A ")
+  bin.u32(0)
+  bin.text("M4A ")
+  bin.text("mp42")
+  bin.text("isom")
+  closeBox(bin, start)
+  return bin.finish()
+}
+
 function putU32(data: Uint8Array, offset: number, value: number): void {
   data[offset] = (value >>> 24) & 0xff
   data[offset + 1] = (value >>> 16) & 0xff
@@ -882,6 +926,14 @@ export function mp4MuxSelfCheck(): string[] {
     if (!joinedVideo || !sameBytes(concatenated(joinedVideo), picture)) errors.push("joined video")
     if (!joinedAudio || !sameBytes(concatenated(joinedAudio), sound)) errors.push("joined audio")
     if (!joinedVideo?.samples.some((sample) => sample.keyframe)) errors.push("keyframe")
+    const audioFile = audioOnlyFile(joined)
+    const audioBack = extract(audioFile, "soun")
+    if (!isIsoBmff(audioFile) || ascii(audioFile, 8, 4) !== "M4A ") errors.push("audio brand")
+    if (!audioBack || !sameBytes(concatenated(audioBack), sound)) errors.push("audio file")
+    if (extract(audioFile, "vide")) errors.push("audio kept video")
+    const bare = audioOnlyFile(plainAudio)
+    const bareBack = extract(bare, "soun")
+    if (!bareBack || !sameBytes(concatenated(bareBack), sound)) errors.push("bare audio")
   } catch {
     errors.push("mux threw")
   }
