@@ -42,7 +42,8 @@ export const VIDEO_OPEN_TAB_KEYS: readonly (keyof EffectSettings)[] = [
   "basicVideoOn",
   "frameOn",
   "advancedVideoOn",
-  "videoEnabled"
+  "videoEnabled",
+  "autoBrightness"
 ]
 
 function writeKey<K extends keyof EffectSettings>(

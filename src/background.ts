@@ -1,3 +1,4 @@
+import { FRAME_SAMPLE_MESSAGE, measurePixels, type HistogramBins } from "~lib/luminance"
 import { DOWNLOAD_MESSAGE, downloadFilename, fileUrl, SAVE_BYTES_MESSAGE } from "~lib/media-file"
 import {
   AD_BLOCK_CANCELLED,
@@ -60,6 +61,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") return
   const type = (message as { type?: string }).type
   const host = initiatorDomain(String((message as { host?: string }).host ?? "")) ?? ""
+  if (type === FRAME_SAMPLE_MESSAGE) {
+    void samplePaintedFrame(message, sender).then(sendResponse)
+    return true
+  }
   if (type === AD_BLOCK_PENDING) {
     sendResponse({ host: grantHost })
     return
@@ -109,6 +114,110 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return
 })
+
+const SAMPLE_WIDTH = 160
+const SAMPLE_HEIGHT = 90
+const MAX_VIEW = 16000
+
+type SampleRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+  viewportWidth: number
+  viewportHeight: number
+}
+
+type FrameSampleResult =
+  | { ok: true; luma: number; bins: HistogramBins; black: boolean }
+  | { ok: false }
+
+function finiteNumber(value: unknown): number | null {
+  const number = typeof value === "number" ? value : Number.NaN
+  return Number.isFinite(number) ? number : null
+}
+
+function readSampleRect(message: unknown): SampleRect | null {
+  if (!message || typeof message !== "object") return null
+  const raw = message as Record<string, unknown>
+  const x = finiteNumber(raw.x)
+  const y = finiteNumber(raw.y)
+  const width = finiteNumber(raw.width)
+  const height = finiteNumber(raw.height)
+  const viewportWidth = finiteNumber(raw.viewportWidth)
+  const viewportHeight = finiteNumber(raw.viewportHeight)
+  if (
+    x == null ||
+    y == null ||
+    width == null ||
+    height == null ||
+    viewportWidth == null ||
+    viewportHeight == null
+  ) {
+    return null
+  }
+  if (width < 8 || height < 8) return null
+  if (viewportWidth < 8 || viewportHeight < 8 || viewportWidth > MAX_VIEW || viewportHeight > MAX_VIEW) {
+    return null
+  }
+  if (width > viewportWidth || height > viewportHeight) return null
+  if (x < -viewportWidth || y < -viewportHeight || x > viewportWidth || y > viewportHeight) return null
+  return { x, y, width, height, viewportWidth, viewportHeight }
+}
+
+function captureVisible(windowId: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 30 }, (dataUrl) => {
+      const message = chrome.runtime.lastError?.message
+      if (message || !dataUrl) reject(new Error(message || "capture failed"))
+      else resolve(dataUrl)
+    })
+  })
+}
+
+function measureBitmap(bitmap: ImageBitmap, rect: SampleRect): FrameSampleResult {
+  if (bitmap.width < 2 || bitmap.height < 2) return { ok: false }
+  const scaleX = bitmap.width / rect.viewportWidth
+  const scaleY = bitmap.height / rect.viewportHeight
+  const sx = Math.min(bitmap.width - 1, Math.max(0, rect.x * scaleX))
+  const sy = Math.min(bitmap.height - 1, Math.max(0, rect.y * scaleY))
+  const sw = Math.min(bitmap.width - sx, rect.width * scaleX)
+  const sh = Math.min(bitmap.height - sy, rect.height * scaleY)
+  if (sw < 2 || sh < 2) return { ok: false }
+  const canvas = new OffscreenCanvas(SAMPLE_WIDTH, SAMPLE_HEIGHT)
+  const context = canvas.getContext("2d", { willReadFrequently: true })
+  if (!context) return { ok: false }
+  context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT)
+  const pixels = context.getImageData(0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT)
+  const measured = measurePixels(pixels.data)
+  return { ok: true, luma: measured.luma, bins: measured.bins, black: measured.black }
+}
+
+async function samplePaintedFrame(
+  message: unknown,
+  sender: chrome.runtime.MessageSender
+): Promise<FrameSampleResult> {
+  const rect = readSampleRect(message)
+  const tab = sender.tab
+  if (!rect || tab?.windowId == null || tab.active === false || sender.frameId !== 0) return { ok: false }
+  let dataUrl = ""
+  try {
+    dataUrl = await captureVisible(tab.windowId)
+  } catch {
+    return { ok: false }
+  }
+  let bitmap: ImageBitmap | null = null
+  try {
+    const blob = await (await fetch(dataUrl)).blob()
+    dataUrl = ""
+    bitmap = await createImageBitmap(blob)
+    return measureBitmap(bitmap, rect)
+  } catch {
+    return { ok: false }
+  } finally {
+    bitmap?.close()
+  }
+}
 
 const PLAYBACK_REFERRER_RULE = 9001
 

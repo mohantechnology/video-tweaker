@@ -29,6 +29,12 @@ export const PLAYER_CHROME_HIDE_MS = 30000
 export const VIDEO_DETECT_INTERVAL_MS = 5000
 
 /**
+ * How often auto brightness photographs the painted frame.
+ * Chrome allows about two tab captures a second, so this stays under that.
+ */
+export const AUTO_BRIGHTNESS_SAMPLE_MS = 1200
+
+/**
  * Wait after the player disappears before showing "No video detected".
  * A short preview, such as a search thumbnail, can come and go inside this window.
  */

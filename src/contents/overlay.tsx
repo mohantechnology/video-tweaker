@@ -49,6 +49,16 @@ import {
 
 import { AD_BLOCK_CANCELLED, AD_BLOCK_CHECK, AD_BLOCK_DISMISS, AD_BLOCK_READY } from "~lib/ad-block"
 import {
+  EMPTY_BRIGHTNESS_READOUT,
+  HISTOGRAM_HEIGHT,
+  HISTOGRAM_INSET,
+  HISTOGRAM_WIDTH,
+  startAutoBrightness,
+  type AutoBrightnessReadout
+} from "~lib/auto-brightness"
+import { paintedVideoBox, type ViewportBox } from "~lib/find-video"
+import type { HistogramBins } from "~lib/luminance"
+import {
   HOST_ID,
   getActiveVideo,
   parkExtensionHost,
@@ -397,7 +407,8 @@ const VIDEO_RESET_KEYS = [
   "frameOn",
   "advancedVideoOn",
   "presetId",
-  "videoEnabled"
+  "videoEnabled",
+  "autoBrightness"
 ] as const satisfies readonly (keyof EffectSettings)[]
 
 const AUDIO_RESET_KEYS = [
@@ -511,6 +522,7 @@ function Overlay() {
   const [forcedOpen, setForcedOpen] = useState(false)
   const [missingNotice, setMissingNotice] = useState(false)
   const [pipOn, setPipOn] = useState(false)
+  const [brightnessRead, setBrightnessRead] = useState<AutoBrightnessReadout>(EMPTY_BRIGHTNESS_READOUT)
   const [tab, setTab] = useState<PanelTab>("video")
   const [userPresets, setUserPresets] = useState<UserPreset[]>([])
   const [presetName, setPresetName] = useState("")
@@ -549,6 +561,7 @@ function Overlay() {
   const applyDelayRef = useRef(0)
   const inflightSaves = useRef<EffectSettings[]>([])
   const bridgeRef = useRef<VideoBridge | null>(null)
+  const autoRef = useRef<ReturnType<typeof startAutoBrightness> | null>(null)
   const dockBridge = useRef({
     onControl: (_control: DockControl) => undefined,
     onMedia: (_media: DockMedia) => undefined
@@ -745,7 +758,15 @@ function Overlay() {
       onVideo: () => adoptClip()
     })
     bridgeRef.current = bridge
+    const auto = startAutoBrightness({
+      getSettings: () => mergeTabMedia(effectiveSettings(appliedRef.current), tabMediaRef.current),
+      getVideo: getActiveVideo,
+      onSample: setBrightnessRead
+    })
+    autoRef.current = auto
     return () => {
+      auto.stop()
+      autoRef.current = null
       bridge.stop()
       bridgeRef.current = null
     }
@@ -1407,6 +1428,7 @@ function Overlay() {
     const defaults = defaultSettings()
     const next: Partial<EffectSettings> = { [flag]: true, presetId: "" }
     for (const key of SECTION_FIELDS[flag]) next[key] = defaults[key] as never
+    if (flag === "basicVideoOn") next.autoBrightness = false
     const media = sectionTouchesMedia(flag)
     patch(next, flag === "basicPlaybackOn", sectionIsVisual(flag) ? "heavy" : media ? "light" : "now")
   }
@@ -1588,9 +1610,15 @@ function Overlay() {
 
   const allowed = siteAllowed(hostname, policy)
   const painted = effectiveSettings(settings)
+  const autoPicture =
+    settings.autoBrightness &&
+    settings.basicVideoOn &&
+    settings.videoEnabled &&
+    brightnessRead.live != null &&
+    !brightnessRead.blocked
   const live =
     settings.enabled &&
-    ((settings.videoEnabled && !isVisualIdentity(painted)) ||
+    ((settings.videoEnabled && (!isVisualIdentity(painted) || autoPicture)) ||
       (settings.audioTouched && settings.audioEnabled) ||
       (settings.playbackTouched && settings.playbackEnabled))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
@@ -1606,8 +1634,13 @@ function Overlay() {
     ? "Mouse press speed starts at 1×"
     : "Set current speed as mouse press speed"
 
-  if (!globallyEnabled || !allowed || !layout || layout.mode === "closed") return null
-  if (!hasVideo && !forcedOpen) return null
+  const histogram =
+    settings.autoBrightness && settings.enabled && settings.videoEnabled ? (
+      <FrameHistogram bins={brightnessRead.bins} />
+    ) : null
+
+  if (!globallyEnabled || !allowed) return null
+  if (!layout || layout.mode === "closed" || (!hasVideo && !forcedOpen)) return histogram
 
   const activePresetId = exactPresetId(settings, userPresets)
 
@@ -1620,6 +1653,8 @@ function Overlay() {
   const placeId = placeChoice ? DOCK_PLACE_BY_KEY[placeChoice.key] : null
 
   return (
+    <>
+    {histogram}
     <div
       ref={dockRef}
       className="vee-dock"
@@ -1881,6 +1916,38 @@ function Overlay() {
                       </button>
                     ))}
                   </div>
+                  <div className="vee-auto-brightness">
+                    <button
+                      type="button"
+                      className="vee-chip"
+                      data-on={String(settings.autoBrightness)}
+                      aria-pressed={settings.autoBrightness}
+                      title={
+                        settings.autoBrightness && brightnessRead.blocked
+                          ? "This player hides the picture"
+                          : "Sample the painted frame and set brightness from its luminance"
+                      }
+                      onClick={() => {
+                        patch({ autoBrightness: !settings.autoBrightness })
+                        autoRef.current?.poke()
+                      }}>
+                      Auto brightness
+                    </button>
+                    {settings.autoBrightness ? (
+                      <p
+                        className="vee-auto-note"
+                        data-blocked={brightnessRead.blocked ? "true" : "false"}
+                        role="status">
+                        {!settings.basicVideoOn
+                          ? "Turn Basic on to adjust brightness"
+                          : brightnessRead.blocked
+                            ? "This player hides the picture"
+                            : brightnessRead.live == null
+                              ? "Reading the picture"
+                              : `Live ${percent(brightnessRead.live)}`}
+                      </p>
+                    ) : null}
+                  </div>
                   {COLOR_CONTROLS.filter((control) => !control.advanced).map((control) => (
                     <Slider
                       key={control.key}
@@ -1890,15 +1957,15 @@ function Overlay() {
                       step={control.step}
                       value={settings[control.key]}
                       display={control.format(settings[control.key])}
-                      onChange={(value) =>
-                        patch(
-                          {
-                            [control.key]: readRange(String(value), control.digits)
-                          },
-                          false,
-                          "heavy"
-                        )
-                      }
+                      onChange={(value) => {
+                        const nextValue = readRange(String(value), control.digits)
+                        if (control.key === "brightness" && settingsRef.current.autoBrightness) {
+                          patch({ brightness: nextValue, autoBrightness: false }, false, "now")
+                          autoRef.current?.poke()
+                          return
+                        }
+                        patch({ [control.key]: nextValue }, false, "heavy")
+                      }}
                     />
                   ))}
                 </Group>
@@ -2597,6 +2664,107 @@ function Overlay() {
             />
           ))
         : null}
+    </div>
+    </>
+  )
+}
+
+function placeHistogram(box: ViewportBox): { left: number; top: number } {
+  const left = Math.round(
+    Math.min(
+      Math.max(8, window.innerWidth - HISTOGRAM_WIDTH - 8),
+      Math.max(8, box.left + box.width - HISTOGRAM_INSET - HISTOGRAM_WIDTH)
+    )
+  )
+  const top = Math.round(
+    Math.min(
+      Math.max(8, window.innerHeight - HISTOGRAM_HEIGHT - 8),
+      Math.max(8, box.top + HISTOGRAM_INSET)
+    )
+  )
+  return { left, top }
+}
+
+function paintHistogram(canvas: HTMLCanvasElement, bins: HistogramBins | null): void {
+  const cssWidth = canvas.clientWidth || HISTOGRAM_WIDTH - 12
+  const cssHeight = canvas.clientHeight || HISTOGRAM_HEIGHT - 12
+  const scale = window.devicePixelRatio || 1
+  const width = Math.max(1, Math.round(cssWidth * scale))
+  const height = Math.max(1, Math.round(cssHeight * scale))
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width
+    canvas.height = height
+  }
+  const context = canvas.getContext("2d")
+  if (!context) return
+  context.clearRect(0, 0, width, height)
+  if (!bins) return
+  const channels = [
+    { values: bins.r, color: "rgba(255, 96, 96, 0.55)" },
+    { values: bins.g, color: "rgba(72, 220, 140, 0.5)" },
+    { values: bins.b, color: "rgba(96, 150, 255, 0.55)" }
+  ]
+  for (const channel of channels) {
+    let peak = 1
+    for (const value of channel.values) peak = Math.max(peak, value)
+    context.beginPath()
+    context.moveTo(0, height)
+    const last = channel.values.length - 1
+    channel.values.forEach((count, index) => {
+      const x = last === 0 ? 0 : (index / last) * width
+      const y = height - (count / peak) * (height - 2)
+      context.lineTo(x, y)
+    })
+    context.lineTo(width, height)
+    context.closePath()
+    context.fillStyle = channel.color
+    context.fill()
+  }
+}
+
+function FrameHistogram({ bins }: { bins: HistogramBins | null }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [place, setPlace] = useState<{ left: number; top: number } | null>(null)
+
+  useEffect(() => {
+    const update = () => {
+      const video = getActiveVideo()
+      const box = video ? paintedVideoBox(video) : null
+      if (!box) {
+        setPlace((current) => (current == null ? current : null))
+        return
+      }
+      const next = placeHistogram(box)
+      setPlace((current) =>
+        current && current.left === next.left && current.top === next.top ? current : next
+      )
+    }
+    update()
+    const timer = window.setInterval(update, 200)
+    window.addEventListener("resize", update)
+    window.addEventListener("scroll", update, true)
+    document.addEventListener("fullscreenchange", update)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener("resize", update)
+      window.removeEventListener("scroll", update, true)
+      document.removeEventListener("fullscreenchange", update)
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    paintHistogram(canvas, bins)
+  }, [bins, place])
+
+  if (!place) return null
+  return (
+    <div
+      className="vee-histogram"
+      style={{ left: `${place.left}px`, top: `${place.top}px` }}
+      aria-hidden="true">
+      <canvas ref={canvasRef} />
     </div>
   )
 }

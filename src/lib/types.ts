@@ -94,6 +94,11 @@ export type EffectSettings = ColorSettings & {
   presetId: string
   rememberProgress: boolean
   videoEnabled: boolean
+  /**
+   * While true, brightness follows the painted frame. The slider value stays
+   * the manual level and is not overwritten by the measured one.
+   */
+  autoBrightness: boolean
   audioEnabled: boolean
   playbackEnabled: boolean
   /** Press and hold the video picture to play at holdPlaybackRate. */
@@ -386,6 +391,7 @@ export function defaultSettings(): EffectSettings {
     presetId: "default",
     rememberProgress: true,
     videoEnabled: true,
+    autoBrightness: false,
     audioEnabled: true,
     playbackEnabled: true,
     holdToSpeed: true,

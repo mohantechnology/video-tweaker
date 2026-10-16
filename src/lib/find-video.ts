@@ -134,6 +134,23 @@ function scoreVideo(video: HTMLVideoElement): number {
   return score
 }
 
+export type ViewportBox = {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** Painted box of the video, including zoom and pan. Capture samples this, not the layout box. */
+export function paintedVideoBox(video: HTMLVideoElement): ViewportBox | null {
+  if (document.pictureInPictureElement === video) return null
+  const rect = video.getBoundingClientRect()
+  if (rect.width < 32 || rect.height < 32) return null
+  if (rect.bottom <= 0 || rect.right <= 0) return null
+  if (rect.top >= window.innerHeight || rect.left >= window.innerWidth) return null
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+}
+
 export function findMainVideo(videos: HTMLVideoElement[]): HTMLVideoElement | null {
   let best: HTMLVideoElement | null = null
   let bestScore = 0

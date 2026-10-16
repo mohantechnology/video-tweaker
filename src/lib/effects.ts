@@ -5,6 +5,7 @@ import {
   YT_ECHO_ATTR,
   type NativeMirrorPatch
 } from "./native-mirror"
+import { BRIGHTNESS_MAX, BRIGHTNESS_MIN } from "./luminance"
 import {
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
@@ -198,13 +199,39 @@ export function visualWritesLocked(): boolean {
   return suppressStyleWrites
 }
 
+/**
+ * Measured brightness for this tab. The bridge reapplies stored settings on
+ * a timer, so the live value has to live here or the next pass puts the
+ * slider level back. It is never written to storage.
+ */
+let liveBrightness: number | null = null
+
+export function setLiveBrightness(value: number | null): void {
+  if (value == null || !Number.isFinite(value)) {
+    liveBrightness = null
+    return
+  }
+  liveBrightness = clamp(value, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
+}
+
+export function getLiveBrightness(): number | null {
+  return liveBrightness
+}
+
+function withLiveBrightness(settings: EffectSettings): EffectSettings {
+  if (liveBrightness == null || !settings.autoBrightness || !settings.basicVideoOn) return settings
+  if (settings.brightness === liveBrightness) return settings
+  return { ...settings, brightness: liveBrightness }
+}
+
 export function applyVisual(
   video: HTMLVideoElement,
   settings: EffectSettings
 ): void {
   if (suppressStyleWrites) return
+  const visual = withLiveBrightness(settings)
 
-  if (!settings.enabled || settings.videoEnabled === false || isVisualIdentity(settings)) {
+  if (!visual.enabled || visual.videoEnabled === false || isVisualIdentity(visual)) {
     clearVisual(video)
     return
   }
@@ -212,28 +239,28 @@ export function applyVisual(
   holdStyleWrites()
   video.dataset.veeVisual = "1"
 
-  if (isColorIdentity(settings)) {
+  if (isColorIdentity(visual)) {
     video.style.removeProperty("filter")
     delete video.dataset.veeFilter
   } else {
-    writeVisual(video, "filter", buildFilter(settings))
+    writeVisual(video, "filter", buildFilter(visual))
   }
 
-  if (isTransformIdentity(settings)) {
+  if (isTransformIdentity(visual)) {
     video.style.removeProperty("transform")
     video.style.removeProperty("transform-origin")
     delete video.dataset.veeTransform
     delete video.dataset.veeOrigin
   } else {
-    writeVisual(video, "transform", buildTransform(settings))
+    writeVisual(video, "transform", buildTransform(visual))
     writeVisual(video, "transform-origin", "center center")
   }
 
-  if (isCropIdentity(settings)) {
+  if (isCropIdentity(visual)) {
     video.style.removeProperty("clip-path")
     delete video.dataset.veeClip
   } else {
-    writeVisual(video, "clip-path", buildClip(settings))
+    writeVisual(video, "clip-path", buildClip(visual))
   }
 }
 
