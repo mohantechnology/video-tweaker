@@ -254,9 +254,23 @@ function youtubeLevel(
 ): { volume: number; muted: boolean } | null {
   if (typeof patch.volume !== "number" && typeof patch.muted !== "boolean") return null
   return {
-    volume: typeof patch.volume === "number" ? patch.volume : video.volume,
+    volume: typeof patch.volume === "number" ? patch.volume : sliderVolume(video),
     muted: typeof patch.muted === "boolean" ? patch.muted : video.muted
   }
+}
+
+/** Player slider as 0–1. The media element is lower while loudness normalization is on. */
+function sliderVolume(video: HTMLVideoElement): number {
+  const player = youtubePlayer(video)
+  if (player && typeof player.getVolume === "function") {
+    try {
+      const percent = Number(player.getVolume())
+      if (Number.isFinite(percent)) return clamp01(percent / 100)
+    } catch {
+      /* The player can reject a read while an ad frame is locked. */
+    }
+  }
+  return video.volume
 }
 
 function pushYoutubeAudio(
@@ -892,6 +906,26 @@ export function readNativePlayer(video: HTMLVideoElement): NativeMirrorPatch | n
   } catch {
     return null
   }
+}
+
+/**
+ * The level the viewer chose. YouTube stores that on the player (0–100) and
+ * then multiplies it by a loudness gain before writing the media element.
+ * The element is quieter than the slider on loud videos, so reading it back
+ * and pushing it through setVolume turns the volume down again on every change.
+ */
+export function playerMediaLevel(video: HTMLVideoElement): { volume: number; muted: boolean } {
+  const player = readNativePlayer(video)
+  return {
+    volume: typeof player?.volume === "number" ? player.volume : video.volume,
+    muted: typeof player?.muted === "boolean" ? player.muted : video.muted
+  }
+}
+
+/** True when the site player, not the media element, owns the chosen loudness. */
+export function playerOwnsMediaLevel(video: HTMLVideoElement): boolean {
+  if (!onYoutube()) return false
+  return Boolean(video.closest("#movie_player, .html5-video-player"))
 }
 
 function playerFieldsEqual(a: NativeMirrorPatch, b: NativeMirrorPatch): boolean {

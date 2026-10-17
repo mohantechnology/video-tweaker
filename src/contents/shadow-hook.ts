@@ -1344,6 +1344,16 @@ function watchSitePlayer(): void {
     timer = window.setTimeout(sample, 80)
   }
   window.setInterval(sample, 400)
+  // Capture runs before the isolated world reads the element. YouTube's
+  // volumechange is the normalized element, while getVolume is still the slider.
+  document.addEventListener(
+    "volumechange",
+    (event) => {
+      const node = event.target
+      if (node instanceof HTMLVideoElement) publishSitePlayer(node)
+    },
+    true
+  )
   document.addEventListener("click", soon, true)
   document.addEventListener("input", soon, true)
   const start = () => sample()

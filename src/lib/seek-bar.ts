@@ -32,7 +32,7 @@ import {
   type RenditionMessage
 } from "./renditions"
 import { seekBy, togglePictureInPicture } from "./effects"
-import { NATIVE_PLAYER_ATTR, readNativePlayer, YT_ECHO_ATTR, YT_HOLD_ATTR } from "./native-mirror"
+import { NATIVE_PLAYER_ATTR, playerMediaLevel, readNativePlayer, YT_ECHO_ATTR, YT_HOLD_ATTR } from "./native-mirror"
 import { formatClock } from "./progress"
 import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
 import {
@@ -4228,9 +4228,10 @@ function reportMedia(): void {
     noteWrite()
     onControl?.({ type: "rate", playbackRate: chosen })
   }
+  const level = playerMediaLevel(video)
   onMedia({
-    volume: video.volume,
-    muted: video.muted,
+    volume: level.volume,
+    muted: level.muted,
     playbackRate,
     loop: video.loop
   })

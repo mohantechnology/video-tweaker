@@ -107,7 +107,7 @@ import {
   type ProgressGroup,
   type SavedProgress
 } from "~lib/progress"
-import { YT_ECHO_ATTR } from "~lib/native-mirror"
+import { playerMediaLevel, YT_ECHO_ATTR } from "~lib/native-mirror"
 import {
   AUDIO_OPEN_TAB_KEYS,
   VIDEO_OPEN_TAB_KEYS,
@@ -1191,9 +1191,10 @@ function Overlay() {
       return
     }
     const rate = video.playbackRate || 1
+    const level = playerMediaLevel(video)
     seenMediaRef.current = {
-      volume: video.volume,
-      muted: video.muted,
+      volume: level.volume,
+      muted: level.muted,
       playbackRate: rate <= PLAYBACK_RATE_MAX && !echoedPlayerRate(video, rate) ? rate : panel.playbackRate,
       loop: video.loop
     }
@@ -1273,8 +1274,9 @@ function Overlay() {
     if (control.type === "audio") {
       next = withTabAudio(next, control.volume, control.muted)
       if (video && !panel.audioTouched) {
-        if (next.volume == null) next = withTabAudio(next, video.volume, undefined)
-        if (next.muted == null) next = withTabAudio(next, undefined, video.muted)
+        const level = playerMediaLevel(video)
+        if (next.volume == null) next = withTabAudio(next, level.volume, undefined)
+        if (next.muted == null) next = withTabAudio(next, undefined, level.muted)
       }
     } else if (control.type === "rate") {
       next = withTabRate(next, control.playbackRate)
@@ -1360,8 +1362,9 @@ function Overlay() {
     if (typeof drift.volume === "number" || typeof drift.muted === "boolean") {
       next = withTabAudio(next, drift.volume, drift.muted)
       if (!panel.audioTouched) {
-        if (next.volume == null) next = withTabAudio(next, video.volume, undefined)
-        if (next.muted == null) next = withTabAudio(next, undefined, video.muted)
+        const level = playerMediaLevel(video)
+        if (next.volume == null) next = withTabAudio(next, level.volume, undefined)
+        if (next.muted == null) next = withTabAudio(next, undefined, level.muted)
       }
     }
     if (typeof drift.playbackRate === "number") next = withTabRate(next, drift.playbackRate)

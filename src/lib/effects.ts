@@ -1,5 +1,7 @@
 import {
   nativePlayerSeq,
+  playerMediaLevel,
+  playerOwnsMediaLevel,
   queueNativeMirror,
   readNativePlayer,
   YT_ECHO_ATTR,
@@ -498,9 +500,14 @@ export function mediaDrift(video: HTMLVideoElement, live: NativeMirrorPatch): Na
   const base = mediaBaseline.get(video)
   if (!base) return null
   const published = nativePlayerSeq(video) > base.seq ? readNativePlayer(video) : null
+  const player = readNativePlayer(video)
+  // The media element is not the slider. YouTube lowers it for loudness
+  // normalization, and saving that lower number feeds setVolume again.
+  const volumeNow = typeof player?.volume === "number" ? player.volume : live.volume
+  const mutedNow = typeof player?.muted === "boolean" ? player.muted : live.muted
   const patch: NativeMirrorPatch = {}
-  const volume = driftedNumber(base.volume, live.volume, published?.volume, VOLUME_DRIFT)
-  const muted = driftedBool(base.muted, live.muted, published?.muted)
+  const volume = driftedNumber(base.volume, volumeNow, published?.volume, VOLUME_DRIFT)
+  const muted = driftedBool(base.muted, mutedNow, published?.muted)
   const publishedRate = publishedRateIsEcho(video, published?.playbackRate) ? undefined : published?.playbackRate
   let playbackRate: number | undefined
   if (typeof base.playbackRate === "number") {
@@ -551,8 +558,9 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
   try {
     // Remember the player loudness before a rate write can replace it.
     if (audioOn && !state.audio) {
-      state.volume = video.volume
-      state.muted = video.muted
+      const chosen = playerMediaLevel(video)
+      state.volume = chosen.volume
+      state.muted = chosen.muted
       state.audio = true
     }
 
@@ -595,16 +603,22 @@ export function applyPlayback(video: HTMLVideoElement, settings: EffectSettings)
     if (audioOn) {
       const nextVolume = clamp(settings.volume, 0, 1)
       rememberBaseline(video, { volume: nextVolume, muted: settings.muted })
-      writeAudio(video, nextVolume, settings.muted)
-      if (disturbed) protectMediaLevel(video, nextVolume, settings.muted)
+      // YouTube's setVolume writes the normalized element level. Writing the
+      // slider level here first makes the next volumechange look like a cut.
+      if (!playerOwnsMediaLevel(video)) {
+        writeAudio(video, nextVolume, settings.muted)
+        if (disturbed) protectMediaLevel(video, nextVolume, settings.muted)
+      }
       patch.volume = nextVolume
       patch.muted = settings.muted
     } else if (state.audio) {
       forgetBaseline(video, true, false)
       const saved = { volume: state.volume, muted: state.muted }
-      writeAudio(video, saved.volume, saved.muted)
+      if (!playerOwnsMediaLevel(video)) {
+        writeAudio(video, saved.volume, saved.muted)
+        if (disturbed) protectMediaLevel(video, saved.volume, saved.muted)
+      }
       state.audio = false
-      if (disturbed) protectMediaLevel(video, saved.volume, saved.muted)
       patch.volume = saved.volume
       patch.muted = saved.muted
     } else if (disturbed) {
@@ -627,8 +641,11 @@ export function releasePlayback(video: HTMLVideoElement): void {
       disturbed = writePitch(video, state.preservesPitch) || disturbed
     }
     if (state.audio) {
-      writeAudio(video, state.volume, state.muted)
-      if (disturbed) protectMediaLevel(video, state.volume, state.muted)
+      if (playerOwnsMediaLevel(video)) queueNativeMirror(video, { volume: state.volume, muted: state.muted })
+      else {
+        writeAudio(video, state.volume, state.muted)
+        if (disturbed) protectMediaLevel(video, state.volume, state.muted)
+      }
     } else if (disturbed) {
       protectMediaLevel(video, level.volume, level.muted)
     }
