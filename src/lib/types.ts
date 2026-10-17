@@ -2,6 +2,8 @@ export type ColorSettings = {
   brightness: number
   contrast: number
   saturate: number
+  /** −100 is cool, 0 is unchanged, 100 is warm. */
+  temperature: number
   hueRotate: number
   grayscale: number
   sepia: number
@@ -18,8 +20,9 @@ export const PLAYBACK_RATE_MAX = 4
  * 2 means 2×.
  */
 export const HOLD_PLAYBACK_RATE = 2
-export const HOLD_RATE_MIN = 1
-export const HOLD_RATE_MAX = 4
+/** Same span as playback speed, including speeds below 1×. */
+export const HOLD_RATE_MIN = PLAYBACK_RATE_MIN
+export const HOLD_RATE_MAX = PLAYBACK_RATE_MAX
 export const HOLD_RATE_STEP = 0.01
 
 /** Seconds before a saved moment that resume starts. */
@@ -33,7 +36,7 @@ export function clampResumeLead(value: number): number {
   return Math.min(RESUME_LEAD_MAX, Math.max(RESUME_LEAD_MIN, Math.round(value)))
 }
 
-/** Snaps a hold speed onto the 1×–4× range, one hundredth at a time. */
+/** Snaps a hold speed onto the playback range, one hundredth at a time. */
 export function clampHoldPlaybackRate(value: number): number {
   if (!Number.isFinite(value)) return HOLD_PLAYBACK_RATE
   const stepped = Math.round(value / HOLD_RATE_STEP) * HOLD_RATE_STEP
@@ -336,6 +339,7 @@ export const COLOR_KEYS: (keyof ColorSettings)[] = [
   "brightness",
   "contrast",
   "saturate",
+  "temperature",
   "hueRotate",
   "grayscale",
   "sepia",
@@ -349,6 +353,7 @@ export function defaultColor(): ColorSettings {
     brightness: 1,
     contrast: 1,
     saturate: 1,
+    temperature: 0,
     hueRotate: 0,
     grayscale: 0,
     sepia: 0,

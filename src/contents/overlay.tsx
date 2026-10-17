@@ -13,7 +13,6 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Gauge,
-  MousePointerClick,
   Layers,
   RectangleHorizontal,
   PictureInPicture2,
@@ -48,6 +47,7 @@ import {
 } from "react"
 
 import { AD_BLOCK_CANCELLED, AD_BLOCK_CHECK, AD_BLOCK_DISMISS, AD_BLOCK_READY } from "~lib/ad-block"
+import { audioDownloadMarkup } from "~lib/audio-download-icon"
 import {
   EMPTY_BRIGHTNESS_READOUT,
   HISTOGRAM_HEIGHT,
@@ -83,6 +83,8 @@ import {
   SECTION_FIELDS,
   STRETCH_MAX,
   STRETCH_MIN,
+  TEMPERATURE_MAX,
+  TEMPERATURE_MIN,
   ZOOM_MAX,
   ZOOM_MIN,
   cropControlToCss,
@@ -225,10 +227,23 @@ const COLOR_CONTROLS: {
   digits: number
   format: (value: number) => string
   advanced?: boolean
+  className?: string
+  title?: string
 }[] = [
   { key: "brightness", label: "Brightness", min: 0.2, max: 2, step: 0.01, digits: 2, format: percent },
   { key: "contrast", label: "Contrast", min: 0.2, max: 2, step: 0.01, digits: 2, format: percent },
   { key: "saturate", label: "Saturation", min: 0, max: 3, step: 0.01, digits: 2, format: percent },
+  {
+    key: "temperature",
+    label: "Temperature",
+    min: TEMPERATURE_MIN,
+    max: TEMPERATURE_MAX,
+    step: 1,
+    digits: 0,
+    format: formatTemperature,
+    className: "vee-temp",
+    title: "Cool on the left, warm on the right"
+  },
   { key: "hueRotate", label: "Hue", min: 0, max: 360, step: 1, digits: 0, format: degrees, advanced: true },
   { key: "grayscale", label: "Grayscale", min: 0, max: 1, step: 0.01, digits: 2, format: percent, advanced: true },
   { key: "sepia", label: "Sepia", min: 0, max: 1, step: 0.01, digits: 2, format: percent, advanced: true },
@@ -257,11 +272,13 @@ const COLOR_CONTROLS: {
 
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 4]
 
+type DockGlyph = typeof Play | typeof AudioDownloadIcon
+
 const DOCK_PICKS: {
   key: (typeof DOCK_CONTROL_KEYS)[number] | "dockProgress"
   label: string
   title: string
-  icon: typeof Play
+  icon: DockGlyph
 }[] = [
   {
     key: "dockProgress",
@@ -291,7 +308,7 @@ const DOCK_PICKS: {
     key: "dockAudio",
     label: "Audio",
     title: "Save only the sound of this video as an M4A file",
-    icon: AudioLines
+    icon: AudioDownloadIcon
   },
   {
     key: "dockQuality",
@@ -351,6 +368,32 @@ function percent(value: number): string {
 
 function degrees(value: number): string {
   return `${Math.round(value)}°`
+}
+
+function formatTemperature(value: number): string {
+  const rounded = Math.round(value)
+  if (rounded === 0) return "Neutral"
+  if (rounded > 0) return `Warm ${rounded}`
+  return `Cool ${-rounded}`
+}
+
+function AudioDownloadIcon({
+  size = 16,
+  strokeWidth = 1.75
+}: {
+  size?: number | string
+  strokeWidth?: number | string
+}) {
+  const stroke = Number(strokeWidth)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      aria-hidden="true"
+      dangerouslySetInnerHTML={{ __html: audioDownloadMarkup(Number.isFinite(stroke) ? stroke : 1.75) }}
+    />
+  )
 }
 
 function formatRate(value: number): string {
@@ -1633,16 +1676,6 @@ function Overlay() {
       (settings.playbackTouched && settings.playbackEnabled))
   const rate = Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, settings.playbackRate))
   const holdSpeed = clampHoldPlaybackRate(settings.holdPlaybackRate)
-  const holdTooSlow = rate < HOLD_RATE_MIN
-  const holdMatches = !holdTooSlow && Math.abs(clampHoldPlaybackRate(rate) - holdSpeed) < 0.001
-  const holdCopyLabel = holdTooSlow
-    ? "Mouse press starts at 1×"
-    : holdMatches
-      ? `Mouse press is ${formatRate(rate)}`
-      : `Use ${formatRate(rate)} for mouse press`
-  const holdCopyTitle = holdTooSlow
-    ? "Mouse press speed starts at 1×"
-    : "Set current speed as mouse press speed"
 
   const histogram =
     settings.autoBrightness && settings.enabled && settings.videoEnabled ? (
@@ -1967,6 +2000,8 @@ function Overlay() {
                       step={control.step}
                       value={settings[control.key]}
                       display={control.format(settings[control.key])}
+                      className={control.className}
+                      title={control.title}
                       onChange={(value) => {
                         const nextValue = readRange(String(value), control.digits)
                         if (control.key === "brightness" && settingsRef.current.autoBrightness) {
@@ -2283,17 +2318,6 @@ function Overlay() {
                       </button>
                     ))}
                   </div>
-                  <button
-                    type="button"
-                    className="vee-hold-set"
-                    title={holdCopyTitle}
-                    aria-label={holdCopyTitle}
-                    disabled={holdTooSlow}
-                    data-on={String(holdMatches)}
-                    onClick={() => patch({ holdPlaybackRate: clampHoldPlaybackRate(rate) })}>
-                    <MousePointerClick size={14} strokeWidth={1.75} />
-                    {holdCopyLabel}
-                  </button>
                 </Group>
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
@@ -2947,7 +2971,7 @@ function PlaceCard({
 }: {
   id: DockPlaceId
   label: string
-  icon: typeof Play
+  icon: DockGlyph
   place: DockPlacement
   enabled: boolean
   onEnabled: () => void
@@ -3315,7 +3339,9 @@ function Slider({
   value,
   display,
   onChange,
-  showLabel = true
+  showLabel = true,
+  className,
+  title
 }: {
   label: string
   min: number
@@ -3325,6 +3351,8 @@ function Slider({
   display: string
   onChange: (value: number) => void
   showLabel?: boolean
+  className?: string
+  title?: string
 }) {
   return (
     <label className="vee-row">
@@ -3335,11 +3363,13 @@ function Slider({
         </span>
       ) : null}
       <input
+        className={className}
         type="range"
         min={min}
         max={max}
         step={step}
         value={value}
+        title={title}
         style={{ ["--p" as string]: percentOf(value, min, max) }}
         onChange={(event) => onChange(Number(event.target.value))}
       />

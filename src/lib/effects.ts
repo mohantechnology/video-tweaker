@@ -35,9 +35,12 @@ export const PAN_MAX = 200
 export const BLUR_MAX = 20
 export const OPACITY_MIN = 0.02
 export const OPACITY_MAX = 1
+/** Picture temperature. −100 is cool, 0 is unchanged, 100 is warm. */
+export const TEMPERATURE_MIN = -100
+export const TEMPERATURE_MAX = 100
 
 export const SECTION_FIELDS = {
-  basicVideoOn: ["brightness", "contrast", "saturate"],
+  basicVideoOn: ["brightness", "contrast", "saturate", "temperature"],
   frameOn: [
     "stretchX",
     "stretchY",
@@ -136,8 +139,74 @@ export function isVisualIdentity(settings: EffectSettings): boolean {
   return isColorIdentity(settings) && isGeometryIdentity(settings)
 }
 
-export function buildFilter(settings: EffectSettings): string {
-  return [
+export function clampTemperature(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(clamp(value, TEMPERATURE_MIN, TEMPERATURE_MAX))
+}
+
+const TEMPERATURE_FILTER_ID = "vee-color-temperature"
+const SVG_NS = "http://www.w3.org/2000/svg"
+
+/**
+ * CSS filters have no temperature function. Sepia plus hue-rotate recolors the
+ * whole frame. This matrix only raises red and lowers blue, or the reverse,
+ * so greens stay green. An overlay would sit on the player and miss full screen.
+ */
+export function temperatureMatrix(value: number): string | null {
+  const t = clampTemperature(value) / 100
+  if (Math.abs(t) < 0.001) return null
+  const shift = t * 0.55
+  const red = round(1 + shift * 0.6, 3)
+  const green = round(1 - Math.abs(shift) * 0.04, 3)
+  const blue = round(1 - shift * 0.7, 3)
+  return `${red} 0 0 0 0 0 ${green} 0 0 0 0 0 ${blue} 0 0 0 0 0 1 0`
+}
+
+function temperatureParent(video: HTMLVideoElement): ParentNode {
+  const root = video.getRootNode()
+  return root instanceof ShadowRoot ? root : document.documentElement
+}
+
+function temperatureFilterNode(parent: ParentNode): SVGFilterElement | null {
+  const found =
+    parent instanceof ShadowRoot
+      ? parent.querySelector(`#${TEMPERATURE_FILTER_ID}`)
+      : document.getElementById(TEMPERATURE_FILTER_ID)
+  return found instanceof SVGFilterElement ? found : null
+}
+
+function syncTemperatureFilter(video: HTMLVideoElement, temperature: number): boolean {
+  const values = temperatureMatrix(temperature)
+  if (!values) return false
+  const parent = temperatureParent(video)
+  let filter = temperatureFilterNode(parent)
+  if (!filter) {
+    const svg = document.createElementNS(SVG_NS, "svg")
+    svg.setAttribute("aria-hidden", "true")
+    svg.setAttribute("width", "0")
+    svg.setAttribute("height", "0")
+    svg.style.position = "absolute"
+    svg.style.width = "0"
+    svg.style.height = "0"
+    svg.style.overflow = "hidden"
+    svg.style.pointerEvents = "none"
+    filter = document.createElementNS(SVG_NS, "filter")
+    filter.id = TEMPERATURE_FILTER_ID
+    filter.setAttribute("color-interpolation-filters", "sRGB")
+    const matrix = document.createElementNS(SVG_NS, "feColorMatrix")
+    matrix.setAttribute("type", "matrix")
+    filter.append(matrix)
+    svg.append(filter)
+    parent.append(svg)
+  }
+  const matrix = filter.querySelector("feColorMatrix")
+  if (!(matrix instanceof SVGElement)) return false
+  if (matrix.getAttribute("values") !== values) matrix.setAttribute("values", values)
+  return true
+}
+
+export function buildFilter(settings: EffectSettings, temperatureReady = false): string {
+  const filter = [
     `brightness(${round(settings.brightness)})`,
     `contrast(${round(settings.contrast)})`,
     `saturate(${round(settings.saturate)})`,
@@ -148,6 +217,8 @@ export function buildFilter(settings: EffectSettings): string {
     `blur(${round(settings.blur, 2)}px)`,
     `opacity(${round(settings.opacity)})`
   ].join(" ")
+  if (!temperatureReady || !temperatureMatrix(settings.temperature)) return filter
+  return `${filter} url(#${TEMPERATURE_FILTER_ID})`
 }
 
 export function buildTransform(settings: EffectSettings): string {
@@ -245,7 +316,8 @@ export function applyVisual(
     video.style.removeProperty("filter")
     delete video.dataset.veeFilter
   } else {
-    writeVisual(video, "filter", buildFilter(visual))
+    const temperatureReady = syncTemperatureFilter(video, visual.temperature)
+    writeVisual(video, "filter", buildFilter(visual, temperatureReady))
   }
 
   if (isTransformIdentity(visual)) {

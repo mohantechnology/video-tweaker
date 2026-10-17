@@ -4,6 +4,7 @@ export const PRESET_SNAPSHOT_KEYS = [
   "brightness",
   "contrast",
   "saturate",
+  "temperature",
   "hueRotate",
   "grayscale",
   "sepia",
@@ -82,7 +83,8 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -97,7 +99,8 @@ export const PRESETS: Preset[] = [
       sepia: 0.12,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -112,7 +115,8 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -127,7 +131,8 @@ export const PRESETS: Preset[] = [
       sepia: 0.05,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -142,7 +147,8 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -157,7 +163,8 @@ export const PRESETS: Preset[] = [
       sepia: 0.28,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   },
   {
@@ -172,7 +179,8 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
-      opacity: 1
+      opacity: 1,
+      temperature: 0
     }
   }
 ]

@@ -31,6 +31,7 @@ import {
   type Rendition,
   type RenditionMessage
 } from "./renditions"
+import { audioDownloadSvg } from "./audio-download-icon"
 import { seekBy, togglePictureInPicture } from "./effects"
 import { NATIVE_PLAYER_ATTR, playerMediaLevel, readNativePlayer, YT_ECHO_ATTR, YT_HOLD_ATTR } from "./native-mirror"
 import { formatClock } from "./progress"
@@ -38,7 +39,6 @@ import { LIGHT_APPLY_DELAY_MS, PLAYER_CHROME_HIDE_MS } from "../settings"
 import {
   DOCK_CONTROL_KEYS,
   DOCK_ICON_ORDER,
-  HOLD_RATE_MIN,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   clampHoldPlaybackRate,
@@ -351,6 +351,7 @@ const BAR_STYLE = `
   cursor: pointer;
 }
 #${SEEK_BAR_ID} .vee-speed-pop .vee-pop-card {
+  position: relative;
   width: 280px;
   padding: 14px 16px 10px;
   box-sizing: border-box;
@@ -456,22 +457,20 @@ const BAR_STYLE = `
   color: #fff;
 }
 #${SEEK_BAR_ID} .vee-speed-hold {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  margin: 8px 0 2px;
-  padding: 6px 10px;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
   border: 0;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.88);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.92);
   cursor: pointer;
 }
 #${SEEK_BAR_ID} .vee-speed-hold svg {
@@ -491,8 +490,8 @@ const BAR_STYLE = `
   cursor: default;
 }
 #${SEEK_BAR_ID} .vee-speed-hold[data-disabled="true"]:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.92);
 }
 #${SEEK_BAR_ID} .vee-speed-hold:focus-visible {
   outline: 2px solid rgba(255, 255, 255, 0.7);
@@ -894,8 +893,7 @@ const ICON_EXIT_FULL =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
 const ICON_DOWNLOAD =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>'
-const ICON_AUDIO =
-  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor" stroke="none"/><circle cx="16.5" cy="16" r="2.5" fill="currentColor" stroke="none"/></svg>'
+const ICON_AUDIO = audioDownloadSvg(16)
 const ICON_MOUSE =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></svg>'
 const ICON_QUALITY =
@@ -1871,27 +1869,19 @@ function paintSpeed(rate: number): void {
 function paintHoldSpeed(rate: number): void {
   const button = speedHoldBtn
   if (!button) return
-  const label = button.querySelector("span")
   const settings = readSettings()
   const current = clampRate(rate)
-  const tooSlow = current < HOLD_RATE_MIN
   const hold = clampHoldPlaybackRate(settings?.holdPlaybackRate ?? Number.NaN)
-  const same = !tooSlow && Math.abs(clampHoldPlaybackRate(current) - hold) < 0.001
-  const text = tooSlow
-    ? "Mouse press starts at 1x"
-    : same
-      ? `Mouse press is ${formatPressRate(current)}`
-      : `Use ${formatPressRate(current)} for mouse press`
-  const title = tooSlow
-    ? "Mouse press speed starts at 1×"
-    : "Set current speed as mouse press speed"
+  const same = Math.abs(clampHoldPlaybackRate(current) - hold) < 0.001
+  const title = same
+    ? `Mouse press is ${formatPressRate(current)}`
+    : `Use ${formatPressRate(current)} for mouse press`
   button.disabled = false
-  button.dataset.disabled = String(tooSlow)
-  button.setAttribute("aria-disabled", String(tooSlow))
+  button.dataset.disabled = "false"
+  button.removeAttribute("aria-disabled")
   button.dataset.on = String(same)
   button.title = title
   button.setAttribute("aria-label", title)
-  if (label) label.textContent = text
 }
 
 function setHoldFromCurrent(): void {
@@ -1899,7 +1889,6 @@ function setHoldFromCurrent(): void {
   const settings = readSettings()
   if (!video || !settings) return
   const current = clampRate(pendingRate ?? shownRate(video, settings))
-  if (current < HOLD_RATE_MIN) return
   onControl?.({ type: "hold", holdPlaybackRate: clampHoldPlaybackRate(current) })
   paintSpeed(current)
 }
@@ -4363,6 +4352,7 @@ function ensureBar(): HTMLDivElement {
         <button type="button" class="vee-rate-btn" data-act="speed-btn" aria-label="Playback speed">1.00x</button>
         <div class="vee-pop vee-speed-pop" data-pop="speed">
           <div class="vee-pop-card">
+            <button type="button" class="vee-speed-hold" data-act="speed-hold" title="Set current speed as mouse press speed" aria-label="Set current speed as mouse press speed">${ICON_MOUSE}</button>
             <div class="vee-speed-readout">1.00x</div>
             <div class="vee-speed-adjust">
               <button type="button" class="vee-speed-step" data-act="speed-minus" aria-label="Slower">−</button>
@@ -4370,7 +4360,6 @@ function ensureBar(): HTMLDivElement {
               <button type="button" class="vee-speed-step" data-act="speed-plus" aria-label="Faster">+</button>
             </div>
             <div class="vee-speed-chips">${chips}</div>
-            <button type="button" class="vee-speed-hold" data-act="speed-hold" title="Set current speed as mouse press speed" aria-label="Set current speed as mouse press speed">${ICON_MOUSE}<span>Use for mouse press</span></button>
             <div class="vee-speed-caption"><span>Normal</span></div>
           </div>
         </div>

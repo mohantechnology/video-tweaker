@@ -9,7 +9,8 @@ import {
   PAN_MIN,
   ZOOM_MAX,
   ZOOM_MIN,
-  clamp
+  clamp,
+  clampTemperature
 } from "./effects"
 import {
   PRESET_SNAPSHOT_KEYS,
@@ -90,6 +91,7 @@ export function normalizeSettings(value: unknown, hostname = ""): EffectSettings
   next.cropBottom = clamp(next.cropBottom, 0, CROP_MAX)
   next.blur = Math.round(clamp(next.blur, 0, BLUR_MAX) * 10) / 10
   next.opacity = clamp(next.opacity, OPACITY_MIN, OPACITY_MAX)
+  next.temperature = clampTemperature(next.temperature)
   next.holdPlaybackRate = clampHoldPlaybackRate(next.holdPlaybackRate)
   // Older saves have no audioTouched. A custom volume or mute was chosen.
   // Default loudness was not: treating it as chosen made every speed change
