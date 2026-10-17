@@ -42,6 +42,8 @@ import {
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
   clampHoldPlaybackRate,
+  clampSkipSeconds,
+  clampVolumeStep,
   type DockEdge,
   type DockPlaceId,
   type DockPlacement,
@@ -64,7 +66,6 @@ const SPEED_CHIPS = [1, 1.25, 1.5, 2, 3, 4] as const
 const FS_SHELL_ID = "vee-fs-shell"
 const QUALITY_WAIT_ID = "vee-quality-wait"
 const DOCK_HOST_ID = "vee-csui"
-const SKIP_SECONDS = 10
 
 export type DockControl =
   | { type: "audio"; volume?: number; muted?: boolean }
@@ -213,6 +214,11 @@ const BAR_STYLE = `
 }
 #${SEEK_BAR_ID} .vee-chrome-btn svg {
   display: block;
+}
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="back"] svg,
+#${SEEK_BAR_ID} .vee-chrome-btn[data-act="forward"] svg {
+  width: 22px;
+  height: 22px;
 }
 #${SEEK_BAR_ID} .vee-chrome-btn[data-act="download"],
 #${SEEK_BAR_ID} .vee-chrome-btn[data-act="audio"] {
@@ -472,6 +478,7 @@ const BAR_STYLE = `
   background: rgba(255, 255, 255, 0.1);
   color: rgba(255, 255, 255, 0.92);
   cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
 }
 #${SEEK_BAR_ID} .vee-speed-hold svg {
   display: block;
@@ -484,6 +491,26 @@ const BAR_STYLE = `
 #${SEEK_BAR_ID} .vee-speed-hold[data-on="true"] {
   background: rgba(255, 255, 255, 0.22);
   color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-hold[data-differ="true"] {
+  background: linear-gradient(145deg, #8d73ff, #5d46e8);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(216, 204, 255, 0.5);
+}
+#${SEEK_BAR_ID} .vee-speed-hold.vee-hold-ping {
+  animation: vee-hold-attention 420ms ease;
+}
+#${SEEK_BAR_ID} .vee-speed-hold[data-differ="true"]:hover:not([data-disabled="true"]) {
+  background: linear-gradient(145deg, #9d86ff, #6a52f0);
+  color: #fff;
+}
+#${SEEK_BAR_ID} .vee-speed-hold:active:not([data-disabled="true"]) {
+  transform: scale(0.92);
+}
+@keyframes vee-hold-attention {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.14); }
+  100% { transform: scale(1); }
 }
 #${SEEK_BAR_ID} .vee-speed-hold[data-disabled="true"] {
   opacity: 0.45;
@@ -860,6 +887,9 @@ const BAR_STYLE = `
     animation: none;
     border-color: rgba(255, 255, 255, 0.85);
   }
+  #${SEEK_BAR_ID} .vee-speed-hold {
+    animation: none;
+  }
 }
 `
 
@@ -867,14 +897,14 @@ const ICON_PLAY =
   '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M8.2 5.2v13.6c0 .8.9 1.3 1.6.9l10.2-6.8c.6-.4.6-1.3 0-1.7L9.8 4.3c-.7-.4-1.6.1-1.6.9z"/></svg>'
 const ICON_PAUSE =
   '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M6.5 5h3.4c.3 0 .6.3.6.6v12.8c0 .3-.3.6-.6.6H6.5c-.3 0-.6-.3-.6-.6V5.6c0-.3.3-.6.6-.6zm7.6 0h3.4c.3 0 .6.3.6.6v12.8c0 .3-.3.6-.6.6h-3.4c-.3 0-.6-.3-.6-.6V5.6c0-.3.3-.6.6-.6z"/></svg>'
-const ICON_BACK =
-  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11 17-5-5 5-5"/><path d="m18 17-5-5 5-5"/></svg>'
-const ICON_FORWARD =
-  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m13 17 5-5-5-5"/><path d="m6 17 5-5-5-5"/></svg>'
-const ICON_BACK_10 =
-  '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8.4 7.1A6.3 6.3 0 1 1 6.6 14.6"/><path fill="currentColor" d="M6.1 4.6v4.5h4.3z"/><text x="13.1" y="15.15" text-anchor="middle" font-size="7" font-weight="700" fill="currentColor" font-family="Roboto,Arial,sans-serif">10</text></svg>'
-const ICON_FORWARD_10 =
-  '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M15.6 7.1A6.3 6.3 0 1 0 17.4 14.6"/><path fill="currentColor" d="M17.9 4.6v4.5h-4.3z"/><text x="10.9" y="15.15" text-anchor="middle" font-size="7" font-weight="700" fill="currentColor" font-family="Roboto,Arial,sans-serif">10</text></svg>'
+function skipIcon(seconds: number, direction: "back" | "forward"): string {
+  const label = String(seconds)
+  const size = label.length > 1 ? 6.5 : 8
+  if (direction === "back") {
+    return `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8.4 7.1A6.3 6.3 0 1 1 6.6 14.6"/><path fill="currentColor" d="M6.1 4.6v4.5h4.3z"/><text x="13.1" y="15.15" text-anchor="middle" font-size="${size}" font-weight="700" fill="currentColor" font-family="Roboto,Arial,sans-serif">${label}</text></svg>`
+  }
+  return `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M15.6 7.1A6.3 6.3 0 1 0 17.4 14.6"/><path fill="currentColor" d="M17.9 4.6v4.5h-4.3z"/><text x="10.9" y="15.15" text-anchor="middle" font-size="${size}" font-weight="700" fill="currentColor" font-family="Roboto,Arial,sans-serif">${label}</text></svg>`
+}
 const ICON_VOLUME =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>'
 const ICON_VOLUME_LOW =
@@ -939,6 +969,9 @@ const controlNodes = new Map<DockPlaceId, HTMLDivElement>()
 const packNodes = new Map<string, HTMLDivElement>()
 
 let boundVideo: HTMLVideoElement | null = null
+/** Video the bridge last offered, even when the on-video bar is hidden. */
+let pageVideo: HTMLVideoElement | null = null
+let heldArrow: string | null = null
 let dragging = false
 let dragPointerId = -1
 let volumeDrag = false
@@ -1873,15 +1906,31 @@ function paintHoldSpeed(rate: number): void {
   const current = clampRate(rate)
   const hold = clampHoldPlaybackRate(settings?.holdPlaybackRate ?? Number.NaN)
   const same = Math.abs(clampHoldPlaybackRate(current) - hold) < 0.001
+  const shownRateLabel = formatPressRate(current)
   const title = same
-    ? `Mouse press is ${formatPressRate(current)}`
-    : `Use ${formatPressRate(current)} for mouse press`
+    ? `Mouse press is ${shownRateLabel}`
+    : `Click to use ${shownRateLabel} for mouse press`
   button.disabled = false
   button.dataset.disabled = "false"
   button.removeAttribute("aria-disabled")
-  button.dataset.on = String(same)
+  delete button.dataset.on
+  button.dataset.differ = same ? "false" : "true"
   button.title = title
   button.setAttribute("aria-label", title)
+  if (same) {
+    delete button.dataset.rate
+    button.classList.remove("vee-hold-ping")
+    return
+  }
+  if (button.dataset.rate === shownRateLabel) return
+  button.dataset.rate = shownRateLabel
+  if (speedPop?.dataset.open === "true") replayHoldPing(button)
+}
+
+function replayHoldPing(button: HTMLButtonElement): void {
+  button.classList.remove("vee-hold-ping")
+  void button.offsetWidth
+  button.classList.add("vee-hold-ping")
 }
 
 function setHoldFromCurrent(): void {
@@ -2911,6 +2960,105 @@ function onViewerInput(event: Event): void {
   if (event.isTrusted) lastViewerInput = performance.now()
 }
 
+function activePageVideo(): HTMLVideoElement | null {
+  if (boundVideo?.isConnected) return boundVideo
+  if (pageVideo?.isConnected) return pageVideo
+  return null
+}
+
+function currentSkipSeconds(): number {
+  return clampSkipSeconds(readSettings()?.skipSeconds ?? Number.NaN)
+}
+
+function isTextEntry(node: HTMLElement, direct: boolean): boolean {
+  if (node.isContentEditable) return true
+  const role = node.getAttribute("role")
+  if (role === "textbox" || role === "searchbox" || role === "combobox") return true
+  if (direct && role === "slider") return true
+  const tag = node.tagName
+  if (tag === "TEXTAREA" || tag === "SELECT") return true
+  if (tag !== "INPUT") return false
+  const type = (node as HTMLInputElement).type
+  return type !== "button" && type !== "checkbox" && type !== "radio" && type !== "submit" && type !== "reset" && type !== "file"
+}
+
+function deepestActive(node: Element | null): Element | null {
+  let current = node
+  while (current?.shadowRoot?.activeElement) current = current.shadowRoot.activeElement
+  return current
+}
+
+function isTypingEvent(event: KeyboardEvent): boolean {
+  const active = deepestActive(document.activeElement)
+  const target = event.target instanceof HTMLElement ? event.target : null
+  const focused = active instanceof HTMLElement ? active : null
+  for (const node of event.composedPath()) {
+    if (!(node instanceof HTMLElement)) continue
+    if (isTextEntry(node, node === target || node === focused)) return true
+  }
+  return focused ? isTextEntry(focused, true) : false
+}
+
+type ArrowJob = "back" | "forward" | "up" | "down"
+
+function arrowJob(event: KeyboardEvent): ArrowJob | null {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return null
+  if (isTypingEvent(event)) return null
+  const settings = readSettings()
+  if (!settings || !activePageVideo()) return null
+  if (settings.skipArrowKeys && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    return event.key === "ArrowLeft" ? "back" : "forward"
+  }
+  if (settings.volumeArrowKeys && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    return event.key === "ArrowUp" ? "up" : "down"
+  }
+  return null
+}
+
+function jumpBySkip(direction: -1 | 1): void {
+  const video = activePageVideo()
+  if (!video) return
+  seekBy(video, direction * currentSkipSeconds())
+  if (video === boundVideo) {
+    updateFill()
+    paintTime(video)
+  }
+}
+
+function nudgeVolume(direction: 1 | -1): void {
+  const video = activePageVideo()
+  const settings = readSettings()
+  if (!video || !settings) return
+  const step = clampVolumeStep(settings.volumeStepPercent)
+  const level = pendingVolume ?? shownAudio(video, settings)
+  const base = level.muted || level.volume <= 0.001 ? 0 : level.volume
+  const percent = Math.min(100, Math.max(0, Math.round(base * 100) + direction * step))
+  const volume = percent / 100
+  const muted = percent <= 0
+  pendingVolume = { volume, muted }
+  if (video === boundVideo) paintControls()
+  scheduleVolume(volume, muted)
+}
+
+function onArrowKey(event: KeyboardEvent): void {
+  const job = arrowJob(event)
+  if (!job) return
+  heldArrow = event.key
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+  if (job === "back" || job === "forward") jumpBySkip(job === "back" ? -1 : 1)
+  else nudgeVolume(job === "up" ? 1 : -1)
+}
+
+function onArrowRelease(event: KeyboardEvent): void {
+  if (heldArrow !== event.key) return
+  heldArrow = null
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+}
+
 /** Level captured at the switch, or the live one once the viewer changed it. */
 function soundtrackLevelNow(video: HTMLVideoElement): { muted: boolean; volume: number } {
   const settings = readSettings()
@@ -3651,15 +3799,22 @@ function placeTrack(place: DockPlacement, shown: boolean): void {
   hit.style.transform = "translateX(-50%)"
 }
 
+function skipLabel(seconds: number, direction: "Back" | "Forward"): string {
+  const unit = seconds === 1 ? "second" : "seconds"
+  return `${direction} ${seconds} ${unit}`
+}
+
 function paintSkipIcons(): void {
   if (!backBtn || !forwardBtn) return
-  if (root?.dataset.skin === "youtube") {
-    setIcon(backBtn, "back10", ICON_BACK_10)
-    setIcon(forwardBtn, "fwd10", ICON_FORWARD_10)
-    return
-  }
-  setIcon(backBtn, "back", ICON_BACK)
-  setIcon(forwardBtn, "forward", ICON_FORWARD)
+  const seconds = currentSkipSeconds()
+  const backLabel = skipLabel(seconds, "Back")
+  const forwardLabel = skipLabel(seconds, "Forward")
+  setIcon(backBtn, `back-${seconds}`, skipIcon(seconds, "back"))
+  setIcon(forwardBtn, `fwd-${seconds}`, skipIcon(seconds, "forward"))
+  backBtn.setAttribute("aria-label", backLabel)
+  forwardBtn.setAttribute("aria-label", forwardLabel)
+  backBtn.title = backLabel
+  forwardBtn.title = forwardLabel
 }
 
 function applyChromeSkin(video: HTMLVideoElement | null): void {
@@ -4344,8 +4499,8 @@ function ensureBar(): HTMLDivElement {
       <span class="vee-chrome-time" data-act="time"></span>
     </div>
     <div class="vee-control" data-place="skip">
-      <button type="button" class="vee-chrome-btn" data-act="back" aria-label="Back 10 seconds">${ICON_BACK}</button>
-      <button type="button" class="vee-chrome-btn" data-act="forward" aria-label="Forward 10 seconds">${ICON_FORWARD}</button>
+      <button type="button" class="vee-chrome-btn" data-act="back" aria-label="${skipLabel(currentSkipSeconds(), "Back")}">${skipIcon(currentSkipSeconds(), "back")}</button>
+      <button type="button" class="vee-chrome-btn" data-act="forward" aria-label="${skipLabel(currentSkipSeconds(), "Forward")}">${skipIcon(currentSkipSeconds(), "forward")}</button>
     </div>
     <div class="vee-control" data-place="speed">
       <div class="vee-pop-anchor" data-act="speed" data-out="up">
@@ -4441,10 +4596,12 @@ function ensureBar(): HTMLDivElement {
   }
 
   const openSpeed = () => {
+    const wasOpen = speedPop?.dataset.open === "true"
     cancelPopClose("speed")
     if (speedPop) speedPop.dataset.open = "true"
     alignSpeedCard()
     showChrome()
+    if (!wasOpen && speedHoldBtn?.dataset.differ === "true") replayHoldPing(speedHoldBtn)
   }
   speedAnchor?.addEventListener("pointerenter", openSpeed)
   speedAnchor?.addEventListener("pointerleave", (event) => {
@@ -4514,7 +4671,7 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     const video = boundVideo
     if (!video) return
-    seekBy(video, -SKIP_SECONDS)
+    seekBy(video, -currentSkipSeconds())
     updateFill()
     paintTime(video)
   })
@@ -4522,7 +4679,7 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     const video = boundVideo
     if (!video) return
-    seekBy(video, SKIP_SECONDS)
+    seekBy(video, currentSkipSeconds())
     updateFill()
     paintTime(video)
   })
@@ -4977,6 +5134,7 @@ export function placeSeekBar(video: HTMLVideoElement | null, attempt = 0): void 
 }
 
 export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSettings): void {
+  pageVideo = video && video.isConnected ? video : null
   if (!shouldShow(settings) || !video || !video.isConnected) {
     if (boundVideo) unbindVideo(boundVideo)
     boundVideo = null
@@ -5012,7 +5170,9 @@ export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSett
     settings.playbackRate,
     settings.loop,
     settings.audioTouched,
-    settings.playbackTouched
+    settings.playbackTouched,
+    settings.holdPlaybackRate,
+    settings.skipSeconds
   ].join("|")
   const playerMark = video.getAttribute(NATIVE_PLAYER_ATTR) || ""
   if (mediaStamp !== shownMediaStamp || playerMark !== shownPlayerMark) {
@@ -5051,6 +5211,8 @@ export function stopSeekBar(): void {
   window.removeEventListener("message", onRenditionMessage)
   window.removeEventListener("pointerdown", onViewerInput, true)
   window.removeEventListener("keydown", onViewerInput, true)
+  window.removeEventListener("keydown", onArrowKey, true)
+  window.removeEventListener("keyup", onArrowRelease, true)
   document.removeEventListener("click", onSiteAudioClick, true)
   document.removeEventListener("play", onPageAudio, true)
   clearHoverSamples()
@@ -5111,6 +5273,8 @@ export function stopSeekBar(): void {
   audioBusy = false
   layoutStamp = ""
   shownMediaStamp = ""
+  pageVideo = null
+  heldArrow = null
   shownPlayerMark = ""
   qualityStamp = ""
   catalogSeen = false
@@ -5176,6 +5340,8 @@ export function startSeekBar(options: {
   askYoutubeOffer()
   window.addEventListener("pointerdown", onViewerInput, true)
   window.addEventListener("keydown", onViewerInput, true)
+  window.addEventListener("keydown", onArrowKey, true)
+  window.addEventListener("keyup", onArrowRelease, true)
   document.addEventListener("click", onSiteAudioClick, true)
   document.addEventListener("play", onPageAudio, true)
   hookHistory()

@@ -25,6 +25,8 @@ import {
   DOCK_FLAG_KEYS,
   clampHoldPlaybackRate,
   clampResumeLead,
+  clampSkipSeconds,
+  clampVolumeStep,
   defaultSettings,
   resolveDockLayout,
   type DockAlign,
@@ -102,6 +104,8 @@ export function normalizeSettings(value: unknown, hostname = ""): EffectSettings
   }
   if (!isDockAlign(raw.dockAlign)) next.dockAlign = "left"
   next.resumeLeadSeconds = clampResumeLead(next.resumeLeadSeconds)
+  next.skipSeconds = clampSkipSeconds(next.skipSeconds)
+  next.volumeStepPercent = clampVolumeStep(next.volumeStepPercent)
   next.dockLayout = resolveDockLayout(
     raw.dockLayout,
     next.dockAlign,

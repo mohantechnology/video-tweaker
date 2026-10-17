@@ -44,6 +44,28 @@ export function clampHoldPlaybackRate(value: number): number {
   return Math.min(HOLD_RATE_MAX, Math.max(HOLD_RATE_MIN, hundredths))
 }
 
+/** Seconds each on-video skip control moves. */
+export const SKIP_SECONDS_DEFAULT = 5
+export const SKIP_SECONDS_MIN = 1
+export const SKIP_SECONDS_MAX = 60
+
+/** Percent each volume arrow press adds or removes. */
+export const VOLUME_STEP_DEFAULT = 5
+export const VOLUME_STEP_MIN = 1
+export const VOLUME_STEP_MAX = 50
+
+/** Snaps a skip length onto a whole number of seconds. */
+export function clampSkipSeconds(value: number): number {
+  if (!Number.isFinite(value)) return SKIP_SECONDS_DEFAULT
+  return Math.min(SKIP_SECONDS_MAX, Math.max(SKIP_SECONDS_MIN, Math.round(value)))
+}
+
+/** Snaps a volume arrow step onto a whole percent. */
+export function clampVolumeStep(value: number): number {
+  if (!Number.isFinite(value)) return VOLUME_STEP_DEFAULT
+  return Math.min(VOLUME_STEP_MAX, Math.max(VOLUME_STEP_MIN, Math.round(value)))
+}
+
 export type EffectSettings = ColorSettings & {
   enabled: boolean
   flipH: boolean
@@ -155,8 +177,16 @@ export type EffectSettings = ColorSettings & {
   dockAudio: boolean
   /** Choose a resolution when the page already lists more than one. */
   dockQuality: boolean
-  /** Skip back and forward 10 seconds on the on-video bar. */
+  /** Skip back and forward on the on-video bar. */
   dockSkip: boolean
+  /** Seconds each skip button, and enabled arrow keys, move the video. */
+  skipSeconds: number
+  /** Left and right arrow keys jump by skipSeconds instead of the site player. */
+  skipArrowKeys: boolean
+  /** Up and down arrow keys change volume by volumeStepPercent instead of the site player. */
+  volumeArrowKeys: boolean
+  /** Percent added or removed for each volume arrow press. */
+  volumeStepPercent: number
   /**
    * Master switch for skip advertisement. Off leaves the four methods saved
    * and unused. On runs each method whose own switch is on.
@@ -425,6 +455,10 @@ export function defaultSettings(): EffectSettings {
     dockAudio: false,
     dockQuality: false,
     dockSkip: false,
+    skipSeconds: SKIP_SECONDS_DEFAULT,
+    skipArrowKeys: false,
+    volumeArrowKeys: false,
+    volumeStepPercent: VOLUME_STEP_DEFAULT,
     skipAdsEnabled: false,
     skipAds: false,
     skipAdsSpeed: false,

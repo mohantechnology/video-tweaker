@@ -189,7 +189,13 @@ import {
   DOCK_CONTROL_KEYS,
   PLAYBACK_RATE_MAX,
   PLAYBACK_RATE_MIN,
+  SKIP_SECONDS_MAX,
+  SKIP_SECONDS_MIN,
+  VOLUME_STEP_MAX,
+  VOLUME_STEP_MIN,
   clampHoldPlaybackRate,
+  clampSkipSeconds,
+  clampVolumeStep,
   customAnchor,
   defaultSettings,
   settingsEqual,
@@ -316,7 +322,7 @@ const DOCK_PICKS: {
     title: "Choose a resolution when the page already lists more than one",
     icon: Monitor
   },
-  { key: "dockSkip", label: "Skip", title: "Skip back and forward 10 seconds on the video", icon: ChevronsRight }
+  { key: "dockSkip", label: "Skip", title: "Skip back and forward on the video", icon: ChevronsRight }
 ]
 
 type DockPickKey = (typeof DOCK_PICKS)[number]["key"]
@@ -486,6 +492,10 @@ const PLAYBACK_RESET_KEYS = [
   "dockLayoutAuto",
   "dockFlagsAuto",
   "resumeLeadSeconds",
+  "skipSeconds",
+  "skipArrowKeys",
+  "volumeArrowKeys",
+  "volumeStepPercent",
   ...DOCK_CONTROL_KEYS,
   "skipAdsEnabled",
   "skipAds",
@@ -2681,6 +2691,45 @@ function Overlay() {
             onEnabled={() => toggleDockFlag(placeChoice.key)}
             onReset={() => resetDockPlace(placeId)}
             onChange={(change) => moveDock(placeId, change)}
+            tools={
+              placeId === "skip" ? (
+                <>
+                  <StepField
+                    label="Skip length"
+                    detail="Seconds each skip button moves."
+                    value={settings.skipSeconds}
+                    min={SKIP_SECONDS_MIN}
+                    max={SKIP_SECONDS_MAX}
+                    unit="sec"
+                    onChange={(value) => patch({ skipSeconds: clampSkipSeconds(value) })}
+                  />
+                  <SwitchRow
+                    label="Left and right keys"
+                    detail="Jump by this amount instead of the player's arrow keys."
+                    checked={settings.skipArrowKeys}
+                    onClick={() => patch({ skipArrowKeys: !settings.skipArrowKeys })}
+                  />
+                </>
+              ) : placeId === "volume" ? (
+                <>
+                  <SwitchRow
+                    label="Up and down keys"
+                    detail="Change volume by the step below instead of the player's arrow keys."
+                    checked={settings.volumeArrowKeys}
+                    onClick={() => patch({ volumeArrowKeys: !settings.volumeArrowKeys })}
+                  />
+                  <StepField
+                    label="Volume step"
+                    detail="Percent each arrow press changes the volume."
+                    value={settings.volumeStepPercent}
+                    min={VOLUME_STEP_MIN}
+                    max={VOLUME_STEP_MAX}
+                    unit="%"
+                    onChange={(value) => patch({ volumeStepPercent: clampVolumeStep(value) })}
+                  />
+                </>
+              ) : null
+            }
           />
         </div>
       ) : null}
@@ -2967,7 +3016,8 @@ function PlaceCard({
   enabled,
   onEnabled,
   onReset,
-  onChange
+  onChange,
+  tools
 }: {
   id: DockPlaceId
   label: string
@@ -2977,6 +3027,7 @@ function PlaceCard({
   onEnabled: () => void
   onReset: () => void
   onChange: (change: Partial<DockPlacement>) => void
+  tools?: React.ReactNode
 }) {
   return (
     <div className="vee-place-card" data-place={id}>
@@ -3000,6 +3051,7 @@ function PlaceCard({
           <i />
         </button>
       </div>
+      {tools}
       <p className="vee-place-label">Side</p>
       <div className="vee-seg" role="group" aria-label={`${label} side`}>
         {DOCK_SIDES.map((side) => (
@@ -3056,6 +3108,53 @@ function PlaceCard({
         Reset
       </button>
     </div>
+  )
+}
+
+function StepField({
+  label,
+  detail,
+  value,
+  min,
+  max,
+  unit,
+  onChange
+}: {
+  label: string
+  detail: string
+  value: number
+  min: number
+  max: number
+  unit: string
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="vee-step-field">
+      <span>
+        {label}
+        <small>{detail}</small>
+      </span>
+      <span className="vee-step-value">
+        <input
+          type="number"
+          inputMode="numeric"
+          min={min}
+          max={max}
+          step={1}
+          value={value}
+          aria-label={label}
+          title={`${min} to ${max}`}
+          onChange={(event) => {
+            const raw = event.target.value.trim()
+            if (!raw) return
+            const parsed = Number(raw)
+            if (!Number.isFinite(parsed)) return
+            onChange(parsed)
+          }}
+        />
+        <b>{unit}</b>
+      </span>
+    </label>
   )
 }
 

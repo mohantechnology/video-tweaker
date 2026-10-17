@@ -1094,6 +1094,8 @@ a.vee-progress-link:hover {
   position: absolute;
   z-index: 8;
   width: min(280px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: auto;
   padding: 10px;
   border-radius: 16px;
   background: rgba(20, 18, 30, 0.98);
@@ -1114,8 +1116,76 @@ a.vee-progress-link:hover {
   background: transparent;
 }
 
-.vee-place-pop .vee-switch-row {
+.vee-place-pop .vee-switch-row,
+.vee-place-pop .vee-step-field {
+  margin: 0 0 8px;
+  padding: 8px;
+}
+
+.vee-step-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin: 0 0 10px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: inherit;
+  cursor: default;
+}
+
+.vee-step-field > span:first-child {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.vee-place-pop .vee-switch-row > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.vee-step-field small {
+  display: block;
+  margin-top: 4px;
+  color: rgba(246, 243, 255, 0.52);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 450;
+}
+
+.vee-step-value {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.vee-step-value b {
+  font-size: 11px;
+  font-weight: 650;
+  color: rgba(246, 243, 255, 0.72);
+}
+
+.vee-step-field input[type="number"] {
+  width: 52px;
+  height: 28px;
+  margin: 0;
+  padding: 0 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  color-scheme: dark;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .vee-place-pop button:focus-visible,
