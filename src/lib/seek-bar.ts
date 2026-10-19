@@ -1036,7 +1036,12 @@ let lockedCode = ""
 let applyingQuality = false
 let historyHooked = false
 let audioEpoch = 0
+let audioPlayEpoch = 0
+let voiceRetry = false
 let audioClean: (() => void) | null = null
+let soundHoldUntil = 0
+let soundHoldTimer = 0
+let sawLockedPicture = false
 let soundtrackLevel = { muted: false, volume: 1 }
 let soundtrackSince = 0
 let lastViewerInput = 0
@@ -2841,6 +2846,10 @@ function movedAway(video: HTMLVideoElement): boolean {
 function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void {
   const was = lockedVideo
   if (video && was && was !== video) return
+  window.clearTimeout(soundHoldTimer)
+  soundHoldTimer = 0
+  soundHoldUntil = 0
+  sawLockedPicture = false
   const token = qualityNonce
   qualityNonce = ""
   lockedUrl = ""
@@ -2855,6 +2864,100 @@ function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void 
   if (token) postRenditionDrop(token, restore)
 }
 
+function userPausedVideo(video: HTMLVideoElement): boolean {
+  return video.getAttribute(USER_PAUSE_MARK) === "1"
+}
+
+/** The picture file is changing. Keep the soundtrack playing through that pause. */
+function pictureSwap(video: HTMLVideoElement): boolean {
+  if (userPausedVideo(video) || lockedVideo !== video) return false
+  return applyingQuality || performance.now() < soundHoldUntil
+}
+
+function samePicture(video: HTMLVideoElement): boolean {
+  const live = video.currentSrc || video.src || ""
+  if (!live) return true
+  if (lockedUrl && mediaPath(live) === mediaPath(lockedUrl)) return true
+  if (live.startsWith("blob:")) return false
+  if (!lockedUrl) return true
+  return renditionBelongs(video, live)
+}
+
+/** The element moved on to another post, so its soundtrack must not follow. */
+function clipReplaced(video: HTMLVideoElement): boolean {
+  if (!lockedAudio || lockedVideo !== video || pictureSwap(video)) return false
+  const code = mediaCode(video)
+  if (lockedCode && code && code !== lockedCode) return true
+  if (!sawLockedPicture) return false
+  return !samePicture(video)
+}
+
+function otherClipPlaying(video: HTMLVideoElement): boolean {
+  if (!lockedAudio || video === lockedVideo || !video.isConnected || video.paused || video.ended) return false
+  const box = video.getBoundingClientRect()
+  if (box.width < 200 || box.height < 200) return false
+  const visibleW = Math.min(box.right, window.innerWidth) - Math.max(box.left, 0)
+  const visibleH = Math.min(box.bottom, window.innerHeight) - Math.max(box.top, 0)
+  return visibleW >= box.width * 0.6 && visibleH >= box.height * 0.6
+}
+
+function alignSoundtrack(video: HTMLVideoElement, audio: HTMLAudioElement): void {
+  const at = video.currentTime || 0
+  const heard = audio.currentTime || 0
+  if (pictureSwap(video) && at < 0.35 && heard > 0.75) return
+  if (Math.abs(at - heard) <= 0.35) return
+  try {
+    audio.currentTime = at
+  } catch {
+    /* The soundtrack can reject a seek until it has metadata. */
+  }
+}
+
+function playSoundtrack(audio: HTMLAudioElement): void {
+  if (!lockedAudio) return
+  const ticket = audioPlayEpoch
+  void audio.play().then(
+    () => {
+      if (ticket !== audioPlayEpoch || !lockedAudio) audio.pause()
+    },
+    () => undefined
+  )
+}
+
+/** Ignore picture pauses until the new file is actually playing. */
+function holdSoundtrack(ms: number): void {
+  soundHoldUntil = Math.max(soundHoldUntil, performance.now() + ms)
+  window.clearTimeout(soundHoldTimer)
+  soundHoldTimer = window.setTimeout(() => {
+    soundHoldTimer = 0
+    const video = lockedVideo
+    const audio = video ? sidecars.get(video) : null
+    if (!video || !audio || !lockedAudio) return
+    if (clipReplaced(video)) {
+      releaseQuality(video, true)
+      return
+    }
+    if (userPausedVideo(video)) {
+      audio.pause()
+      return
+    }
+    if (audio.dataset.veeHoldMute === "1") return
+    if (video.paused || video.ended) return
+    alignSoundtrack(video, audio)
+    if (audio.paused) playSoundtrack(audio)
+  }, Math.max(0, soundHoldUntil - performance.now()))
+}
+
+function onClipPlay(event: Event): void {
+  const target = event.target
+  if (!(target instanceof HTMLVideoElement)) return
+  if (target === lockedVideo) {
+    if (clipReplaced(target)) releaseQuality(target, true)
+    return
+  }
+  if (otherClipPlaying(target) && !applyingQuality) releaseQuality(lockedVideo, false)
+}
+
 function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   const existing = sidecars.get(video)
   if (existing) return existing
@@ -2865,6 +2968,27 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   audio.style.cssText = "position:fixed;width:0;height:0;opacity:0;pointer-events:none"
   document.documentElement.appendChild(audio)
   sidecars.set(video, audio)
+  let restTimer = 0
+  const clearRest = () => {
+    window.clearTimeout(restTimer)
+    restTimer = 0
+  }
+  // Picture swaps and the page's reaction to the soundtrack both pause the
+  // video. A pause that is still there after a beat belongs to the viewer.
+  const restIfQuiet = () => {
+    clearRest()
+    const ticket = audioPlayEpoch
+    restTimer = window.setTimeout(() => {
+      restTimer = 0
+      if (ticket !== audioPlayEpoch || lockedVideo !== video || !lockedAudio) return
+      if (userPausedVideo(video)) {
+        audio.pause()
+        return
+      }
+      if (pictureSwap(video) || applyingQuality) return
+      if (video.ended || video.paused) audio.pause()
+    }, 500)
+  }
   const follow = () => {
     if (!lockedAudio || lockedVideo !== video) return
     audio.playbackRate = video.playbackRate || 1
@@ -2877,44 +3001,46 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
     audio.volume = video.volume
   }
   video.addEventListener("play", () => {
+    clearRest()
+    if (!lockedAudio || lockedVideo !== video || clipReplaced(video)) return
     follow()
-    if (lockedAudio) void audio.play().catch(() => undefined)
+    if (audio.dataset.veeHoldMute === "1" || userPausedVideo(video)) return
+    playSoundtrack(audio)
   })
-  video.addEventListener("pause", () => audio.pause())
+  video.addEventListener("pause", () => {
+    if (!lockedAudio || lockedVideo !== video || pictureSwap(video)) return
+    if (userPausedVideo(video)) {
+      clearRest()
+      audio.pause()
+      return
+    }
+    restIfQuiet()
+  })
   video.addEventListener("volumechange", follow)
   video.addEventListener("ratechange", follow)
   video.addEventListener("seeked", () => {
-    if (!lockedAudio || lockedVideo !== video) return
-    try {
-      audio.currentTime = video.currentTime
-    } catch {
-      /* The soundtrack can reject a seek until it has metadata. */
-    }
+    if (!lockedAudio || lockedVideo !== video || clipReplaced(video)) return
+    alignSoundtrack(video, audio)
   })
-  video.addEventListener("ended", () => audio.pause())
+  video.addEventListener("ended", () => {
+    if (!lockedAudio || lockedVideo !== video || pictureSwap(video) || applyingQuality) return
+    restIfQuiet()
+  })
   audio.addEventListener("loadedmetadata", () => {
     if (lockedVideo !== video || !lockedAudio) return
-    try {
-      const at = video.currentTime || 0
-      if (at > 0) audio.currentTime = at
-    } catch {
-      /* The soundtrack can reject a seek until it has metadata. */
-    }
-  })
-  video.addEventListener("waiting", () => {
-    if (lockedAudio && lockedVideo === video) audio.pause()
+    alignSoundtrack(video, audio)
   })
   video.addEventListener("playing", () => {
+    clearRest()
     if (!lockedAudio || lockedVideo !== video) return
-    try {
-      audio.currentTime = video.currentTime
-    } catch {
-      /* The soundtrack can reject a seek until it has metadata. */
-    }
-    if (audio.paused) void audio.play().catch(() => undefined)
+    if (clipReplaced(video)) return
+    alignSoundtrack(video, audio)
+    if (audio.dataset.veeHoldMute === "1" || userPausedVideo(video)) return
+    if (audio.paused) playSoundtrack(audio)
   })
   video.addEventListener("timeupdate", () => {
     if (!lockedAudio || lockedVideo !== video || video.paused) return
+    if (pictureSwap(video) && (video.currentTime || 0) < 0.35) return
     const rate = video.playbackRate || 1
     const drift = (video.currentTime || 0) - (audio.currentTime || 0)
     if (Math.abs(drift) > 0.4) {
@@ -2934,6 +3060,7 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
 
 function clearSidecar(video: HTMLVideoElement | null): void {
   audioEpoch += 1
+  audioPlayEpoch += 1
   audioClean?.()
   audioClean = null
   lockedAudio = ""
@@ -3105,10 +3232,13 @@ function beginSoundtrack(
     audio.muted = muted
     audio.volume = volume
     audio.playbackRate = video.playbackRate || 1
-    if (wantPlay) void audio.play().catch(() => undefined)
+    if (wantPlay) playSoundtrack(audio)
     noteAudioReady()
     return
   }
+  audioClean?.()
+  const retrying = voiceRetry
+  voiceRetry = false
   const epoch = ++audioEpoch
   soundtrackReady = false
   if (!audio.src || mediaPath(audio.src) !== mediaPath(audioUrl)) audio.src = audioUrl
@@ -3121,7 +3251,7 @@ function beginSoundtrack(
   } catch {
     /* Metadata for the soundtrack may arrive after the picture. */
   }
-  if (wantPlay) void audio.play().catch(() => undefined)
+  if (wantPlay) playSoundtrack(audio)
   audio.dataset.veeHoldMute = "1"
   if (audible) {
     queueMicrotask(() => {
@@ -3134,6 +3264,15 @@ function beginSoundtrack(
   let sawMetadata = false
   let metaEvent = false
   let sawPlaying = false
+  let baselineReady = false
+  let freshAt = 0
+  let freshTimer = 0
+  const markFresh = () => {
+    if (freshAt !== 0) return
+    freshAt = performance.now()
+    window.clearTimeout(freshTimer)
+    freshTimer = window.setTimeout(() => consider(true), 760)
+  }
   const bytes = () => {
     const count = (video as ProbedVideo).webkitAudioDecodedByteCount
     return typeof count === "number" ? count : 0
@@ -3146,13 +3285,27 @@ function beginSoundtrack(
     }
     const tracks = (video as ProbedVideo).audioTracks
     if (tracks && tracks.length > 0) return true
+    if (!baselineReady) return null
     const now = bytes()
-    if (now > baseBytes) return true
-    if (baseBytes > 0 && now > 0 && now < baseBytes) return true
+    // This counter belongs to the element, not the file. A drop means the new
+    // picture started clean. Growth before that drop is the previous file.
+    if (now < baseBytes) {
+      baseBytes = now
+      freshAt = 0
+      if (now <= 4096) markFresh()
+      return null
+    }
+    if (freshAt === 0 && baseBytes > 4096) return null
+    if (freshAt === 0) markFresh()
+    if (now > baseBytes + 8192) return true
     return null
   }
   const finish = (hasPictureAudio: boolean) => {
     if (!alive()) return
+    if (hasPictureAudio) {
+      const live = video.currentSrc || video.src || ""
+      if (!lockedUrl || mediaPath(live) !== mediaPath(lockedUrl)) return
+    }
     audioEpoch += 1
     cleanup()
     delete audio.dataset.veeHoldMute
@@ -3176,8 +3329,8 @@ function beginSoundtrack(
     } catch {
       /* The soundtrack can reject a seek until it has metadata. */
     }
-    if (video.getAttribute(USER_PAUSE_MARK) !== "1" && !video.ended && (wantPlay || !video.paused)) {
-      void audio.play().catch(() => undefined)
+    if (video.getAttribute(USER_PAUSE_MARK) !== "1" && !video.ended && (wantPlay || !video.paused || pictureSwap(video))) {
+      playSoundtrack(audio)
     }
     noteAudioReady()
   }
@@ -3188,8 +3341,20 @@ function beginSoundtrack(
       finish(true)
       return
     }
+    if (!force || !sawMetadata || !baselineReady) return
+    if (freshAt === 0 || performance.now() - freshAt < 700) return
     const playingNow = !video.paused && !video.ended && video.readyState >= 2
-    if (known === false || (force && sawMetadata && (sawPlaying || playingNow))) finish(false)
+    if (sawPlaying || playingNow || pictureSwap(video)) finish(false)
+  }
+  let baselineTimer = 0
+  const armBaseline = () => {
+    window.clearTimeout(baselineTimer)
+    baselineTimer = window.setTimeout(() => {
+      if (!alive()) return
+      baseBytes = bytes()
+      baselineReady = true
+      consider(false)
+    }, 180)
   }
   const onMeta = () => {
     if (!alive()) return
@@ -3198,26 +3363,45 @@ function beginSoundtrack(
     metaEvent = true
     sawMetadata = true
     baseBytes = bytes()
-    consider(false)
+    baselineReady = false
+    armBaseline()
   }
   let playingTimer = 0
   const onPlaying = () => {
     if (!alive()) return
     sawPlaying = true
-    playingTimer = window.setTimeout(() => consider(true), 450)
+    window.clearTimeout(playingTimer)
+    playingTimer = window.setTimeout(() => consider(true), 900)
   }
   const onError = () => {
     if (!alive() || audio.error?.code === MediaError.MEDIA_ERR_ABORTED) return
+    const voice = embeddedVoice(lockedUrl || video.currentSrc || video.src || "")
+    if (!retrying && voice && mediaPath(voice) !== mediaPath(audioUrl)) {
+      voiceRetry = true
+      beginSoundtrack(video, voice, wantPlay, video.currentTime || at, muted, volume)
+      return
+    }
     clearSidecar(video)
     noteAudioReady()
   }
   let cleaned = false
-  const probeTimer = window.setTimeout(() => consider(true), 2500)
+  const probeTimer = window.setTimeout(() => {
+    if (!alive()) return
+    if (!baselineReady) {
+      baseBytes = bytes()
+      baselineReady = true
+      sawMetadata = true
+    }
+    if (freshAt === 0 && bytes() > 4096) finish(false)
+    else consider(true)
+  }, 2500)
   function cleanup(): void {
     if (cleaned) return
     cleaned = true
     window.clearTimeout(probeTimer)
     window.clearTimeout(playingTimer)
+    window.clearTimeout(baselineTimer)
+    window.clearTimeout(freshTimer)
     video.removeEventListener("loadedmetadata", onMeta)
     video.removeEventListener("playing", onPlaying)
     audio.removeEventListener("error", onError)
@@ -3231,10 +3415,11 @@ function beginSoundtrack(
   if (video.readyState >= 1 && (!lockedUrl || mediaPath(liveNow) === mediaPath(lockedUrl))) {
     sawMetadata = true
     baseBytes = bytes()
+    armBaseline()
   }
   if (!video.paused && !video.ended && video.readyState >= 2) {
     sawPlaying = true
-    playingTimer = window.setTimeout(() => consider(true), 450)
+    playingTimer = window.setTimeout(() => consider(true), 900)
   }
 }
 
@@ -3309,7 +3494,7 @@ function showQualityWait(video: HTMLVideoElement, wantPlay: boolean, waitForAudi
       const level = soundtrackLevelNow(video)
       audio.muted = level.muted
       audio.volume = level.volume
-      if (wantPlay) void audio.play().catch(() => undefined)
+      if (wantPlay && (pictureSwap(video) || !video.paused)) playSoundtrack(audio)
     }
     soundtrackReady = true
     pictureReady = true
@@ -3345,10 +3530,114 @@ function renditionBelongs(video: HTMLVideoElement, url: string): boolean {
   return groups.length === 1
 }
 
+function vencodeTag(url: string): string {
+  try {
+    const raw = new URL(url, location.href).searchParams.get("efg")
+    if (!raw) return ""
+    const parsed = JSON.parse(atob(raw.replace(/-/g, "+").replace(/_/g, "/"))) as { vencode_tag?: unknown }
+    return typeof parsed.vencode_tag === "string" ? parsed.vencode_tag : ""
+  } catch {
+    return ""
+  }
+}
+
+/** Chrome rejects Instagram's fragmented xHE-AAC soundtrack in an audio element. */
+function brokenSoundtrack(url: string): boolean {
+  return /xheaac|frag_\d+_audio|dash_audio/i.test(vencodeTag(url))
+}
+
+/**
+ * Smallest progressive file of this picture. That file still has ordinary audio,
+ * so it can keep the voice while a video-only rendition is on screen.
+ */
+function embeddedVoice(pictureUrl: string): string {
+  const picture = mediaPath(pictureUrl)
+  let tagged = ""
+  let taggedHeight = Number.POSITIVE_INFINITY
+  let plain = ""
+  let plainHeight = Number.POSITIVE_INFINITY
+  for (const group of groupsWithPath(picture)) {
+    for (const item of group) {
+      const path = mediaPath(item.url)
+      if (!path || path === picture) continue
+      const tag = vencodeTag(item.url)
+      if (/xheaac|frag_\d+_audio/i.test(tag)) continue
+      const height = item.height > 0 ? item.height : 100000
+      if (/progressive/i.test(tag)) {
+        if (height < taggedHeight) {
+          taggedHeight = height
+          tagged = item.url
+        }
+        continue
+      }
+      if (!item.audioUrl && height < plainHeight) {
+        plainHeight = height
+        plain = item.url
+      }
+    }
+  }
+  return tagged || plain
+}
+
+function usableSoundtrack(url: string, pictureUrl: string): string {
+  if (!url || !brokenSoundtrack(url)) return url
+  return embeddedVoice(pictureUrl)
+}
+
+function separateAudio(url: string, hinted: string): string {
+  const path = mediaPath(url)
+  let listed = false
+  let track = ""
+  for (const group of groupsWithPath(path)) {
+    for (const item of group) {
+      if (mediaPath(item.url) !== path) continue
+      listed = true
+      if (item.audioUrl) track = item.audioUrl
+    }
+  }
+  if (!track && !listed) track = hinted
+  // A progressive file already includes its own voice. A second soundtrack would double it.
+  if (!track) return ""
+  return usableSoundtrack(track, url)
+}
+
+function sameSoundtrack(video: HTMLVideoElement, audioUrl: string): boolean {
+  if (!audioUrl || lockedVideo !== video || lockedAudio !== audioUrl) return false
+  const audio = sidecars.get(video)
+  return Boolean(audio?.src) && mediaPath(audio.src) === mediaPath(audioUrl)
+}
+
+function sustainSoundtrack(
+  video: HTMLVideoElement,
+  audioUrl: string,
+  wantPlay: boolean,
+  at: number,
+  muted: boolean,
+  volume: number
+): void {
+  const audio = ensureSidecar(video)
+  lockedAudio = audioUrl
+  soundtrackLevel = { muted, volume }
+  soundtrackSince = performance.now()
+  audio.playbackRate = video.playbackRate || 1
+  if (audio.dataset.veeHoldMute === "1") return
+  audio.muted = muted
+  audio.volume = volume
+  if (at > 0.35) {
+    try {
+      if (Math.abs((audio.currentTime || 0) - at) > 0.45) audio.currentTime = at
+    } catch {
+      /* The soundtrack can reject a seek until it has metadata. */
+    }
+  }
+  if (wantPlay) playSoundtrack(audio)
+}
+
 function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void {
   if (!renditionBelongs(video, url)) return
+  const track = separateAudio(url, audioUrl)
   const live = video.currentSrc || video.src
-  if (live && mediaPath(live) === mediaPath(url) && lockedAudio === audioUrl && lockedVideo === video) return
+  if (live && mediaPath(live) === mediaPath(url) && lockedAudio === track && lockedVideo === video) return
   const wantPlay = !video.paused && !video.ended
   const time = video.currentTime || 0
   const settings = readSettings()
@@ -3357,6 +3646,7 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
   const volume = heldMute && settings ? settings.volume : video.volume
   const rate = video.playbackRate || 1
   const token = String(++qualityToken)
+  const keepAudio = Boolean(track) && sameSoundtrack(video, track)
   qualityNonce = token
   video.setAttribute(QUALITY_MARK, token)
   video.removeAttribute(USER_PAUSE_MARK)
@@ -3366,10 +3656,12 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
   lockedUrl = url
   lockedCode = mediaCode(video)
   applyingQuality = true
+  sawLockedPicture = false
+  holdSoundtrack(2800)
   postRenditionUse({
     token,
     url,
-    audioUrl,
+    audioUrl: track,
     time,
     paused: !wantPlay,
     ended: video.ended,
@@ -3378,15 +3670,18 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
     volume
   })
   if (wantPlay) void video.play().catch(() => undefined)
-  if (audioUrl) beginSoundtrack(video, audioUrl, wantPlay, time, muted, volume)
-  else clearSidecar(video)
-  showQualityWait(video, wantPlay, Boolean(audioUrl) && wantPlay)
+  if (track) {
+    if (keepAudio) sustainSoundtrack(video, track, wantPlay, time, muted, volume)
+    else beginSoundtrack(video, track, wantPlay, time, muted, volume)
+  } else clearSidecar(video)
+  showQualityWait(video, wantPlay, Boolean(track) && wantPlay && !keepAudio)
 }
 
 function onQualityResult(message: RenditionMessage): void {
   if (!message.token || message.token !== qualityNonce) return
   const video = lockedVideo
   applyingQuality = false
+  if (message.kind === "used") sawLockedPicture = true
   if (message.kind === "failed") {
     qualityNonce = ""
     if (video) {
@@ -3402,7 +3697,7 @@ function onQualityResult(message: RenditionMessage): void {
     paintControls()
     return
   }
-  if (video && message.audioUrl && lockedAudio !== message.audioUrl) {
+  if (video && message.audioUrl && mediaPath(lockedAudio) !== mediaPath(message.audioUrl)) {
     beginSoundtrack(video, message.audioUrl, !video.paused && !video.ended, video.currentTime || 0)
   }
   paintControls()
@@ -4451,7 +4746,8 @@ function onTime(): void {
   const video = boundVideo
   if (!video) return
   paintTime(video)
-  if (holding(video) && movedAway(video)) releaseQuality(video, true)
+  if (clipReplaced(video)) releaseQuality(video, true)
+  else if (holding(video) && movedAway(video)) releaseQuality(video, true)
   else refreshStarted(video)
   if (rateSource?.(video) === "hold" || fileControlsChanged(video)) paintControls()
 }
@@ -5215,6 +5511,7 @@ export function stopSeekBar(): void {
   window.removeEventListener("keyup", onArrowRelease, true)
   document.removeEventListener("click", onSiteAudioClick, true)
   document.removeEventListener("play", onPageAudio, true)
+  document.removeEventListener("play", onClipPlay, true)
   clearHoverSamples()
   window.clearTimeout(hotTimer)
   cancelPopClose("volume")
@@ -5344,6 +5641,7 @@ export function startSeekBar(options: {
   window.addEventListener("keyup", onArrowRelease, true)
   document.addEventListener("click", onSiteAudioClick, true)
   document.addEventListener("play", onPageAudio, true)
+  document.addEventListener("play", onClipPlay, true)
   hookHistory()
   postRenditionAsk()
   return {

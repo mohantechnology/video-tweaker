@@ -381,6 +381,27 @@ const nativePlay = HTMLMediaElement.prototype.play
 const nativePause = HTMLMediaElement.prototype.pause
 const nativeLoad = HTMLMediaElement.prototype.load
 
+function pageSoundtrack(target: EventTarget | null): target is HTMLAudioElement {
+  return target instanceof HTMLAudioElement && target.getAttribute("data-vee-audio") === "1"
+}
+
+/**
+ * The soundtrack is a second media element. Instagram treats its play event as a
+ * competing clip, pauses the picture, and that pause was silencing the voice.
+ * Swallow the soundtrack's own media events before the page can hear them.
+ */
+function hideSoundtrackFromPage(): void {
+  const hide = (event: Event) => {
+    if (!pageSoundtrack(event.target)) return
+    event.stopImmediatePropagation()
+  }
+  for (const type of ["play", "playing", "pause", "ended", "waiting", "volumechange", "timeupdate"]) {
+    window.addEventListener(type, hide, true)
+  }
+}
+
+hideSoundtrackFromPage()
+
 type InlineStyle = { value: string; priority: string }
 
 type QualityHold = {
