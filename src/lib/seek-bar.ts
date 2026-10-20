@@ -685,6 +685,25 @@ const BAR_STYLE = `
   object-fit: contain !important;
   position: relative !important;
   inset: auto !important;
+  cursor: pointer;
+}
+#${FS_SHELL_ID} .vee-fs-flash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 76px;
+  margin: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  pointer-events: none !important;
+  opacity: 0;
+  z-index: 3;
+  transform: translate(-50%, -50%);
 }
 #${SEEK_BAR_ID}[data-skin="youtube"] {
   font-family: Roboto, Arial, sans-serif;
@@ -1068,6 +1087,9 @@ type FsSession = {
 }
 
 let fsSession: FsSession | null = null
+/** Pending single-click toggle in custom fullscreen, cleared by a double click. */
+let fsClickTimer = 0
+let fsFlashEl: HTMLDivElement | null = null
 let getSettings: (() => EffectSettings) | null = null
 let getUiSettings: (() => EffectSettings) | null = null
 let onControl: ((control: DockControl) => void) | null = null
@@ -1496,12 +1518,120 @@ type ElementFullscreen = HTMLElement & {
   webkitRequestFullscreen?: () => void
 }
 
+const ICON_FS_PLAY =
+  '<svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true"><path fill="currentColor" d="M8.2 5.2v13.6c0 .8.9 1.3 1.6.9l10.2-6.8c.6-.4.6-1.3 0-1.7L9.8 4.3c-.7-.4-1.6.1-1.6.9z"/></svg>'
+const ICON_FS_PAUSE =
+  '<svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true"><path fill="currentColor" d="M6.5 5h3.4c.3 0 .6.3.6.6v12.8c0 .3-.3.6-.6.6H6.5c-.3 0-.6-.3-.6-.6V5.6c0-.3.3-.6.6-.6zm7.6 0h3.4c.3 0 .6.3.6.6v12.8c0 .3-.3.6-.6.6h-3.4c-.3 0-.6-.3-.6-.6V5.6c0-.3.3-.6.6-.6z"/></svg>'
+
+/**
+ * Play/pause is normally a click on the player, and the player owns that
+ * click: YouTube binds it to `#movie_player`, Instagram to the reel
+ * container. Custom fullscreen moves only the <video> into our shell, so
+ * the site's button and click surface stay behind, outside fullscreen,
+ * and clicks in fullscreen do nothing. The shell therefore has to supply
+ * the click itself (plus the centre flash the native players show).
+ */
+function togglePlayPause(video: HTMLVideoElement): void {
+  cancelFsClick()
+  if (video.paused || video.ended) {
+    video.removeAttribute(USER_PAUSE_MARK)
+    void video.play().catch(() => undefined)
+    flashFullscreenState(true)
+  } else {
+    video.setAttribute(USER_PAUSE_MARK, "1")
+    video.pause()
+    flashFullscreenState(false)
+  }
+  paintControls()
+}
+
+/** Brief centre play/pause flash, like the native players show on toggle. */
+function flashFullscreenState(playing: boolean): void {
+  const shell = fsSession?.shell
+  if (!shell || document.fullscreenElement !== shell || !fsFlashEl) return
+  if (fsFlashEl.parentElement !== shell) shell.appendChild(fsFlashEl)
+  fsFlashEl.innerHTML = playing ? ICON_FS_PLAY : ICON_FS_PAUSE
+  fsFlashEl.setAttribute("aria-label", playing ? "Playing" : "Paused")
+  try {
+    fsFlashEl.animate(
+      [
+        { opacity: 0.9, transform: "translate(-50%, -50%) scale(0.82)" },
+        { opacity: 0, transform: "translate(-50%, -50%) scale(1.22)" }
+      ],
+      { duration: 460, easing: "ease-out" }
+    )
+  } catch {
+    /* Web Animations unavailable: the toggle itself still happened. */
+  }
+}
+
+function cancelFsClick(): void {
+  if (fsClickTimer) window.clearTimeout(fsClickTimer)
+  fsClickTimer = 0
+}
+
+/** Single click toggles play/pause; a double click leaves fullscreen instead. */
+function fsSurfaceClick(event: MouseEvent, video: HTMLVideoElement, stillActive: () => boolean): void {
+  if (event.button !== 0 || event.defaultPrevented) return
+  if (event.detail > 1) {
+    cancelFsClick()
+    void document.exitFullscreen().catch(() => undefined)
+    return
+  }
+  // Wait out a possible double click before toggling, as native players do.
+  cancelFsClick()
+  fsClickTimer = window.setTimeout(() => {
+    fsClickTimer = 0
+    if (!stillActive() || !video.isConnected) return
+    togglePlayPause(video)
+  }, 240)
+}
+
+function onShellClick(event: MouseEvent): void {
+  const session = fsSession
+  if (!session || document.fullscreenElement !== session.shell) return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  // Our own bar / panel live inside the shell in fullscreen: their clicks
+  // are controls, not the video surface.
+  if (root?.contains(target)) return
+  const host = document.getElementById(DOCK_HOST_ID)
+  if (host instanceof HTMLElement && host.contains(target)) return
+  if (target !== session.video && target !== session.shell) return
+  const video =
+    boundVideo && session.shell.contains(boundVideo) ? boundVideo : session.video
+  if (!video.isConnected) return
+  fsSurfaceClick(event, video, () => fsSession === session && document.fullscreenElement === session.shell)
+}
+
+/**
+ * The browser's own video fullscreen (site called video.requestFullscreen
+ * while our bar was hidden, so the hook let it through) has no site click
+ * handler either. The shell case is handled by onShellClick via bubbling.
+ */
+function onVideoFsClick(event: MouseEvent): void {
+  if (fsSession && document.fullscreenElement === fsSession.shell) return
+  const video = boundVideo
+  if (!video || event.currentTarget !== video) return
+  if (document.fullscreenElement !== video) return
+  fsSurfaceClick(event, video, () => document.fullscreenElement === video)
+}
+
 function ensureShell(): HTMLDivElement {
-  const existing = document.getElementById(FS_SHELL_ID)
-  if (existing instanceof HTMLDivElement) return existing
-  ensureStyle()
-  const shell = document.createElement("div")
+  const found = document.getElementById(FS_SHELL_ID)
+  const shell = found instanceof HTMLDivElement ? found : document.createElement("div")
   shell.id = FS_SHELL_ID
+  ensureStyle()
+  if (!fsFlashEl) {
+    fsFlashEl = document.createElement("div")
+    fsFlashEl.className = "vee-fs-flash"
+    fsFlashEl.setAttribute("aria-hidden", "true")
+  }
+  if (fsFlashEl.parentElement !== shell) shell.appendChild(fsFlashEl)
+  if (shell.dataset.veeClick !== "1") {
+    shell.dataset.veeClick = "1"
+    shell.addEventListener("click", onShellClick)
+  }
   return shell
 }
 
@@ -1537,6 +1667,7 @@ function onFullscreenCapture(): void {
 }
 
 function restorePlayerFullscreen(): void {
+  cancelFsClick()
   const session = fsSession
   if (!session) return
   fsSession = null
@@ -5163,13 +5294,7 @@ function ensureBar(): HTMLDivElement {
     stopAct(event)
     const video = boundVideo
     if (!video) return
-    if (video.paused || video.ended) {
-      video.removeAttribute(USER_PAUSE_MARK)
-      void video.play().catch(() => undefined)
-    } else {
-      video.setAttribute(USER_PAUSE_MARK, "1")
-      video.pause()
-    }
+    togglePlayPause(video)
   })
   backBtn?.addEventListener("click", (event) => {
     stopAct(event)
@@ -5536,6 +5661,7 @@ function unbindVideo(video: HTMLVideoElement | null): void {
   video.removeEventListener("ratechange", onMediaSignal)
   video.removeEventListener("play", onMediaSignal)
   video.removeEventListener("pause", onMediaSignal)
+  video.removeEventListener("click", onVideoFsClick)
 }
 
 function bindVideo(video: HTMLVideoElement): void {
@@ -5551,6 +5677,7 @@ function bindVideo(video: HTMLVideoElement): void {
   video.addEventListener("ratechange", onMediaSignal)
   video.addEventListener("play", onMediaSignal)
   video.addEventListener("pause", onMediaSignal)
+  video.addEventListener("click", onVideoFsClick)
 }
 
 function shouldShow(settings: EffectSettings): boolean {
