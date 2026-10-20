@@ -223,6 +223,7 @@ function catalogStamp(group: readonly Rendition[]): string {
         mediaPath(item.url),
         item.code || "",
         item.pk || "",
+        item.user || "",
         item.width,
         item.height,
         item.audioUrl || "",
@@ -489,6 +490,12 @@ function videoForToken(token: string): HTMLVideoElement | null {
   return walk(document)
 }
 
+/** The file the viewer picked. Any other address belongs to a different reel. */
+function chosenSource(value: string): boolean {
+  if (!hold?.url || typeof value !== "string" || !value) return false
+  return mediaPath(value) === mediaPath(hold.url)
+}
+
 /** Block the page from putting a dead stream back while a chosen file is playing. */
 function guardVideo(video: HTMLVideoElement): void {
   if (video.dataset.veeGuard === "1") return
@@ -501,12 +508,8 @@ function guardVideo(video: HTMLVideoElement): void {
         return mediaSrc.get!.call(this)
       },
       set(value: string) {
-        if (hold?.video === video && typeof value === "string" && (value === "" || value.startsWith("blob:"))) {
-          if (video.getAttribute(STOP_MARK) === "1") {
-            mediaSrc.set!.call(this, value)
-            return
-          }
-          if (value.startsWith("blob:")) hold.pendingSrc = value
+        if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && !chosenSource(value)) {
+          if (typeof value === "string" && value.startsWith("blob:") && hold) hold.pendingSrc = value
           return
         }
         mediaSrc.set!.call(this, value)
@@ -542,7 +545,7 @@ function guardVideo(video: HTMLVideoElement): void {
     video.setAttribute = (name: string, value: string) => {
       const key = name.toLowerCase()
       if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && key === "crossorigin") return
-      if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && key === "src" && (value === "" || value.startsWith("blob:"))) {
+      if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && key === "src" && !chosenSource(value)) {
         if (value.startsWith("blob:") && hold) hold.pendingSrc = value
         return
       }

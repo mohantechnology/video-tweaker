@@ -1035,6 +1035,7 @@ let lockedVideo: HTMLVideoElement | null = null
 let lockedUrl = ""
 let lockedAudio = ""
 let lockedCode = ""
+let lockedOwner = ""
 let applyingQuality = false
 let historyHooked = false
 let audioEpoch = 0
@@ -2192,16 +2193,6 @@ function playingPath(video: HTMLVideoElement, code = ""): string {
   return mediaPath(remembered)
 }
 
-function strictRecent(video: HTMLVideoElement): Rendition[] | null {
-  const live = video.duration
-  if (!Number.isFinite(live) || live <= 0) return null
-  const hits = renditionGroups.filter((group) => {
-    if (!groupCode(group) && group.some((item) => item.code)) return false
-    return durationAgrees(group, live) && sizeFits(group, video)
-  })
-  return hits.length === 1 ? hits[0] : null
-}
-
 function sizeMatch(groups: Rendition[][], video: HTMLVideoElement): Rendition[][] {
   if (!sizeKnown(video)) return []
   return groups.filter((group) =>
@@ -2216,11 +2207,11 @@ function fullest(groups: Rendition[][]): Rendition[] {
 function pickCoded(groups: Rendition[][], video: HTMLVideoElement, path: string): Rendition[] | null {
   if (!groups.length) return null
   if (path) {
-    const hits = groups.filter((group) => groupHasPath(group, path))
+    const hits = groups.filter((group) => groupHasPath(group, path) && !durationConflicts(group, video))
     if (hits.length === 1) return hits[0]
     if (hits.length > 1) return fullest(hits)
   }
-  if (groups.length === 1) return groups[0]
+  if (groups.length === 1) return durationConflicts(groups[0], video) ? null : groups[0]
   const live = video.duration
   let pool = groups
   if (Number.isFinite(live) && live > 0) {
@@ -2292,64 +2283,135 @@ function codedChoice(groups: Rendition[][], video: HTMLVideoElement, path: strin
   return merged && merged.length > 1 ? merged : null
 }
 
-function groupAllowed(group: readonly Rendition[], code: string): boolean {
-  const tagged = groupCode(group)
-  if (code && tagged && tagged !== code) return false
-  if (code && !tagged && group.some((item) => item.code)) return false
-  return true
+function groupUser(group: readonly Rendition[] | null | undefined): string {
+  if (!group) return ""
+  let user = ""
+  for (const item of group) {
+    if (!item.user) continue
+    if (!user) user = item.user
+    else if (user !== item.user) return ""
+  }
+  return user
+}
+
+function ownerAgrees(group: readonly Rendition[], owner: string): boolean {
+  if (!owner) return true
+  const user = groupUser(group)
+  return !user || user === owner
+}
+
+/** The reel row that contains this video and no other. */
+function reelSlide(video: HTMLVideoElement): HTMLElement | null {
+  let node: HTMLElement | null = video
+  for (let depth = 0; node && depth < 20; depth += 1) {
+    const parent = node.parentElement
+    if (!parent) break
+    if (parent.querySelectorAll("video").length > 1) return node
+    node = parent
+  }
+  return null
+}
+
+/** Author link drawn on this reel. The address bar can still name the reel that opened the feed. */
+function slideOwner(video: HTMLVideoElement): string {
+  const slide = reelSlide(video)
+  if (!slide) return ""
+  const reserved = /^(reels?|explore|accounts|direct|stories|p|tv|about|legal|developer)$/i
+  let author = ""
+  let plain = ""
+  let plainCount = 0
+  for (const link of slide.querySelectorAll("a[href]")) {
+    if (!(link instanceof HTMLAnchorElement)) continue
+    let parts: string[] = []
+    try {
+      parts = new URL(link.getAttribute("href") || "", location.href).pathname.split("/").filter(Boolean)
+    } catch {
+      continue
+    }
+    const name = parts[0] || ""
+    if (!/^[A-Za-z0-9._]{1,30}$/.test(name) || reserved.test(name)) continue
+    if (parts.length === 2 && parts[1].toLowerCase() === "reels") {
+      if (!author) author = name
+      continue
+    }
+    if (parts.length === 1) {
+      plainCount += 1
+      if (!plain) plain = name
+    }
+  }
+  return author || (plainCount === 1 ? plain : "")
+}
+
+function freshPin(video: HTMLVideoElement, code: string, owner: string): Rendition[] {
+  const pinned = pinnedGroup.get(video)
+  if (!pinned || pinned.length < 2 || durationConflicts(pinned, video) || !ownerAgrees(pinned, owner)) return []
+  if (code && groupCode(pinned) && groupCode(pinned) !== code) return []
+  const live = video.duration
+  const known = Number.isFinite(live) && live > 0
+  if (!known && document.querySelectorAll("video").length > 1) {
+    const path = playingPath(video, code)
+    if (!path || !groupHasPath(pinned, path)) return []
+  }
+  return pinned
 }
 
 /**
- * Instagram prefetches the next reel into the same catalog. Size and recency
- * are not enough to tell those clips apart, so the post shortcode decides.
- * A shortcode with no tagged files still falls through to the playing URL,
- * because some responses omit the code until the post page is loaded.
+ * Instagram prefetches the next reel into the same catalog. While the feed is
+ * still moving, the address bar often still names the reel that opened it.
+ * The visible clip's author and length pick the file, and a conflicting length
+ * is never offered.
  */
 function matchInstagram(video: HTMLVideoElement): Rendition[] {
   const code = mediaCode(video)
   const path = playingPath(video, code)
+  const owner = slideOwner(video)
   const marked = pinnedCode.get(video) || ""
-  if (code && marked && code !== marked) dropPin(video)
-
-  if (code) {
-    const owned = renditionGroups.filter((group) => groupCode(group) === code)
-    const picked = codedChoice(owned, video, path)
-    if (picked) return pinGroup(video, picked)
-  }
-
-  if (path) {
-    const groups = groupsWithPath(path).filter((group) => groupAllowed(group, code))
-    if (groups.length === 1 && groups[0].length > 1) return pinGroup(video, groups[0])
-    if (groups.length > 1) {
-      const coded = code ? groups.filter((group) => groupCode(group) === code) : []
-      if (coded.length === 1) {
-        const united = uniteClip(coded[0], coded)
-        if (united.length > 1) return pinGroup(video, united)
-      }
-      const open = groups.filter((group) => !groupCode(group))
-      if (open.length === 1 && open[0].length > 1) return pinGroup(video, open[0])
-    }
-  }
-
   const pinned = pinnedGroup.get(video)
-  if (pinned && pinned.length > 1 && groupAllowed(pinned, code)) {
-    const pinCode = pinnedCode.get(video) || ""
-    if (code && pinCode === code) return pinned
-    if (!code && !durationConflicts(pinned, video)) return pinned
-    if (code && !pinCode && path && groupHasPath(pinned, path) && !durationConflicts(pinned, video)) return pinned
+  if (
+    (code && marked && code !== marked) ||
+    (pinned && durationConflicts(pinned, video)) ||
+    (pinned && owner && !ownerAgrees(pinned, owner))
+  ) {
+    dropPin(video)
   }
 
-  const strict = strictRecent(video)
-  if (strict && strict.length > 1 && groupAllowed(strict, code)) return pinGroup(video, strict)
-  if (!code) return matchPlayed(video)
-  const owned = renditionGroups.filter((group) => groupCode(group) === code)
-  const single = pickCoded(owned, video, path)
-  if (single?.length) return pinGroup(video, uniteClip(single, owned))
-  if (path) {
-    const groups = groupsWithPath(path).filter((group) => groupAllowed(group, code))
-    if (groups.length === 1) return pinGroup(video, groups[0])
+  const live = video.duration
+  const known = Number.isFinite(live) && live > 0
+  const several = document.querySelectorAll("video").length > 1
+  let pool = renditionGroups.filter((group) => group.length > 0)
+  const fitting = (groups: Rendition[][]): Rendition[][] =>
+    known ? groups.filter((group) => durationAgrees(group, live)) : groups
+
+  if (owner) {
+    const named = fitting(pool.filter((group) => groupUser(group) === owner))
+    if (named.length) pool = named
+    else if (known) pool = fitting(pool)
+    else if (several) return freshPin(video, code, owner)
+  } else if (code) {
+    const coded = fitting(pool.filter((group) => groupCode(group) === code))
+    if (coded.length) pool = coded
+    else if (known) pool = fitting(pool)
+    else if (several) return freshPin(video, code, owner)
+  } else if (known) {
+    pool = fitting(pool)
+  } else if (several) {
+    return freshPin(video, code, owner)
   }
-  return []
+
+  if (!pool.length) return freshPin(video, code, owner)
+  if (path && pool.length > 1) {
+    const hits = pool.filter((group) => groupHasPath(group, path))
+    if (hits.length) pool = hits
+  }
+
+  const picked = codedChoice(pool, video, path)
+  if (picked && picked.length > 1 && !durationConflicts(picked, video) && ownerAgrees(picked, owner)) {
+    return pinGroup(video, picked)
+  }
+  if (pool.length === 1 && pool[0].length > 1 && !durationConflicts(pool[0], video) && ownerAgrees(pool[0], owner)) {
+    return pinGroup(video, pool[0])
+  }
+  return freshPin(video, code, owner)
 }
 
 function matchedGroup(video: HTMLVideoElement | null): Rendition[] {
@@ -2789,9 +2851,12 @@ function pageCodeFor(video: HTMLVideoElement): string {
   if (!code) return ""
   const videos = [...document.querySelectorAll("video")].filter((node) => node.isConnected)
   if (videos.length <= 1) return code
+  // A wide reel below the fold can have a bigger layout box than the clip on screen.
+  const visible = videos.filter((node) => clipOnScreen(node, true))
+  const pool = visible.length ? visible : videos
   let largest: HTMLVideoElement = video
   let area = 0
-  for (const node of videos) {
+  for (const node of pool) {
     const rect = node.getBoundingClientRect()
     const size = Math.max(0, rect.width) * Math.max(0, rect.height)
     if (size > area) {
@@ -2803,8 +2868,19 @@ function pageCodeFor(video: HTMLVideoElement): string {
 }
 
 function mediaCode(video: HTMLVideoElement): string {
-  if (instagramPage()) return pageCodeFor(video) || codeInSingleVideoHost(video) || codeOverlapping(video)
-  return codeFromPath(location.pathname) || codeInSingleVideoHost(video)
+  if (!instagramPage()) return codeFromPath(location.pathname) || codeInSingleVideoHost(video)
+  const local = codeInSingleVideoHost(video) || codeOverlapping(video)
+  const page = pageCodeFor(video)
+  const code = local && page && local !== page ? local : page || local
+  if (!code) return ""
+  const live = video.duration
+  const known = Number.isFinite(live) && live > 0
+  // Until this clip's length is known, the address bar still names whichever reel opened the feed.
+  if (!known && document.querySelectorAll("video").length > 1) return local || ""
+  if (!known) return code
+  const owned = renditionGroups.filter((group) => groupCode(group) === code)
+  if (owned.length && owned.every((group) => durationConflicts(group, video))) return ""
+  return code
 }
 
 function sharesClip(left: readonly Rendition[], right: readonly Rendition[]): boolean {
@@ -2842,9 +2918,11 @@ function holding(video: HTMLVideoElement): boolean {
 }
 
 function movedAway(video: HTMLVideoElement): boolean {
-  if (!lockedCode) return false
   const code = mediaCode(video)
-  return code !== "" && code !== lockedCode
+  if (lockedCode && code && code !== lockedCode) return true
+  const owner = slideOwner(video)
+  if (lockedOwner && owner && owner !== lockedOwner) return true
+  return false
 }
 
 function silenceTakenOver(node: HTMLVideoElement | null): void {
@@ -2870,6 +2948,7 @@ function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void 
   lockedUrl = ""
   lockedAudio = ""
   lockedCode = ""
+  lockedOwner = ""
   lockedVideo = null
   applyingQuality = false
   hideQualityWait()
@@ -2965,8 +3044,7 @@ function samePicture(video: HTMLVideoElement): boolean {
 /** The element moved on to another post, so its soundtrack must not follow. */
 function clipReplaced(video: HTMLVideoElement): boolean {
   if (!lockedAudio || lockedVideo !== video || pictureSwap(video)) return false
-  const code = mediaCode(video)
-  if (lockedCode && code && code !== lockedCode) return true
+  if (movedAway(video)) return true
   if (!sawLockedPicture) return false
   return !samePicture(video)
 }
@@ -3619,23 +3697,39 @@ function hookHistory(): void {
       const before = location.pathname
       const result = original.apply(this, args)
       if (location.pathname !== before) {
-        releaseQuality(lockedVideo, true)
+        const video = lockedVideo
+        // Reels updates the address after the clip is already on screen. Keep a matching lock.
+        if (video && (movedAway(video) || !clipOnScreen(video, true))) releaseQuality(video, true)
         postRenditionAsk()
       }
       return result
     }
   history.pushState = wrap(history.pushState)
   history.replaceState = wrap(history.replaceState)
-  window.addEventListener("popstate", () => releaseQuality(lockedVideo, true))
+  window.addEventListener("popstate", () => {
+    const video = lockedVideo
+    if (video && (movedAway(video) || !clipOnScreen(video, true))) releaseQuality(video, true)
+  })
 }
 
 function renditionBelongs(video: HTMLVideoElement, url: string): boolean {
   if (!instagramPage()) return true
   const groups = groupsWithPath(mediaPath(url)).filter((group) => !group.some((item) => item.code) || Boolean(groupCode(group)))
   if (!groups.length) return false
+  const live = video.duration
+  if (Number.isFinite(live) && live > 0 && groups.every((group) => clipDuration(group) > 0 && !durationAgrees(group, live))) {
+    return false
+  }
+  const owner = slideOwner(video)
+  if (owner && groups.every((group) => groupUser(group) && groupUser(group) !== owner)) return false
   const code = mediaCode(video)
-  if (code) return groups.some((group) => groupCode(group) === code)
-  return groups.length === 1
+  if (code && groups.every((group) => groupCode(group) && groupCode(group) !== code)) return false
+  return true
+}
+
+function codeOfUrl(url: string): string {
+  const codes = new Set(groupsWithPath(mediaPath(url)).map((group) => groupCode(group)).filter(Boolean))
+  return codes.size === 1 ? [...codes][0] : ""
 }
 
 function vencodeTag(url: string): string {
@@ -3764,7 +3858,8 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
   startedPath.set(video, mediaPath(url))
   lockedVideo = video
   lockedUrl = url
-  lockedCode = mediaCode(video)
+  lockedCode = codeOfUrl(url) || mediaCode(video)
+  lockedOwner = slideOwner(video)
   applyingQuality = true
   sawLockedPicture = false
   holdSoundtrack(2800)
@@ -3801,6 +3896,7 @@ function onQualityResult(message: RenditionMessage): void {
     lockedUrl = ""
     lockedAudio = ""
     lockedCode = ""
+    lockedOwner = ""
     lockedVideo = null
     hideQualityWait()
     clearSidecar(video)
@@ -4839,11 +4935,12 @@ function refreshStarted(video: HTMLVideoElement): void {
   const code = mediaCode(video)
   const marked = pinnedCode.get(video) || ""
   const tagged = groupCode(pinned)
-  if ((code && marked && code !== marked) || (code && tagged && tagged !== code)) {
+  const owner = slideOwner(video)
+  if (durationConflicts(pinned, video) || !ownerAgrees(pinned, owner)) {
     dropPin(video)
     return
   }
-  if (!code && durationConflicts(pinned, video)) {
+  if ((code && marked && code !== marked) || (code && tagged && tagged !== code)) {
     dropPin(video)
     return
   }

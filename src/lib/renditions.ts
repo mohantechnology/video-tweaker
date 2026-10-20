@@ -45,6 +45,8 @@ export type Rendition = {
   code?: string
   /** Instagram media id. Slides that share a shortcode still differ here. */
   pk?: string
+  /** Profile that posted this clip. Separates reels that share a length. */
+  user?: string
 }
 
 export type RenditionMessage = {
@@ -331,6 +333,7 @@ function asRendition(value: unknown): Rendition | null {
     : undefined
   const code = readCodeValue(raw.code) || readCodeValue(raw.shortcode)
   const pk = readPkValue(raw.pk)
+  const user = readUserValue(raw.user)
   return {
     width: Math.round(width),
     height: Math.round(height),
@@ -344,7 +347,8 @@ function asRendition(value: unknown): Rendition | null {
     duration: duration > 0 ? duration : undefined,
     title: cleanTitle(raw.title),
     code: code || undefined,
-    pk: pk || undefined
+    pk: pk || undefined,
+    user: user || undefined
   }
 }
 
@@ -369,6 +373,12 @@ function readPkValue(value: unknown): string {
 function pkFromId(value: unknown): string {
   if (typeof value !== "string") return ""
   return readPkValue(value.split("_")[0])
+}
+
+function readUserValue(value: unknown): string {
+  if (typeof value !== "string") return ""
+  const name = value.trim()
+  return /^[A-Za-z0-9._]{1,30}$/.test(name) ? name : ""
 }
 
 function readJsonString(raw: string): string {
@@ -443,6 +453,7 @@ function dedupe(items: Rendition[]): Rendition[] {
       if (item.soundtrack && !existing.soundtrack) existing.soundtrack = item.soundtrack
       if (item.code && !existing.code) existing.code = item.code
       if (item.pk && !existing.pk) existing.pk = item.pk
+      if (item.user && !existing.user) existing.user = item.user
       if (item.duration && !existing.duration) existing.duration = item.duration
       continue
     }
@@ -490,7 +501,6 @@ function matchBracket(text: string, start: number): number {
 }
 
 const DASH_KEYS = new Set(["video_dash_manifest", "dash_manifest", "manifest_xml"])
-const MEDIA_MARKERS = ["video_versions", "video_dash_manifest", "dash_manifest", "manifest_xml", "video_url"]
 
 function sanitizePlayed(value: unknown): string[] {
   if (!Array.isArray(value)) return []
@@ -565,7 +575,7 @@ function versionSlices(text: string): { group: Rendition[]; end: number; code: s
     if (group?.length) {
       const id = identityNear(text, at)
       const seconds = durationNear(text, end)
-      stampIdentity(group, id.code, id.pk)
+      stampIdentity(group, id.code, id.pk, id.user)
       if (seconds > 0) for (const item of group) if (!item.duration) item.duration = seconds
       slices.push({ group, end, code: id.code, pk: id.pk })
     }
@@ -592,7 +602,7 @@ function dashSlices(text: string): { at: number; videos: Rendition[]; code: stri
         const parsed = parseDash(xml)
         if (parsed.videos.length) {
           const id = identityNear(text, at)
-          stampIdentity(parsed.videos, id.code, id.pk)
+          stampIdentity(parsed.videos, id.code, id.pk, id.user)
           found.push({ at, videos: parsed.videos, code: id.code, pk: id.pk })
         }
       }
@@ -606,9 +616,7 @@ function dashSlices(text: string): { at: number; videos: Rendition[]; code: stri
   return found
 }
 
-type ClipId = { code: string; pk: string }
-
-type TextHit = { value: string; index: number; end: number }
+type ClipId = { code: string; pk: string; user: string }
 
 function usableCode(value: string): string {
   if (!/^[A-Za-z0-9_-]{8,20}$/.test(value)) return ""
@@ -616,13 +624,45 @@ function usableCode(value: string): string {
   return value
 }
 
-/** Depth of `{}` in `slice`, or null once a brace closes the object we started in. */
-function objectDepth(slice: string): number | null {
+/** `{` that directly contains `at`, so a feed wrapper cannot lend its shortcode to every clip. */
+function objectStart(text: string, at: number): number {
+  let depth = 0
+  let quote = false
+  // `at` sits on a quoted key such as "video_versions". Begin before that opening quote.
+  let origin = at
+  while (origin > 0 && text[origin] !== '"') origin -= 1
+  const limit = Math.max(0, origin - 80_000)
+  for (let index = origin - 1; index >= limit; index -= 1) {
+    const char = text[index]
+    if (quote) {
+      if (char !== '"') continue
+      let slashes = 0
+      for (let cursor = index - 1; cursor >= limit && text[cursor] === "\\"; cursor -= 1) slashes += 1
+      if (slashes % 2 === 0) quote = false
+      continue
+    }
+    if (char === '"') {
+      let slashes = 0
+      for (let cursor = index - 1; cursor >= limit && text[cursor] === "\\"; cursor -= 1) slashes += 1
+      if (slashes % 2 === 0) quote = true
+      continue
+    }
+    if (char === "}") depth += 1
+    else if (char === "{") {
+      if (depth === 0) return index
+      depth -= 1
+    }
+  }
+  return -1
+}
+
+function objectEnd(text: string, start: number): number {
   let depth = 0
   let quote = false
   let escape = false
-  for (let index = 0; index < slice.length; index += 1) {
-    const char = slice[index]
+  const limit = Math.min(text.length, start + 400_000)
+  for (let index = start; index < limit; index += 1) {
+    const char = text[index]
     if (quote) {
       if (escape) escape = false
       else if (char === "\\") escape = true
@@ -633,81 +673,95 @@ function objectDepth(slice: string): number | null {
     else if (char === "{") depth += 1
     else if (char === "}") {
       depth -= 1
-      if (depth < 0) return null
+      if (depth === 0) return index
     }
   }
-  return depth
+  return -1
 }
 
-function collectHits(region: string, pattern: RegExp): TextHit[] {
-  const source = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)
-  const found: TextHit[] = []
-  let match: RegExpExecArray | null
-  while ((match = source.exec(region))) {
-    if (!match[1]) continue
-    found.push({ value: match[1], index: match.index, end: match.index + match[0].length })
-    if (match[0].length === 0) source.lastIndex += 1
+function readKeyAt(slice: string, quoteAt: number): { name: string; colon: number } | null {
+  if (slice[quoteAt] !== '"') return null
+  let escape = false
+  let end = -1
+  for (let index = quoteAt + 1; index < slice.length; index += 1) {
+    const char = slice[index]
+    if (escape) {
+      escape = false
+      continue
+    }
+    if (char === "\\") {
+      escape = true
+      continue
+    }
+    if (char === '"') {
+      end = index
+      break
+    }
+  }
+  if (end < 0) return null
+  let cursor = end + 1
+  while (cursor < slice.length && /\s/.test(slice[cursor])) cursor += 1
+  if (slice[cursor] !== ":") return null
+  return { name: slice.slice(quoteAt + 1, end), colon: cursor }
+}
+
+function scalarAfter(slice: string, colon: number): string {
+  let cursor = colon + 1
+  while (cursor < slice.length && /\s/.test(slice[cursor])) cursor += 1
+  if (slice[cursor] === '"') {
+    const encoded = readEncodedString(slice, cursor)
+    return encoded || ""
+  }
+  const match = /^(\d{6,})/.exec(slice.slice(cursor))
+  return match ? match[1] : ""
+}
+
+/** Code, media id, and author on the object that owns this media key. Nested lists are left alone. */
+function directIdentity(slice: string): ClipId {
+  let depth = 0
+  let quote = false
+  let escape = false
+  let parent = ""
+  const found: ClipId = { code: "", pk: "", user: "" }
+  for (let index = 0; index < slice.length; index += 1) {
+    const char = slice[index]
+    if (quote) {
+      if (escape) escape = false
+      else if (char === "\\") escape = true
+      else if (char === '"') quote = false
+      continue
+    }
+    if (char === '"') {
+      const key = depth === 1 || depth === 2 ? readKeyAt(slice, index) : null
+      if (key && depth === 1) parent = key.name
+      if (key) {
+        const value = scalarAfter(slice, key.colon)
+        if (depth === 1 && (key.name === "code" || key.name === "shortcode") && !found.code) found.code = usableCode(value)
+        else if (depth === 1 && (key.name === "permalink" || key.name === "link") && !found.code) found.code = permalinkCode(value)
+        else if (depth === 1 && key.name === "pk" && !found.pk && /^\d{6,}$/.test(value)) found.pk = value
+        else if (depth === 2 && key.name === "username" && (parent === "user" || parent === "owner") && !found.user) {
+          found.user = readUserValue(value)
+        }
+      }
+      quote = true
+      continue
+    }
+    if (char === "{") depth += 1
+    else if (char === "}") depth -= 1
   }
   return found
-}
-
-/** Last id that still belongs to the object containing the media key. */
-function idBefore(region: string, pattern: RegExp, clean: (value: string) => string): string {
-  let found = ""
-  for (const hit of collectHits(region, pattern)) {
-    const value = clean(hit.value)
-    if (!value || objectDepth(region.slice(hit.end)) == null) continue
-    found = value
-  }
-  return found
-}
-
-/** First id at the media object's own level, before the next object starts. */
-function idAfter(region: string, pattern: RegExp, clean: (value: string) => string): string {
-  for (const hit of collectHits(region, pattern)) {
-    const value = clean(hit.value)
-    if (!value) continue
-    const depth = objectDepth(region.slice(0, hit.index))
-    if (depth === 0) return value
-  }
-  return ""
-}
-
-function markerAt(text: string, at: number): number {
-  for (const marker of MEDIA_MARKERS) {
-    if (text.startsWith(marker, at)) return marker.length
-  }
-  return 1
-}
-
-function markerBound(text: string, at: number, dir: "before" | "after"): number {
-  const origin = dir === "before" ? Math.max(0, at - 12000) : at + markerAt(text, at)
-  const end = dir === "before" ? at : Math.min(text.length, at + 12000)
-  const slice = text.slice(origin, end)
-  let nearest = -1
-  for (const marker of MEDIA_MARKERS) {
-    const pos = dir === "before" ? slice.lastIndexOf(marker) : slice.indexOf(marker)
-    if (pos < 0) continue
-    if (nearest < 0 || (dir === "before" ? pos > nearest : pos < nearest)) nearest = pos
-  }
-  if (nearest < 0) return dir === "before" ? origin : end
-  return origin + nearest + (dir === "before" ? markerAt(slice, nearest) : 0)
 }
 
 /**
- * Shortcode and media id for the clip that owns the key at `at`.
- * The id is often after `video_versions`, so a backward-only search tags the previous post.
+ * Shortcode, media id, and author for the clip that owns the key at `at`.
+ * Only that clip's own object counts, so the reel that opened the feed cannot tag the later ones.
  */
 function identityNear(text: string, at: number): ClipId {
-  const back = text.slice(markerBound(text, at, "before"), at)
-  const forward = text.slice(at, markerBound(text, at, "after"))
-  const codePattern = /"(?:code|shortcode)"\s*:\s*"([A-Za-z0-9_-]{8,20})"/g
-  const linkPattern = /instagram\.com\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]{8,20})/gi
-  const pkPattern = /"pk"\s*:\s*"?(\d{6,})"?/g
-  return {
-    code: idBefore(back, codePattern, usableCode) || idBefore(back, linkPattern, usableCode) || idAfter(forward, codePattern, usableCode) || idAfter(forward, linkPattern, usableCode),
-    pk: idBefore(back, pkPattern, (value) => value) || idAfter(forward, pkPattern, (value) => value)
-  }
+  const start = objectStart(text, at)
+  if (start < 0) return { code: "", pk: "", user: "" }
+  const end = objectEnd(text, start)
+  if (end < 0) return { code: "", pk: "", user: "" }
+  return directIdentity(text.slice(start, end + 1))
 }
 
 function durationNear(text: string, end: number): number {
@@ -718,17 +772,18 @@ function durationNear(text: string, end: number): number {
   return value > 0 && value < 86_400 ? value : 0
 }
 
-function sameIdentity(a: ClipId, b: ClipId): boolean {
+function sameIdentity(a: { code: string; pk: string }, b: { code: string; pk: string }): boolean {
   if (a.code && b.code && a.code !== b.code) return false
   if (a.pk && b.pk && a.pk !== b.pk) return false
   return Boolean((a.code && b.code && a.code === b.code) || (a.pk && b.pk && a.pk === b.pk))
 }
 
-function stampIdentity(items: Rendition[], code: string, pk: string): void {
-  if (!code && !pk) return
+function stampIdentity(items: Rendition[], code: string, pk: string, user = ""): void {
+  if (!code && !pk && !user) return
   for (const item of items) {
     if (code && !item.code) item.code = code
     if (pk && !item.pk) item.pk = pk
+    if (user && !item.user) item.user = user
   }
 }
 
@@ -740,7 +795,7 @@ function videoUrlGroups(text: string): Rendition[][] {
     const rendition = fileRendition(readJsonString(match[1]), "")
     if (!rendition) continue
     const id = identityNear(text, match.index)
-    stampIdentity([rendition], id.code, id.pk)
+    stampIdentity([rendition], id.code, id.pk, id.user)
     const seconds = durationNear(text, match.index)
     if (seconds > 0 && !rendition.duration) rendition.duration = seconds
     found.push([rendition])
@@ -769,7 +824,7 @@ function progressiveGroups(text: string): Rendition[][] {
     const rendition = fileRendition(item.url, item.label)
     if (!rendition) continue
     const id = identityNear(text, item.at)
-    stampIdentity([rendition], id.code, id.pk)
+    stampIdentity([rendition], id.code, id.pk, id.user)
     const partner = found.findIndex(
       (other, otherIndex) =>
         otherIndex > index &&
@@ -782,7 +837,7 @@ function progressiveGroups(text: string): Rendition[][] {
     if (partner >= 0) {
       const other = fileRendition(found[partner].url, found[partner].label)
       const otherId = identityNear(text, found[partner].at)
-      if (other) stampIdentity([other], otherId.code, otherId.pk)
+      if (other) stampIdentity([other], otherId.code, otherId.pk, otherId.user)
       const identified = Boolean(id.code || id.pk || otherId.code || otherId.pk)
       const clash = identified && !sameIdentity(id, otherId)
       if (other && !clash && mediaPath(other.url) !== mediaPath(rendition.url)) {
@@ -844,6 +899,14 @@ function recordCode(record: Record<string, unknown>, inherited = ""): string {
   return readCodeValue(record.code) || readCodeValue(record.shortcode) || permalinkCode(record.permalink) || permalinkCode(record.link) || inherited
 }
 
+function recordUser(record: Record<string, unknown>): string {
+  const named = (value: unknown): string => {
+    if (!value || typeof value !== "object") return ""
+    return readUserValue((value as { username?: unknown }).username)
+  }
+  return named(record.user) || named(record.owner) || readUserValue(record.username)
+}
+
 function progressiveFile(record: Record<string, unknown>): Rendition | null {
   const raw = typeof record.video_url === "string" ? record.video_url : ""
   if (!raw) return null
@@ -884,15 +947,16 @@ function renditionsOn(record: Record<string, unknown>, inheritedCode = ""): Rend
   }
   const code = recordCode(record, inheritedCode)
   const pk = readPkValue(record.pk) || pkFromId(record.id)
-  stampIdentity(muxed, code, pk)
-  stampIdentity(dashed, code, pk)
+  const user = recordUser(record)
+  stampIdentity(muxed, code, pk, user)
+  stampIdentity(dashed, code, pk, user)
   const merged = mergeRenditions(muxed, dashed)
   const duration = dimension(record.video_duration)
   if (duration > 0) {
     for (const item of merged) if (!item.duration) item.duration = duration
   }
   stampTitle(merged, captionOn(record))
-  stampIdentity(merged, code, pk)
+  stampIdentity(merged, code, pk, user)
   const unique = dedupe(merged)
   shareSoundtrack(unique)
   return unique
@@ -976,6 +1040,7 @@ function preferPlayable(same: Rendition, item: Rendition): void {
   if (touch && same.pk && item.pk && same.pk !== item.pk) return
   if (item.code && !same.code) same.code = item.code
   if (item.pk && !same.pk) same.pk = item.pk
+  if (item.user && !same.user) same.user = item.user
   if (item.title && !same.title) same.title = item.title
   if (item.duration && !same.duration) same.duration = item.duration
   const track = item.soundtrack || item.audioUrl
@@ -1253,6 +1318,8 @@ function walk(
   const nextCode = ownCode || inheritedCode
   for (const key of keys) {
     if (key === "video_versions" || key === "progressive_urls" || DASH_KEYS.has(key)) continue
-    walk(record[key], found, depth + 1, budget, nextCode, ownTitle)
+    // A feed lists other posts under items. Carousel edges still belong to this post.
+    const childCode = key === "items" ? "" : nextCode
+    walk(record[key], found, depth + 1, budget, childCode, ownTitle)
   }
 }
