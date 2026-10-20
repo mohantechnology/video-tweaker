@@ -7,6 +7,7 @@ import {
   mergeCatalogEntries,
   postRenditionResult,
   QUALITY_MARK,
+  STOP_MARK,
   readRenditionMessage,
   RENDITION_PENDING_ATTR,
   RENDITION_SOURCE,
@@ -15,6 +16,7 @@ import {
   type Rendition,
   type RenditionMessage
 } from "~lib/renditions"
+import { clipConcealed, clipOnScreen } from "~lib/find-video"
 import { fileUrl, mediaPath } from "~lib/media-file"
 import { applyNativeMirror, NATIVE_MIRROR_ATTR, publishSitePlayer } from "~lib/native-mirror"
 import {
@@ -500,6 +502,10 @@ function guardVideo(video: HTMLVideoElement): void {
       },
       set(value: string) {
         if (hold?.video === video && typeof value === "string" && (value === "" || value.startsWith("blob:"))) {
+          if (video.getAttribute(STOP_MARK) === "1") {
+            mediaSrc.set!.call(this, value)
+            return
+          }
           if (value.startsWith("blob:")) hold.pendingSrc = value
           return
         }
@@ -513,7 +519,7 @@ function guardVideo(video: HTMLVideoElement): void {
         return mediaObject.get!.call(this)
       },
       set(value: MediaProvider | null) {
-        if (hold?.video === video) {
+        if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1") {
           if (value) hold.pendingObject = value
           return
         }
@@ -528,15 +534,15 @@ function guardVideo(video: HTMLVideoElement): void {
           return mediaOrigin.get!.call(this)
         },
         set(value: string | null) {
-          if (hold?.video === video) return
+          if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1") return
           mediaOrigin.set!.call(this, value)
         }
       })
     }
     video.setAttribute = (name: string, value: string) => {
       const key = name.toLowerCase()
-      if (hold?.video === video && key === "crossorigin") return
-      if (hold?.video === video && key === "src" && (value === "" || value.startsWith("blob:"))) {
+      if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && key === "crossorigin") return
+      if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && key === "src" && (value === "" || value.startsWith("blob:"))) {
         if (value.startsWith("blob:") && hold) hold.pendingSrc = value
         return
       }
@@ -544,7 +550,7 @@ function guardVideo(video: HTMLVideoElement): void {
     }
     video.removeAttribute = (name: string) => {
       const key = name.toLowerCase()
-      if (hold?.video === video && (key === "src" || key === "crossorigin")) return
+      if (hold?.video === video && video.getAttribute(STOP_MARK) !== "1" && (key === "src" || key === "crossorigin")) return
       Element.prototype.removeAttribute.call(video, name)
     }
     video.dataset.veeGuard = "1"
@@ -587,7 +593,8 @@ function watchVisibility(next: QualityHold): void {
   reveal(next)
   const observer = new MutationObserver(() => {
     if (hold !== next) return
-    reveal(next)
+    const settled = next.played && performance.now() - next.armedAt > 1600
+    if (!settled && !pageReleased(next.video)) reveal(next)
     if (next.video.hasAttribute("crossorigin")) clearCrossOrigin(next.video)
   })
   observer.observe(next.video, { attributes: true, attributeFilter: ["style", "class", "crossorigin"] })
@@ -631,11 +638,41 @@ function placePlayback(next: QualityHold): void {
   } catch {
     /* Ignore a volume the element rejects. */
   }
-  if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
+  if (!next.paused && !next.ended) playHeld(video)
 }
 
 function userPaused(next: QualityHold): boolean {
   return next.video.getAttribute(USER_PAUSE_MARK) === "1"
+}
+
+/** The reel was closed, or playback was handed back and told to stay quiet. */
+function pageReleased(video: HTMLVideoElement): boolean {
+  return video.getAttribute(STOP_MARK) === "1" || clipConcealed(video)
+}
+
+function playHeld(video: HTMLVideoElement): void {
+  if (!pageReleased(video)) {
+    void nativePlay.call(video).catch(() => undefined)
+    return
+  }
+  nativePause.call(video)
+}
+
+const hiddenStopGen = new WeakMap<HTMLVideoElement, number>()
+
+/** A closed reel can finish its hide after the source is restored. Pause once it leaves the screen. */
+function armHiddenStop(video: HTMLVideoElement): void {
+  const ticket = (hiddenStopGen.get(video) || 0) + 1
+  hiddenStopGen.set(video, ticket)
+  const stop = () => {
+    if (hiddenStopGen.get(video) !== ticket || hold?.video === video) return
+    if (clipOnScreen(video)) return
+    video.setAttribute(STOP_MARK, "1")
+    nativePause.call(video)
+  }
+  window.setTimeout(stop, 400)
+  window.setTimeout(stop, 1400)
+  window.setTimeout(stop, 2800)
 }
 
 function disarmPlaybackGuard(next: QualityHold): void {
@@ -666,10 +703,15 @@ function armPlaybackGuard(next: QualityHold): void {
   next.resumeTries = 0
   next.levelTries = 0
   next.onPause = () => {
+    if (video.getAttribute(STOP_MARK) === "1") {
+      disarmPlaybackGuard(next)
+      return
+    }
+    if (clipConcealed(video)) return
     if (!next.guarding || next.paused || next.ended || userPaused(next)) return
     if (next.resumeTries > 8) return
     next.resumeTries += 1
-    void nativePlay.call(video).catch(() => undefined)
+    playHeld(video)
   }
   next.onLevel = () => {
     if (!next.guarding || performance.now() - next.armedAt > 3000 || next.levelTries > 24) return
@@ -702,12 +744,16 @@ function armPlaybackGuard(next: QualityHold): void {
   try {
     video.pause = () => {
       const active = hold?.video === video ? hold : null
+      if (video.getAttribute(STOP_MARK) === "1" || clipConcealed(video)) {
+        nativePause.call(video)
+        return
+      }
       if (active?.guarding && !active.paused && !active.ended && !userPaused(active)) return
       nativePause.call(video)
     }
     video.load = () => {
       const active = hold?.video === video ? hold : null
-      if (active?.guarding) return
+      if (active?.guarding && video.getAttribute(STOP_MARK) !== "1" && !clipConcealed(video)) return
       nativeLoad.call(video)
     }
     video.dataset.veePauseGuard = "1"
@@ -736,7 +782,8 @@ function restoreSource(next: QualityHold, preferPending: boolean): void {
   } catch {
     /* The player can drop a source that is no longer current. */
   }
-  if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
+  if (!next.paused && !next.ended) playHeld(video)
+  armHiddenStop(video)
   const epoch = ++revealEpoch
   window.setTimeout(() => {
     if (epoch !== revealEpoch || hold) return
@@ -812,6 +859,7 @@ function useRendition(message: RenditionMessage): void {
     if (hold === previous) hold = null
   }
   video.removeAttribute(USER_PAUSE_MARK)
+  video.removeAttribute(STOP_MARK)
   const next: QualityHold = {
     video,
     token,
@@ -872,7 +920,7 @@ function useRendition(message: RenditionMessage): void {
     assigned = true
     if (mediaSrc?.set) mediaSrc.set.call(video, url)
     else video.src = url
-    if (!next.paused && !next.ended) void nativePlay.call(video).catch(() => undefined)
+    if (!next.paused && !next.ended) playHeld(video)
     armPlaybackGuard(next)
   } catch {
     settle(next, false)
@@ -890,6 +938,11 @@ function dropRendition(message: RenditionMessage): void {
     stopWatch(next)
     hold = null
     next.video.removeAttribute(QUALITY_MARK)
+    if (!clipOnScreen(next.video)) {
+      next.video.setAttribute(STOP_MARK, "1")
+      nativePause.call(next.video)
+    }
+    armHiddenStop(next.video)
     if (!movedOn) return
     const epoch = ++revealEpoch
     window.setTimeout(() => {

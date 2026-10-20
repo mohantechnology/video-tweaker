@@ -102,6 +102,38 @@ function layoutViewportBox(
   return { left, top, right: left + width, bottom: top + height }
 }
 
+function styleHides(style: CSSStyleDeclaration): boolean {
+  if (style.display === "none" || style.visibility === "hidden" || style.contentVisibility === "hidden") return true
+  const opacity = Number(style.opacity)
+  return Number.isFinite(opacity) && opacity < 0.05
+}
+
+/**
+ * The reel was closed or detached. The element can keep making sound either way,
+ * because hiding a modal does not pause media.
+ */
+export function clipConcealed(video: HTMLVideoElement): boolean {
+  if (!video.isConnected) return true
+  const own = getComputedStyle(video)
+  if (own.display === "none" || own.visibility === "hidden") return true
+  for (let node = video.parentElement; node && node !== document.documentElement; node = node.parentElement) {
+    if (node.hidden) return true
+    if (styleHides(getComputedStyle(node))) return true
+  }
+  return false
+}
+
+/** The viewer can still see this clip. A resolution swap may fade the element itself. */
+export function clipOnScreen(video: HTMLVideoElement, ignoreOwnFade = false): boolean {
+  if (clipConcealed(video)) return false
+  const box = video.getBoundingClientRect()
+  const visibleW = Math.min(box.right, window.innerWidth) - Math.max(box.left, 0)
+  const visibleH = Math.min(box.bottom, window.innerHeight) - Math.max(box.top, 0)
+  if (visibleW < 80 || visibleH < 80) return false
+  if (ignoreOwnFade) return true
+  return !styleHides(getComputedStyle(video))
+}
+
 function scoreVideo(video: HTMLVideoElement): number {
   // A resolution swap empties the element for a moment. Dropping it then ends the swap and its soundtrack.
   if (video.videoWidth === 0 && video.readyState < 2 && !video.hasAttribute(QUALITY_MARK)) return 0
@@ -109,6 +141,8 @@ function scoreVideo(video: HTMLVideoElement): number {
   // Stretch, zoom, and pan change the painted box, not the layout box.
   const size = laidOutSize(video)
   if (size.width < MIN_WIDTH || size.height < MIN_HEIGHT) return 0
+  // A closed reel keeps its layout box. Hiding the modal does not pause it.
+  if (clipConcealed(video)) return 0
 
   const style = getComputedStyle(video)
   const rect = layoutViewportBox(video, size.width, size.height, style)

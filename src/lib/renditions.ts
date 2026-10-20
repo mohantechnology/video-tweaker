@@ -15,6 +15,9 @@ export const USER_PAUSE_MARK = "data-vee-user-pause"
 /** Marks the video element a resolution swap should use. */
 export const QUALITY_MARK = "data-vee-quality"
 
+/** Set when a swapped clip should stay silent after its reel is closed. */
+export const STOP_MARK = "data-vee-stop"
+
 export type Rendition = {
   width: number
   height: number

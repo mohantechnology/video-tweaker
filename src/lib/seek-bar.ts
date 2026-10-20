@@ -27,11 +27,13 @@ import {
   qualityLabel,
   readRenditionMessage,
   sortRenditions,
+  STOP_MARK,
   USER_PAUSE_MARK,
   type Rendition,
   type RenditionMessage
 } from "./renditions"
 import { audioDownloadSvg } from "./audio-download-icon"
+import { clipConcealed, clipOnScreen } from "./find-video"
 import { seekBy, togglePictureInPicture } from "./effects"
 import { NATIVE_PLAYER_ATTR, playerMediaLevel, readNativePlayer, YT_ECHO_ATTR, YT_HOLD_ATTR } from "./native-mirror"
 import { formatClock } from "./progress"
@@ -1050,6 +1052,8 @@ let muteLock = false
 let hoverSampleTimers: number[] = []
 let hoverWatch = 0
 let soundtrackReady = true
+let concealedSince = 0
+let lockWatch = 0
 let waitEpoch = 0
 let waitFrame = 0
 let waitTimer = 0
@@ -2843,6 +2847,16 @@ function movedAway(video: HTMLVideoElement): boolean {
   return code !== "" && code !== lockedCode
 }
 
+function silenceTakenOver(node: HTMLVideoElement | null): void {
+  if (!node) return
+  node.setAttribute(STOP_MARK, "1")
+  try {
+    node.pause()
+  } catch {
+    /* The element can reject a pause once it is gone. */
+  }
+}
+
 function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void {
   const was = lockedVideo
   if (video && was && was !== video) return
@@ -2850,6 +2864,7 @@ function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void 
   soundHoldTimer = 0
   soundHoldUntil = 0
   sawLockedPicture = false
+  concealedSince = 0
   const token = qualityNonce
   qualityNonce = ""
   lockedUrl = ""
@@ -2858,10 +2873,74 @@ function releaseQuality(video: HTMLVideoElement | null, restore: boolean): void 
   lockedVideo = null
   applyingQuality = false
   hideQualityWait()
-  clearSidecar(video || was)
   const node = video || was
+  const leftScreen = Boolean(node && (node !== pageVideo || !clipOnScreen(node, true)))
+  clearSidecar(node)
   if (node) node.removeAttribute(QUALITY_MARK)
+  if (leftScreen) silenceTakenOver(node)
+  quietClosedSoundtrack()
   if (token) postRenditionDrop(token, restore)
+}
+
+/** The locked reel is no longer the clip on screen. A one-frame fade during a swap does not count. */
+function watchLockedClip(): void {
+  if (lockWatch) return
+  lockWatch = window.setInterval(() => {
+    const video = lockedVideo
+    if (!video) {
+      window.clearInterval(lockWatch)
+      lockWatch = 0
+      quietClosedSoundtrack()
+      return
+    }
+    retireLockedClip(video)
+    quietClosedSoundtrack()
+  }, 200)
+}
+
+function lockedClipGone(video: HTMLVideoElement): boolean {
+  if (lockedVideo !== video || !renditionHost()) return false
+  if (!video.isConnected) return true
+  const fading = applyingQuality || pictureSwap(video)
+  if (clipOnScreen(video, fading)) {
+    concealedSince = 0
+    return false
+  }
+  const now = performance.now()
+  if (!concealedSince) concealedSince = now
+  if (fading && now - concealedSince < 500) return false
+  return true
+}
+
+/** Another reel in the grid or the next modal is the one actually playing. */
+function largerClipTookOver(video: HTMLVideoElement): boolean {
+  if (lockedVideo !== video || !renditionHost() || applyingQuality || pictureSwap(video)) return false
+  const mine = video.getBoundingClientRect()
+  const area = Math.max(0, mine.width) * Math.max(0, mine.height)
+  for (const node of document.querySelectorAll("video")) {
+    if (!(node instanceof HTMLVideoElement) || node === video || !otherClipPlaying(node)) continue
+    const box = node.getBoundingClientRect()
+    if (box.width * box.height > area * 0.82) return true
+  }
+  return false
+}
+
+function quietClosedSoundtrack(): void {
+  if (!renditionHost()) return
+  for (const node of document.querySelectorAll("audio[data-vee-audio='1']")) {
+    if (!(node instanceof HTMLAudioElement) || node.paused) continue
+    const owner = (node as HTMLAudioElement & { veeOwner?: HTMLVideoElement }).veeOwner
+    if (owner && owner === lockedVideo && !soundtrackBlocked(owner)) continue
+    node.pause()
+  }
+}
+
+function retireLockedClip(video: HTMLVideoElement | null): boolean {
+  if (!video || video !== lockedVideo) return false
+  if (!lockedClipGone(video) && !largerClipTookOver(video)) return false
+  releaseQuality(video, false)
+  silenceTakenOver(video)
+  return true
 }
 
 function userPausedVideo(video: HTMLVideoElement): boolean {
@@ -2913,12 +2992,24 @@ function alignSoundtrack(video: HTMLVideoElement, audio: HTMLAudioElement): void
   }
 }
 
+function soundtrackBlocked(video: HTMLVideoElement): boolean {
+  if (clipConcealed(video)) return true
+  if (applyingQuality || pictureSwap(video)) return false
+  return !clipOnScreen(video)
+}
+
 function playSoundtrack(audio: HTMLAudioElement): void {
-  if (!lockedAudio) return
+  const video = lockedVideo
+  if (!lockedAudio || !video) return
+  if (soundtrackBlocked(video)) {
+    audio.pause()
+    return
+  }
   const ticket = audioPlayEpoch
   void audio.play().then(
     () => {
-      if (ticket !== audioPlayEpoch || !lockedAudio) audio.pause()
+      const current = lockedVideo
+      if (ticket !== audioPlayEpoch || !lockedAudio || !current || soundtrackBlocked(current)) audio.pause()
     },
     () => undefined
   )
@@ -2933,6 +3024,7 @@ function holdSoundtrack(ms: number): void {
     const video = lockedVideo
     const audio = video ? sidecars.get(video) : null
     if (!video || !audio || !lockedAudio) return
+    if (retireLockedClip(video)) return
     if (clipReplaced(video)) {
       releaseQuality(video, true)
       return
@@ -2955,7 +3047,11 @@ function onClipPlay(event: Event): void {
     if (clipReplaced(target)) releaseQuality(target, true)
     return
   }
-  if (otherClipPlaying(target) && !applyingQuality) releaseQuality(lockedVideo, false)
+  if (!lockedVideo || applyingQuality || !otherClipPlaying(target)) return
+  if (clipOnScreen(lockedVideo, true) && !largerClipTookOver(lockedVideo)) return
+  const previous = lockedVideo
+  releaseQuality(previous, false)
+  silenceTakenOver(previous)
 }
 
 function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
@@ -2966,6 +3062,7 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   audio.setAttribute("data-vee-audio", "1")
   audio.setAttribute("aria-hidden", "true")
   audio.style.cssText = "position:fixed;width:0;height:0;opacity:0;pointer-events:none"
+  ;(audio as HTMLAudioElement & { veeOwner?: HTMLVideoElement }).veeOwner = video
   document.documentElement.appendChild(audio)
   sidecars.set(video, audio)
   let restTimer = 0
@@ -2981,7 +3078,7 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
     restTimer = window.setTimeout(() => {
       restTimer = 0
       if (ticket !== audioPlayEpoch || lockedVideo !== video || !lockedAudio) return
-      if (userPausedVideo(video)) {
+      if (soundtrackBlocked(video) || userPausedVideo(video)) {
         audio.pause()
         return
       }
@@ -3003,6 +3100,10 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   video.addEventListener("play", () => {
     clearRest()
     if (!lockedAudio || lockedVideo !== video || clipReplaced(video)) return
+    if (soundtrackBlocked(video)) {
+      audio.pause()
+      return
+    }
     follow()
     if (audio.dataset.veeHoldMute === "1" || userPausedVideo(video)) return
     playSoundtrack(audio)
@@ -3033,13 +3134,20 @@ function ensureSidecar(video: HTMLVideoElement): HTMLAudioElement {
   video.addEventListener("playing", () => {
     clearRest()
     if (!lockedAudio || lockedVideo !== video) return
-    if (clipReplaced(video)) return
+    if (clipReplaced(video) || soundtrackBlocked(video)) {
+      if (soundtrackBlocked(video)) audio.pause()
+      return
+    }
     alignSoundtrack(video, audio)
     if (audio.dataset.veeHoldMute === "1" || userPausedVideo(video)) return
     if (audio.paused) playSoundtrack(audio)
   })
   video.addEventListener("timeupdate", () => {
     if (!lockedAudio || lockedVideo !== video || video.paused) return
+    if (soundtrackBlocked(video)) {
+      audio.pause()
+      return
+    }
     if (pictureSwap(video) && (video.currentTime || 0) < 0.35) return
     const rate = video.playbackRate || 1
     const drift = (video.currentTime || 0) - (audio.currentTime || 0)
@@ -3650,7 +3758,9 @@ function applyQuality(video: HTMLVideoElement, url: string, audioUrl = ""): void
   qualityNonce = token
   video.setAttribute(QUALITY_MARK, token)
   video.removeAttribute(USER_PAUSE_MARK)
+  video.removeAttribute(STOP_MARK)
   rememberedSrc.set(video, url)
+  watchLockedClip()
   startedPath.set(video, mediaPath(url))
   lockedVideo = video
   lockedUrl = url
@@ -4746,6 +4856,7 @@ function onTime(): void {
   const video = boundVideo
   if (!video) return
   paintTime(video)
+  if (retireLockedClip(video)) return
   if (clipReplaced(video)) releaseQuality(video, true)
   else if (holding(video) && movedAway(video)) releaseQuality(video, true)
   else refreshStarted(video)
@@ -5431,6 +5542,8 @@ export function placeSeekBar(video: HTMLVideoElement | null, attempt = 0): void 
 
 export function syncSeekBar(video: HTMLVideoElement | null, settings: EffectSettings): void {
   pageVideo = video && video.isConnected ? video : null
+  if (lockedVideo) retireLockedClip(lockedVideo)
+  quietClosedSoundtrack()
   if (!shouldShow(settings) || !video || !video.isConnected) {
     if (boundVideo) unbindVideo(boundVideo)
     boundVideo = null
