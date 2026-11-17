@@ -57,7 +57,10 @@ export const SEEK_BAR_ID = "vee-seek-bar"
 
 const STYLE_ID = "vee-seek-bar-style"
 const Z_INDEX = 2147483646
-const TRACK_HEIGHT_PX = 4
+/** Thin line left behind when the pointer is off the progress bar. It grows
+ * back to 6px while the pointer is over the bar (see the track rules below). */
+const TRACK_HEIGHT_PX = 3
+const TRACK_HOVER_HEIGHT_PX = 6
 const HIT_HEIGHT_PX = 20
 const WRITE_GUARD_MS = 280
 const POP_CLOSE_MS = 220
@@ -66,6 +69,7 @@ const SPEED_STEP = 0.01
 const RATE_MATCH = 0.005
 const SPEED_CHIPS = [1, 1.25, 1.5, 2, 3, 4] as const
 const FS_SHELL_ID = "vee-fs-shell"
+const JUMP_LABEL_ID = "vee-jump-label"
 const QUALITY_WAIT_ID = "vee-quality-wait"
 const DOCK_HOST_ID = "vee-csui"
 
@@ -103,11 +107,20 @@ const BAR_STYLE = `
 }
 #${SEEK_BAR_ID}[data-visible="true"] {
   display: block;
+}
+/* Only the buttons fade with the pointer. Fading the whole bar (the old
+ * behaviour) also faded the progress track away, so the bar must stay
+ * opaque and let the track shrink to its thin idle height instead. The
+ * bar is a fixed overlay, so none of this resizes the player itself. */
+#${SEEK_BAR_ID} .vee-pack,
+#${SEEK_BAR_ID} .vee-control {
   opacity: 0;
   transition: opacity 220ms ease;
 }
-#${SEEK_BAR_ID}[data-visible="true"][data-hot="true"],
-#${SEEK_BAR_ID}[data-drag="true"] {
+#${SEEK_BAR_ID}[data-hot="true"] .vee-pack,
+#${SEEK_BAR_ID}[data-hot="true"] .vee-control,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-pack,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-control {
   opacity: 1;
 }
 #${SEEK_BAR_ID}:not([data-hot="true"]) .vee-seek-hit {
@@ -608,18 +621,16 @@ const BAR_STYLE = `
   width: 100%;
   height: 0%;
 }
-#${SEEK_BAR_ID}:hover .vee-seek-hit[data-axis="x"] .vee-seek-track,
-#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit[data-axis="x"] .vee-seek-track,
-#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit[data-axis="x"] .vee-seek-track,
-#${SEEK_BAR_ID}:hover .vee-seek-hit:not([data-axis="y"]) .vee-seek-track,
-#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit:not([data-axis="y"]) .vee-seek-track,
-#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit:not([data-axis="y"]) .vee-seek-track {
-  height: 6px;
+/* Grow only while the pointer is actually over the progress bar (or while
+ * dragging it). Keying this off the whole player stayed thick for the whole
+ * chrome-hide delay after the pointer had already left the bar. */
+#${SEEK_BAR_ID} .vee-seek-hit:hover .vee-seek-track,
+#${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit .vee-seek-track {
+  height: ${TRACK_HOVER_HEIGHT_PX}px;
 }
-#${SEEK_BAR_ID}:hover .vee-seek-hit[data-axis="y"] .vee-seek-track,
-#${SEEK_BAR_ID}[data-hot="true"] .vee-seek-hit[data-axis="y"] .vee-seek-track,
+#${SEEK_BAR_ID} .vee-seek-hit[data-axis="y"]:hover .vee-seek-track,
 #${SEEK_BAR_ID}[data-drag="true"] .vee-seek-hit[data-axis="y"] .vee-seek-track {
-  width: 6px;
+  width: ${TRACK_HOVER_HEIGHT_PX}px;
   height: auto;
 }
 #${SEEK_BAR_ID} .vee-seek-buffered {
@@ -657,9 +668,38 @@ const BAR_STYLE = `
   transition: opacity 120ms ease;
   white-space: nowrap;
 }
-#${SEEK_BAR_ID}:hover .vee-seek-tip,
+#${SEEK_BAR_ID} .vee-seek-hit:hover .vee-seek-tip,
 #${SEEK_BAR_ID}[data-drag="true"] .vee-seek-tip {
   opacity: 1;
+}
+/* Arrow-key / skip-button jump label. A standalone overlay (not a child of
+ * the bar) so it still shows when the bar's own buttons have faded out. */
+#${JUMP_LABEL_ID} {
+  position: fixed;
+  z-index: ${Z_INDEX};
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none !important;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  box-sizing: border-box;
+}
+#${JUMP_LABEL_ID} svg {
+  display: block;
+  flex: none;
 }
 #${FS_SHELL_ID} {
   position: fixed !important;
@@ -1090,6 +1130,9 @@ let fsSession: FsSession | null = null
 /** Pending single-click toggle in custom fullscreen, cleared by a double click. */
 let fsClickTimer = 0
 let fsFlashEl: HTMLDivElement | null = null
+let jumpEl: HTMLDivElement | null = null
+let jumpTimer = 0
+let jumpAnim: Animation | null = null
 let getSettings: (() => EffectSettings) | null = null
 let getUiSettings: (() => EffectSettings) | null = null
 let onControl: ((control: DockControl) => void) | null = null
@@ -1563,6 +1606,80 @@ function flashFullscreenState(playing: boolean): void {
   } catch {
     /* Web Animations unavailable: the toggle itself still happened. */
   }
+}
+
+/**
+ * Jump label shown over the picture for an arrow-key (or skip-button) seek,
+ * like the native players show: the skip amount plus where the video landed.
+ * It is its own fixed overlay, positioned from the video box at flash time,
+ * so it appears on long videos and on portrait Shorts alike, and even while
+ * the bar's buttons are faded out. Repeated presses restart it in place.
+ */
+function showJumpLabel(
+  video: HTMLVideoElement,
+  icon: string,
+  text: string,
+  side: -1 | 0 | 1
+): void {
+  ensureStyle()
+  const rect = video.getBoundingClientRect()
+  if (rect.width < 40 || rect.height < 40) return
+  if (!jumpEl) {
+    jumpEl = document.createElement("div")
+    jumpEl.id = JUMP_LABEL_ID
+    jumpEl.setAttribute("aria-hidden", "true")
+  }
+  const parent = barParent(video)
+  if (jumpEl.parentElement !== parent) parent.appendChild(jumpEl)
+  const glyph = document.createElement("span")
+  glyph.innerHTML = icon
+  const copy = document.createElement("span")
+  copy.textContent = text
+  jumpEl.replaceChildren(glyph, copy)
+  // Portrait clips (Shorts, reels) are too narrow for a left/right third.
+  const portrait = rect.height > rect.width
+  const centerX =
+    side === 0 || portrait
+      ? rect.left + rect.width / 2
+      : rect.left + rect.width * (side < 0 ? 0.27 : 0.73)
+  jumpEl.style.left = `${centerX}px`
+  jumpEl.style.top = `${rect.top + rect.height / 2}px`
+  window.clearTimeout(jumpTimer)
+  jumpAnim?.cancel()
+  jumpEl.style.opacity = "0.95"
+  try {
+    jumpAnim = jumpEl.animate(
+      [
+        { opacity: 0, transform: "translate(-50%, -50%) scale(0.86)" },
+        { opacity: 0.95, transform: "translate(-50%, -50%) scale(1)", offset: 0.3 },
+        { opacity: 0.95, transform: "translate(-50%, -50%) scale(1)", offset: 0.72 },
+        { opacity: 0, transform: "translate(-50%, -50%) scale(1.06)" }
+      ],
+      { duration: 720, easing: "ease-out" }
+    )
+    jumpAnim.onfinish = () => {
+      if (jumpEl) jumpEl.style.opacity = "0"
+    }
+  } catch {
+    /* Web Animations unavailable: fall back to the hide timer below. */
+    jumpAnim = null
+  }
+  jumpTimer = window.setTimeout(() => {
+    jumpTimer = 0
+    if (jumpEl) jumpEl.style.opacity = "0"
+  }, 760)
+}
+
+/** Label for a skip of `seconds` in `direction`, showing the landing time. */
+function showSkipLabel(video: HTMLVideoElement, direction: -1 | 1, seconds: number): void {
+  const landed = formatClock(video.currentTime || 0)
+  const signed = `${direction < 0 ? "−" : "+"}${seconds}s`
+  showJumpLabel(
+    video,
+    skipIcon(seconds, direction < 0 ? "back" : "forward"),
+    `${signed} · ${landed}`,
+    direction
+  )
 }
 
 function cancelFsClick(): void {
@@ -3462,11 +3579,13 @@ function arrowJob(event: KeyboardEvent): ArrowJob | null {
 function jumpBySkip(direction: -1 | 1): void {
   const video = activePageVideo()
   if (!video) return
-  seekBy(video, direction * currentSkipSeconds())
+  const seconds = currentSkipSeconds()
+  seekBy(video, direction * seconds)
   if (video === boundVideo) {
     updateFill()
     paintTime(video)
   }
+  showSkipLabel(video, direction, seconds)
 }
 
 function nudgeVolume(direction: 1 | -1): void {
@@ -3482,6 +3601,7 @@ function nudgeVolume(direction: 1 | -1): void {
   pendingVolume = { volume, muted }
   if (video === boundVideo) paintControls()
   scheduleVolume(volume, muted)
+  showJumpLabel(video, muted ? ICON_MUTED : ICON_VOLUME, muted ? "Muted" : `Volume ${percent}%`, 0)
 }
 
 function onArrowKey(event: KeyboardEvent): void {
@@ -5298,19 +5418,13 @@ function ensureBar(): HTMLDivElement {
   })
   backBtn?.addEventListener("click", (event) => {
     stopAct(event)
-    const video = boundVideo
-    if (!video) return
-    seekBy(video, -currentSkipSeconds())
-    updateFill()
-    paintTime(video)
+    if (!boundVideo) return
+    jumpBySkip(-1)
   })
   forwardBtn?.addEventListener("click", (event) => {
     stopAct(event)
-    const video = boundVideo
-    if (!video) return
-    seekBy(video, currentSkipSeconds())
-    updateFill()
-    paintTime(video)
+    if (!boundVideo) return
+    jumpBySkip(1)
   })
   muteBtn?.addEventListener("click", (event) => {
     stopAct(event)
@@ -5873,6 +5987,12 @@ export function stopSeekBar(): void {
   speedDrag = false
   if (root?.isConnected) root.remove()
   root = null
+  window.clearTimeout(jumpTimer)
+  jumpTimer = 0
+  jumpAnim?.cancel()
+  jumpAnim = null
+  if (jumpEl?.isConnected) jumpEl.remove()
+  jumpEl = null
   hit = null
   bufferedEl = null
   playedEl = null
