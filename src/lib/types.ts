@@ -200,6 +200,23 @@ export type EffectSettings = ColorSettings & {
   skipAdsSeek: boolean
   /** Block known ad request URLs on this website. */
   skipAdsBlock: boolean
+  /**
+   * Where the New label sits on YouTube thumbnails, including Shorts.
+   * Default keeps YouTube's own corner. Only YouTube reads it.
+   */
+  newBadgePlace: NewBadgePlace
+}
+
+export const NEW_BADGE_PLACES = ["default", "top-right", "bottom-right", "bottom-left", "hide"] as const
+
+export type NewBadgePlace = (typeof NEW_BADGE_PLACES)[number]
+
+/** Saved placement, or Hide when an older on/off switch was on. */
+export function readNewBadgePlace(value: unknown, legacyHide?: unknown): NewBadgePlace {
+  if (typeof value === "string" && (NEW_BADGE_PLACES as readonly string[]).includes(value)) {
+    return value as NewBadgePlace
+  }
+  return legacyHide === true ? "hide" : "default"
 }
 
 export type DockAlign = "left" | "center" | "right"
@@ -463,7 +480,8 @@ export function defaultSettings(): EffectSettings {
     skipAds: false,
     skipAdsSpeed: false,
     skipAdsSeek: false,
-    skipAdsBlock: false
+    skipAdsBlock: false,
+    newBadgePlace: "default"
   }
 }
 

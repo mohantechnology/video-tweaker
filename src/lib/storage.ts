@@ -28,6 +28,7 @@ import {
   clampSkipSeconds,
   clampVolumeStep,
   defaultSettings,
+  readNewBadgePlace,
   resolveDockLayout,
   type DockAlign,
   type EffectSettings
@@ -126,6 +127,7 @@ export function normalizeSettings(value: unknown, hostname = ""): EffectSettings
   // A site that already enabled one keeps that setup until Reset positions.
   if (typeof raw.dockLayoutAuto !== "boolean") next.dockLayoutAuto = !dockFlagsChosen(raw)
   if (typeof raw.dockFlagsAuto !== "boolean") next.dockFlagsAuto = !dockFlagsChosen(raw)
+  next.newBadgePlace = readNewBadgePlace(raw.newBadgePlace, raw.hideNewBadge)
   return next
 }
 

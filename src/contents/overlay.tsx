@@ -68,6 +68,7 @@ import {
   type VideoBridge
 } from "~lib/bridge"
 import { postEngineActive } from "~lib/engine"
+import { applyYoutubeNewBadge, isYoutubePage } from "~lib/youtube-new-badge"
 import {
   dockContextOf,
   domainDockView,
@@ -198,6 +199,7 @@ import {
   clampVolumeStep,
   customAnchor,
   defaultSettings,
+  readNewBadgePlace,
   settingsEqual,
   type ColorSettings,
   type ControlLayout,
@@ -205,7 +207,8 @@ import {
   type DockPlaceId,
   type DockPlacement,
   type DockSlot,
-  type EffectSettings
+  type EffectSettings,
+  type NewBadgePlace
 } from "~lib/types"
 
 export const config: PlasmoCSConfig = {
@@ -502,6 +505,7 @@ const PLAYBACK_RESET_KEYS = [
   "skipAdsSpeed",
   "skipAdsSeek",
   "skipAdsBlock",
+  "newBadgePlace",
   "playbackEnabled"
 ] as const satisfies readonly (keyof EffectSettings)[]
 
@@ -541,7 +545,7 @@ function tabActions(
       ? "Turn off speed, loop, and pitch changes on the Playback tab. Video and audio stay as they are."
       : "Turn speed, loop, and pitch changes back on for the Playback tab.",
     reset: "Reset playback settings",
-    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, and the on-video controls on the Playback tab. Saved resume points stay."
+    resetTitle: "Restore speed, hold speed, loop, pitch, resume, skip ads, the New tag, and the on-video controls on the Playback tab. Saved resume points stay."
   }
 }
 
@@ -752,6 +756,21 @@ function Overlay() {
       alive = false
     }
   }, [hostname])
+
+  useEffect(() => {
+    const place: NewBadgePlace =
+      globallyEnabled === true &&
+      policyReady &&
+      siteAllowed(hostname, policy) &&
+      isYoutubePage(hostname)
+        ? settings.newBadgePlace
+        : "default"
+    applyYoutubeNewBadge(place)
+  }, [globallyEnabled, policyReady, policy, hostname, settings.newBadgePlace])
+
+  useEffect(() => {
+    return () => applyYoutubeNewBadge("default")
+  }, [])
 
   useEffect(() => {
     if (!ready || !dirtyRef.current) return
@@ -2329,6 +2348,28 @@ function Overlay() {
                     ))}
                   </div>
                 </Group>
+                {isYoutubePage(hostname) ? (
+                  <div className="vee-switch-row vee-switch-solo">
+                    <div>
+                      <span>New tag</span>
+                      <small>Where the New label sits on thumbnails, including Shorts.</small>
+                    </div>
+                    <select
+                      className="vee-select"
+                      aria-label="New tag"
+                      title="Where the New label sits on thumbnails, including Shorts"
+                      value={settings.newBadgePlace}
+                      onChange={(event) =>
+                        patch({ newBadgePlace: readNewBadgePlace(event.target.value) })
+                      }>
+                      <option value="default">Default</option>
+                      <option value="top-right">Top right</option>
+                      <option value="bottom-right">Bottom right</option>
+                      <option value="bottom-left">Bottom left</option>
+                      <option value="hide">Hide</option>
+                    </select>
+                  </div>
+                ) : null}
                 <div className="vee-switch-row vee-switch-solo">
                   <div>
                     <span>Sync with custom controller</span>

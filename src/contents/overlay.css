@@ -1198,6 +1198,22 @@ a.vee-progress-link:hover {
   margin-top: 2px;
 }
 
+.vee-select {
+  flex: none;
+  height: 28px;
+  max-width: 132px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  color-scheme: dark;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .vee-switch-row {
   display: flex;
   align-items: center;
