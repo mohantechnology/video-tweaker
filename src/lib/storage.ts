@@ -56,8 +56,8 @@ export async function saveGlobalEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * When on, effect changes (including turning effects off) from any tab are
- * written to every stored site and kept for new tabs on any domain.
+ * Popup Global sync. When on, effect changes (including turning effects off)
+ * from any tab are written to every stored site and kept for new tabs on any domain.
  */
 export const GLOBAL_CONTROL_KEY = "veeGlobalControl"
 

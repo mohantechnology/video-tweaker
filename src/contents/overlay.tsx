@@ -187,7 +187,6 @@ import {
   resizeDockBox,
   sanitizeUserPresets,
   saveDockLayout,
-  saveGlobalControlEnabled,
   saveSiteSettings,
   saveUserPresets,
   settingsFromGlobalPreset,
@@ -1390,7 +1389,6 @@ function Overlay() {
   }
 
   const setOpenTabSync = (flag: "syncOpenTabsAudio" | "syncOpenTabsVideo") => {
-    if (globalControlRef.current) return
     const current = settingsRef.current
     if (current[flag]) {
       patch({ [flag]: false })
@@ -1407,25 +1405,30 @@ function Overlay() {
     else videoEditedRef.current = false
   }
 
-  const toggleGlobalControl = () => {
-    if (globalControlRef.current) {
-      globalControlRef.current = false
-      setGlobalControlOn(false)
-      void saveGlobalControlEnabled(false)
+  /** Same-site sync for already open tabs. Future tabs on this domain already use saved settings. */
+  const toggleDomainSync = () => {
+    const current = settingsRef.current
+    if (current.syncOpenTabsAudio && current.syncOpenTabsVideo) {
+      patch({ syncOpenTabsAudio: false, syncOpenTabsVideo: false })
       return
     }
-    const snapshot = settingsRef.current
-    globalControlRef.current = true
-    setGlobalControlOn(true)
+    const domain = domainRef.current ?? current
     audioEditedRef.current = false
     videoEditedRef.current = false
-    const values = takeGroup(snapshot, GLOBAL_CONTROL_KEYS)
-    inflightGlobal.current = [...inflightGlobal.current, values]
-    inflightSaves.current = [...inflightSaves.current, snapshot]
-    domainRef.current = snapshot
-    dirtyRef.current = false
-    void pushGlobalControl(snapshot, hostname)
+    patch(
+      {
+        syncOpenTabsAudio: true,
+        syncOpenTabsVideo: true,
+        presetId: domain.presetId,
+        ...takeGroup(domain, AUDIO_OPEN_TAB_KEYS),
+        ...takeGroup(domain, VIDEO_OPEN_TAB_KEYS)
+      },
+      false,
+      "now"
+    )
   }
+
+  const domainSyncOn = settings.syncOpenTabsAudio && settings.syncOpenTabsVideo
 
   dockBridge.current.onControl = (control) => {
     if (control.type === "hold") {
@@ -2532,28 +2535,28 @@ function Overlay() {
                   onToggle={() => toggleSection("playback-open-tabs")}>
                   <SwitchRow
                     icon={Layers}
-                    label="Global control"
-                    detail="On: closing or changing effects in this tab updates every open tab and every future tab on all sites. Off: each site keeps its own settings."
-                    checked={globalControlOn}
-                    onClick={toggleGlobalControl}
+                    label="Domain sync"
+                    detail="On: closing or changing effects updates every open tab on this site. New tabs and refreshes already use the saved site settings. For every site at once, use Global sync in the extension popup."
+                    checked={domainSyncOn}
+                    onClick={toggleDomainSync}
                   />
                   <p className="vee-hint">
                     {globalControlOn
-                      ? "Global control is on. Effect changes apply to every site. Per-site audio and video sync stay on while this is enabled."
-                      : "On sends that kind of change to every open tab on this site. Off leaves tabs that are already open unchanged. A new tab or a refresh uses the saved change."}
+                      ? "Global sync is on in the extension popup, so effect changes also apply to every other site."
+                      : "Domain sync turns audio and video on together. Use Audio or Video alone to sync only that group. Off leaves tabs that are already open unchanged for that group."}
                   </p>
                   <SwitchRow
                     icon={AudioLines}
                     label="Audio"
                     detail="Speed, volume, mute, and playback speed."
-                    checked={globalControlOn || settings.syncOpenTabsAudio}
+                    checked={settings.syncOpenTabsAudio}
                     onClick={() => setOpenTabSync("syncOpenTabsAudio")}
                   />
                   <SwitchRow
                     icon={Video}
                     label="Video"
                     detail="Color, frame, position, and the other picture effects."
-                    checked={globalControlOn || settings.syncOpenTabsVideo}
+                    checked={settings.syncOpenTabsVideo}
                     onClick={() => setOpenTabSync("syncOpenTabsVideo")}
                   />
                 </Group>

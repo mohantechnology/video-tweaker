@@ -111,11 +111,13 @@ export type EffectSettings = ColorSettings & {
   /**
    * When true, sound and speed changes update every open tab on this site.
    * When false, a tab that is already open keeps its sound until refresh.
+   * Domain sync in the panel turns this on together with syncOpenTabsVideo.
    */
   syncOpenTabsAudio: boolean
   /**
    * When true, picture changes update every open tab on this site.
    * When false, a tab that is already open keeps its picture until refresh.
+   * Domain sync in the panel turns this on together with syncOpenTabsAudio.
    */
   syncOpenTabsVideo: boolean
   presetId: string

@@ -14,17 +14,23 @@ import {
   type SitePolicy
 } from "~lib/sites"
 import {
+  GLOBAL_CONTROL_KEY,
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
   OPEN_MESSAGE,
   USER_PRESETS_KEY,
+  loadEffectiveSiteSettings,
+  loadGlobalControl,
   loadGlobalEnabled,
   loadGlobalPreset,
   loadUserPresets,
+  pushGlobalControl,
+  readGlobalControl,
   readGlobalEnabled,
   readGlobalPreset,
   requestOpenPanel,
   sanitizeUserPresets,
+  saveGlobalControlEnabled,
   saveGlobalEnabled,
   saveGlobalPreset,
   type GlobalPreset
@@ -66,6 +72,7 @@ function Popup() {
   const [globalPreset, setGlobalPreset] = useState<GlobalPreset | null>(null)
   const [presetReady, setPresetReady] = useState(false)
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
+  const [globalSyncOn, setGlobalSyncOn] = useState<boolean | null>(null)
   const [presetMenu, setPresetMenu] = useState(false)
   const [pane, setPane] = useState<"general" | "sites">("general")
   const presetRowRef = useRef<HTMLDivElement>(null)
@@ -75,16 +82,18 @@ function Popup() {
     let alive = true
 
     const load = async () => {
-      const [tab, storedPolicy, enabled, saved, storedPreset] = await Promise.all([
+      const [tab, storedPolicy, enabled, control, saved, storedPreset] = await Promise.all([
         readActiveTab(),
         loadSitePolicy(),
         loadGlobalEnabled(),
+        loadGlobalControl(),
         loadUserPresets(),
         loadGlobalPreset()
       ])
       if (!alive) return
       setPolicy(storedPolicy)
       setGloballyEnabled(enabled)
+      setGlobalSyncOn(control.enabled)
       setSavedPresets(saved)
       if (!presetSynced.current) {
         presetSynced.current = true
@@ -129,6 +138,9 @@ function Popup() {
       if (changes[GLOBAL_ENABLED_KEY]) {
         setGloballyEnabled(readGlobalEnabled(changes[GLOBAL_ENABLED_KEY].newValue))
       }
+      if (Object.prototype.hasOwnProperty.call(changes, GLOBAL_CONTROL_KEY)) {
+        setGlobalSyncOn(readGlobalControl(changes[GLOBAL_CONTROL_KEY].newValue).enabled)
+      }
       if (changes[SITE_POLICY_KEY]) setPolicy(sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue))
       if (changes[USER_PRESETS_KEY]) {
         setSavedPresets(sanitizeUserPresets(changes[USER_PRESETS_KEY].newValue))
@@ -170,6 +182,22 @@ function Popup() {
     const next = !globallyEnabled
     setGloballyEnabled(next)
     await saveGlobalEnabled(next)
+  }
+
+  const toggleGlobalSync = async () => {
+    if (globalSyncOn == null) return
+    if (globalSyncOn) {
+      setGlobalSyncOn(false)
+      await saveGlobalControlEnabled(false)
+      return
+    }
+    setGlobalSyncOn(true)
+    if (state.kind === "ready") {
+      const settings = await loadEffectiveSiteSettings(state.hostname)
+      await pushGlobalControl(settings, state.hostname)
+      return
+    }
+    await saveGlobalControlEnabled(true)
   }
 
   const applySnapshot = async (presetId: string, snapshot: UserPreset["snapshot"]) => {
@@ -265,6 +293,24 @@ function Popup() {
                 data-on={String(globallyEnabled === true)}
                 disabled={globallyEnabled == null}
                 onClick={() => void toggle()}>
+                <i />
+              </button>
+            </div>
+            <div className="row">
+              <div>
+                <span>Global sync</span>
+                <strong>{globalSyncOn == null ? "…" : globalSyncOn ? "On" : "Off"}</strong>
+              </div>
+              <button
+                className="switch"
+                type="button"
+                role="switch"
+                aria-checked={globalSyncOn === true}
+                aria-label="Toggle global sync"
+                title="On: closing or changing effects in any tab updates every tab on every site. Off: each site keeps its own settings."
+                data-on={String(globalSyncOn === true)}
+                disabled={globalSyncOn == null}
+                onClick={() => void toggleGlobalSync()}>
                 <i />
               </button>
             </div>

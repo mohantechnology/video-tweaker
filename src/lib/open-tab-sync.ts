@@ -47,7 +47,7 @@ export const VIDEO_OPEN_TAB_KEYS: readonly (keyof EffectSettings)[] = [
 ]
 
 /**
- * Fields shared across every domain while Global control is on.
+ * Fields shared across every domain while Global sync is on in the popup.
  * Includes turning effects off (`enabled`) plus audio and picture groups.
  */
 export const GLOBAL_CONTROL_KEYS: readonly (keyof EffectSettings)[] = [
