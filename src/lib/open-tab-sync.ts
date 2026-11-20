@@ -46,6 +46,17 @@ export const VIDEO_OPEN_TAB_KEYS: readonly (keyof EffectSettings)[] = [
   "autoBrightness"
 ]
 
+/**
+ * Fields shared across every domain while Global control is on.
+ * Includes turning effects off (`enabled`) plus audio and picture groups.
+ */
+export const GLOBAL_CONTROL_KEYS: readonly (keyof EffectSettings)[] = [
+  "enabled",
+  "presetId",
+  ...AUDIO_OPEN_TAB_KEYS,
+  ...VIDEO_OPEN_TAB_KEYS
+]
+
 function writeKey<K extends keyof EffectSettings>(
   target: EffectSettings,
   source: EffectSettings,
@@ -109,6 +120,19 @@ export function adoptOpenTabSettings(current: EffectSettings, incoming: EffectSe
   const audioMoved = takeAudio && groupDiffers(current, incoming, AUDIO_OPEN_TAB_KEYS)
   const videoMoved = takeVideo && groupDiffers(current, incoming, VIDEO_OPEN_TAB_KEYS)
   if (!audioMoved && !videoMoved) next.presetId = current.presetId
+  return next
+}
+
+/** Merge global-control values onto a site's settings. Site-only fields stay. */
+export function applyGlobalControlValues(
+  current: EffectSettings,
+  values: Partial<EffectSettings>
+): EffectSettings {
+  const next: EffectSettings = { ...current }
+  for (const key of GLOBAL_CONTROL_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) continue
+    writeKey(next, values as EffectSettings, key)
+  }
   return next
 }
 

@@ -21,6 +21,7 @@ import {
   type UserPreset
 } from "./presets"
 import { domainDockDefaults, domainDockPreset } from "./domains"
+import { GLOBAL_CONTROL_KEYS, applyGlobalControlValues, takeGroup } from "./open-tab-sync"
 import {
   DOCK_CONTROL_KEYS,
   DOCK_FLAG_KEYS,
@@ -52,6 +53,78 @@ export async function loadGlobalEnabled(): Promise<boolean> {
 
 export async function saveGlobalEnabled(enabled: boolean): Promise<void> {
   await chrome.storage.local.set({ [GLOBAL_ENABLED_KEY]: enabled })
+}
+
+/**
+ * When on, effect changes (including turning effects off) from any tab are
+ * written to every stored site and kept for new tabs on any domain.
+ */
+export const GLOBAL_CONTROL_KEY = "veeGlobalControl"
+
+export type GlobalControlState = {
+  enabled: boolean
+  values: Partial<EffectSettings>
+}
+
+export function readGlobalControl(value: unknown): GlobalControlState {
+  if (!value || typeof value !== "object") return { enabled: false, values: {} }
+  const raw = value as Partial<GlobalControlState>
+  const enabled = raw.enabled === true
+  const values: Partial<EffectSettings> = {}
+  if (raw.values && typeof raw.values === "object") {
+    const source = raw.values as Partial<EffectSettings>
+    for (const key of GLOBAL_CONTROL_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+      ;(values as Record<string, unknown>)[key] = source[key]
+    }
+  }
+  return { enabled, values }
+}
+
+export async function loadGlobalControl(): Promise<GlobalControlState> {
+  const bag = await chrome.storage.local.get(GLOBAL_CONTROL_KEY)
+  return readGlobalControl(bag[GLOBAL_CONTROL_KEY])
+}
+
+/**
+ * Turn global control off without clearing the last shared values.
+ * Stored sites keep whatever they already have.
+ */
+export async function saveGlobalControlEnabled(enabled: boolean): Promise<void> {
+  const current = await loadGlobalControl()
+  await chrome.storage.local.set({
+    [GLOBAL_CONTROL_KEY]: { enabled, values: current.values } satisfies GlobalControlState
+  })
+}
+
+/**
+ * Store shared effect values, copy them onto every existing site record, and
+ * mark global control on so new tabs on any domain pick them up.
+ * `sourceHostname` gets the full `settings` blob so this tab's non-shared
+ * fields (dock, skip ads, resume) are not lost in the fan-out.
+ */
+export async function pushGlobalControl(
+  settings: EffectSettings,
+  sourceHostname = ""
+): Promise<void> {
+  const values = takeGroup(settings, GLOBAL_CONTROL_KEYS)
+  const bag = (await chrome.storage.local.get(null)) as Record<string, unknown>
+  const updates: Record<string, unknown> = {
+    [GLOBAL_CONTROL_KEY]: { enabled: true, values } satisfies GlobalControlState
+  }
+  const sourceKey = sourceHostname ? siteStorageKey(sourceHostname) : ""
+  for (const [key, value] of Object.entries(bag)) {
+    if (!key.startsWith(SITE_KEY_PREFIX)) continue
+    const hostname = key.slice(SITE_KEY_PREFIX.length)
+    if (key === sourceKey) {
+      updates[key] = settings
+      continue
+    }
+    const current = normalizeSettings(value, hostname)
+    updates[key] = normalizeSettings(applyGlobalControlValues(current, values), hostname)
+  }
+  if (sourceKey && updates[sourceKey] == null) updates[sourceKey] = settings
+  await chrome.storage.local.set(updates)
 }
 
 export type OpenRequest = {
@@ -227,8 +300,10 @@ export function settingsFromGlobalPreset(
 /** Stored site settings, or the in-memory global preset when this domain has no record. */
 export async function loadEffectiveSiteSettings(hostname: string): Promise<EffectSettings> {
   const stored = await loadStoredSiteSettings(hostname)
-  if (stored) return stored
-  return settingsFromGlobalPreset(await loadGlobalPreset(), hostname)
+  const base = stored ?? settingsFromGlobalPreset(await loadGlobalPreset(), hostname)
+  const control = await loadGlobalControl()
+  if (!control.enabled) return base
+  return normalizeSettings(applyGlobalControlValues(base, control.values), hostname)
 }
 
 /**

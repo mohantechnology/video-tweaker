@@ -115,8 +115,10 @@ import {
 import { playerMediaLevel, YT_ECHO_ATTR } from "~lib/native-mirror"
 import {
   AUDIO_OPEN_TAB_KEYS,
+  GLOBAL_CONTROL_KEYS,
   VIDEO_OPEN_TAB_KEYS,
   adoptOpenTabSettings,
+  applyGlobalControlValues,
   editsAudioGroup,
   editsVideoGroup,
   groupDiffers,
@@ -157,6 +159,7 @@ import {
   type TabMedia
 } from "~lib/tab-media"
 import {
+  GLOBAL_CONTROL_KEY,
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
   MAX_USER_PRESETS,
@@ -166,20 +169,25 @@ import {
   type DockBox,
   type DockLayout,
   type DockMode,
+  type GlobalControlState,
   type Viewport,
   clampDockBox,
   defaultSettingsFor,
   loadDockLayout,
+  loadGlobalControl,
   loadGlobalEnabled,
   loadGlobalPreset,
   loadStoredSiteSettings,
   loadUserPresets,
   normalizeSettings,
+  pushGlobalControl,
+  readGlobalControl,
   readGlobalEnabled,
   readGlobalPreset,
   resizeDockBox,
   sanitizeUserPresets,
   saveDockLayout,
+  saveGlobalControlEnabled,
   saveSiteSettings,
   saveUserPresets,
   settingsFromGlobalPreset,
@@ -596,6 +604,7 @@ function Overlay() {
   const [policy, setPolicy] = useState<SitePolicy>(defaultSitePolicy)
   const [policyReady, setPolicyReady] = useState(false)
   const [globallyEnabled, setGloballyEnabled] = useState<boolean | null>(null)
+  const [globalControlOn, setGlobalControlOn] = useState(false)
   const [ready, setReady] = useState(false)
   const [hasVideo, setHasVideo] = useState(false)
   const [forcedOpen, setForcedOpen] = useState(false)
@@ -628,6 +637,8 @@ function Overlay() {
   const clipRef = useRef("")
   const policyRef = useRef(policy)
   const globallyEnabledRef = useRef(false)
+  const globalControlRef = useRef(false)
+  const inflightGlobal = useRef<Partial<EffectSettings>[]>([])
   const appliedRef = useRef(settings)
   const readyRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -683,21 +694,23 @@ function Overlay() {
   settingsRef.current = settings
   policyRef.current = policy
   globallyEnabledRef.current = globallyEnabled === true
+  globalControlRef.current = globalControlOn
   readyRef.current = ready
   layoutRef.current = layout
   presetOpenRef.current = presetOpen
   draggingRef.current = dragging
 
-  const commitSiteSettings = (snapshot: EffectSettings) => {
-    const seq = ++saveSeq.current
-    const domain = domainRef.current
-    const outgoing = domain
-      ? mergeUneditedGroups(snapshot, domain, audioEditedRef.current, videoEditedRef.current)
-      : snapshot
+  const persistSettings = (outgoing: EffectSettings, seq: number) => {
     domainRef.current = outgoing
     inflightSaves.current = [...inflightSaves.current, outgoing]
     dirtyRef.current = false
-    void saveSiteSettings(hostname, outgoing).then(() => {
+    const write = globalControlRef.current
+      ? pushGlobalControl(outgoing, hostname)
+      : saveSiteSettings(hostname, outgoing)
+    if (globalControlRef.current) {
+      inflightGlobal.current = [...inflightGlobal.current, takeGroup(outgoing, GLOBAL_CONTROL_KEYS)]
+    }
+    void write.then(() => {
       if (seq >= adoptedSeq.current) return
       const latestDomain = domainRef.current
       const latest = settingsRef.current
@@ -706,8 +719,22 @@ function Overlay() {
         : latest
       domainRef.current = again
       inflightSaves.current = [...inflightSaves.current, again]
+      if (globalControlRef.current) {
+        inflightGlobal.current = [...inflightGlobal.current, takeGroup(again, GLOBAL_CONTROL_KEYS)]
+        void pushGlobalControl(again, hostname)
+        return
+      }
       void saveSiteSettings(hostname, again)
     })
+  }
+
+  const commitSiteSettings = (snapshot: EffectSettings) => {
+    const seq = ++saveSeq.current
+    const domain = domainRef.current
+    const outgoing = domain
+      ? mergeUneditedGroups(snapshot, domain, audioEditedRef.current, videoEditedRef.current)
+      : snapshot
+    persistSettings(outgoing, seq)
   }
 
   useEffect(() => {
@@ -728,19 +755,31 @@ function Overlay() {
         if (!alive) return
         setPolicyReady(true)
       })
+    void loadGlobalControl().then((control) => {
+      if (!alive) return
+      globalControlRef.current = control.enabled
+      setGlobalControlOn(control.enabled)
+    })
     void Promise.all([
       loadStoredSiteSettings(hostname),
       loadGlobalPreset(),
+      loadGlobalControl(),
       loadUserPresets()
-    ]).then(([stored, globalPreset, presets]) => {
+    ]).then(([stored, globalPreset, control, presets]) => {
       if (!alive) return
+      globalControlRef.current = control.enabled
+      setGlobalControlOn(control.enabled)
       if (!presetsSynced.current) {
         presetsSynced.current = true
         setUserPresets(presets)
       }
       if (!settingsSynced.current) {
         settingsSynced.current = true
-        const loaded = stored ?? settingsFromGlobalPreset(globalPreset, hostname)
+        const base = stored ?? settingsFromGlobalPreset(globalPreset, hostname)
+        const loaded =
+          control.enabled && Object.keys(control.values).length > 0
+            ? normalizeSettings(applyGlobalControlValues(base, control.values), hostname)
+            : base
         siteOverrideRef.current = stored != null
         domainRef.current = loaded
         domainAheadRef.current = false
@@ -970,14 +1009,14 @@ function Overlay() {
           videoEditedRef.current = false
         }
       }
-      const adoptExternal = (incoming: EffectSettings) => {
+      const adoptExternal = (incoming: EffectSettings, forceAll = false) => {
         const current = settingsRef.current
-        const next = adoptOpenTabSettings(current, incoming)
+        const next = forceAll ? incoming : adoptOpenTabSettings(current, incoming)
         if (!groupDiffers(next, incoming, AUDIO_OPEN_TAB_KEYS)) audioEditedRef.current = false
         if (!groupDiffers(next, incoming, VIDEO_OPEN_TAB_KEYS)) videoEditedRef.current = false
         if (next.syncCustomController !== current.syncCustomController) seenMediaRef.current = null
         if (settingsEqual(current, next)) return
-        const holding = audioEditedRef.current || videoEditedRef.current
+        const holding = !forceAll && (audioEditedRef.current || videoEditedRef.current)
         tabMediaRef.current = releaseTabMediaFromDomain(tabMediaRef.current, current, next)
         if (!holding) {
           adoptedSeq.current = saveSeq.current + 1
@@ -994,7 +1033,7 @@ function Overlay() {
         suppressDockMedia(LIGHT_APPLY_DELAY_MS + 280)
         if (globallyEnabledRef.current) bridgeRef.current?.applyNow()
       }
-      const takeSiteSettings = (incoming: EffectSettings) => {
+      const takeSiteSettings = (incoming: EffectSettings, forceAll = false) => {
         const pending = inflightSaves.current
         const index = pending.findIndex((item) => settingsEqual(item, incoming))
         if (index >= 0) {
@@ -1006,13 +1045,38 @@ function Overlay() {
         }
         if (inflightSaves.current.length > 0) domainAheadRef.current = true
         domainRef.current = incoming
-        if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming)
+        if (!settingsEqual(settingsRef.current, incoming)) adoptExternal(incoming, forceAll)
+      }
+      const takeGlobalControl = (control: GlobalControlState) => {
+        globalControlRef.current = control.enabled
+        setGlobalControlOn(control.enabled)
+        if (!control.enabled) return
+        const pending = inflightGlobal.current
+        const index = pending.findIndex((item) => !groupDiffers(
+          applyGlobalControlValues(defaultSettings(), item),
+          applyGlobalControlValues(defaultSettings(), control.values),
+          GLOBAL_CONTROL_KEYS
+        ))
+        if (index >= 0) {
+          inflightGlobal.current = pending.slice(index + 1)
+          return
+        }
+        const current = settingsRef.current
+        const next = normalizeSettings(applyGlobalControlValues(current, control.values), hostname)
+        if (settingsEqual(current, next)) return
+        domainRef.current = next
+        audioEditedRef.current = false
+        videoEditedRef.current = false
+        adoptExternal(next, true)
       }
       const siteChange = changes[siteStorageKey(hostname)]
       if (siteChange?.newValue != null) {
         settingsSynced.current = true
         siteOverrideRef.current = true
-        takeSiteSettings(normalizeSettings(siteChange.newValue, hostname))
+        takeSiteSettings(
+          normalizeSettings(siteChange.newValue, hostname),
+          globalControlRef.current
+        )
       } else if (
         Object.prototype.hasOwnProperty.call(changes, GLOBAL_PRESET_KEY) &&
         !siteOverrideRef.current
@@ -1021,6 +1085,9 @@ function Overlay() {
         takeSiteSettings(
           settingsFromGlobalPreset(readGlobalPreset(changes[GLOBAL_PRESET_KEY].newValue), hostname)
         )
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, GLOBAL_CONTROL_KEY)) {
+        takeGlobalControl(readGlobalControl(changes[GLOBAL_CONTROL_KEY].newValue))
       }
       if (changes[SITE_POLICY_KEY]) {
         const incoming = sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue)
@@ -1323,6 +1390,7 @@ function Overlay() {
   }
 
   const setOpenTabSync = (flag: "syncOpenTabsAudio" | "syncOpenTabsVideo") => {
+    if (globalControlRef.current) return
     const current = settingsRef.current
     if (current[flag]) {
       patch({ [flag]: false })
@@ -1337,6 +1405,26 @@ function Overlay() {
     patch({ [flag]: true, presetId: domain.presetId, ...takeGroup(domain, keys) }, false, "now")
     if (flag === "syncOpenTabsAudio") audioEditedRef.current = false
     else videoEditedRef.current = false
+  }
+
+  const toggleGlobalControl = () => {
+    if (globalControlRef.current) {
+      globalControlRef.current = false
+      setGlobalControlOn(false)
+      void saveGlobalControlEnabled(false)
+      return
+    }
+    const snapshot = settingsRef.current
+    globalControlRef.current = true
+    setGlobalControlOn(true)
+    audioEditedRef.current = false
+    videoEditedRef.current = false
+    const values = takeGroup(snapshot, GLOBAL_CONTROL_KEYS)
+    inflightGlobal.current = [...inflightGlobal.current, values]
+    inflightSaves.current = [...inflightSaves.current, snapshot]
+    domainRef.current = snapshot
+    dirtyRef.current = false
+    void pushGlobalControl(snapshot, hostname)
   }
 
   dockBridge.current.onControl = (control) => {
@@ -2442,22 +2530,30 @@ function Overlay() {
                   icon={RefreshCw}
                   open={sectionOpen("playback-open-tabs")}
                   onToggle={() => toggleSection("playback-open-tabs")}>
+                  <SwitchRow
+                    icon={Layers}
+                    label="Global control"
+                    detail="On: closing or changing effects in this tab updates every open tab and every future tab on all sites. Off: each site keeps its own settings."
+                    checked={globalControlOn}
+                    onClick={toggleGlobalControl}
+                  />
                   <p className="vee-hint">
-                    On sends that kind of change to every open tab on this site. Off leaves tabs that are
-                    already open unchanged. A new tab or a refresh uses the saved change.
+                    {globalControlOn
+                      ? "Global control is on. Effect changes apply to every site. Per-site audio and video sync stay on while this is enabled."
+                      : "On sends that kind of change to every open tab on this site. Off leaves tabs that are already open unchanged. A new tab or a refresh uses the saved change."}
                   </p>
                   <SwitchRow
                     icon={AudioLines}
                     label="Audio"
                     detail="Speed, volume, mute, and playback speed."
-                    checked={settings.syncOpenTabsAudio}
+                    checked={globalControlOn || settings.syncOpenTabsAudio}
                     onClick={() => setOpenTabSync("syncOpenTabsAudio")}
                   />
                   <SwitchRow
                     icon={Video}
                     label="Video"
                     detail="Color, frame, position, and the other picture effects."
-                    checked={settings.syncOpenTabsVideo}
+                    checked={globalControlOn || settings.syncOpenTabsVideo}
                     onClick={() => setOpenTabSync("syncOpenTabsVideo")}
                   />
                 </Group>
