@@ -1,4 +1,4 @@
-import { COLOR_KEYS, type EffectSettings } from "./types"
+import { COLOR_KEYS, defaultSettings, type EffectSettings } from "./types"
 
 /**
  * Sound and speed. When auto-sync for audio is off, an already open tab keeps
@@ -47,15 +47,10 @@ export const VIDEO_OPEN_TAB_KEYS: readonly (keyof EffectSettings)[] = [
 ]
 
 /**
- * Fields shared across every domain while Global sync is on in the popup.
- * Includes turning effects off (`enabled`) plus audio and picture groups.
+ * Every panel setting. Global sync copies these to all domains.
+ * Domain sync applies the same set, but only for tabs on that site.
  */
-export const GLOBAL_CONTROL_KEYS: readonly (keyof EffectSettings)[] = [
-  "enabled",
-  "presetId",
-  ...AUDIO_OPEN_TAB_KEYS,
-  ...VIDEO_OPEN_TAB_KEYS
-]
+export const GLOBAL_CONTROL_KEYS = Object.keys(defaultSettings()) as (keyof EffectSettings)[]
 
 function writeKey<K extends keyof EffectSettings>(
   target: EffectSettings,

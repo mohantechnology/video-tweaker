@@ -56,8 +56,8 @@ export async function saveGlobalEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * Popup Global sync. When on, effect changes (including turning effects off)
- * from any tab are written to every stored site and kept for new tabs on any domain.
+ * Popup Global sync. When on, every panel change — including turning effects
+ * off and opening or closing the floating panel — is shared with every site.
  */
 export const GLOBAL_CONTROL_KEY = "veeGlobalControl"
 
@@ -99,9 +99,8 @@ export async function saveGlobalControlEnabled(enabled: boolean): Promise<void> 
 
 /**
  * Store shared effect values, copy them onto every existing site record, and
- * mark global control on so new tabs on any domain pick them up.
- * `sourceHostname` gets the full `settings` blob so this tab's non-shared
- * fields (dock, skip ads, resume) are not lost in the fan-out.
+ * mark global sync on so new tabs on any domain pick them up.
+ * `sourceHostname` gets the full `settings` blob as the canonical write.
  */
 export async function pushGlobalControl(
   settings: EffectSettings,
@@ -486,11 +485,10 @@ function fitStoredBox(box: DockBox, slot: DockMode): DockBox {
   }
 }
 
-export async function loadDockLayout(): Promise<DockLayout> {
+export function readDockLayout(value: unknown): DockLayout {
   const fallback = defaultDockLayout()
-  const bag = await chrome.storage.local.get(DOCK_LAYOUT_KEY)
-  const stored = bag[DOCK_LAYOUT_KEY] as Partial<DockLayout> | undefined
-  if (!stored) return fallback
+  if (!value || typeof value !== "object") return fallback
+  const stored = value as Partial<DockLayout>
   const mode: DockMode =
     stored.mode === "min" || stored.mode === "closed" || stored.mode === "max"
       ? stored.mode
@@ -503,8 +501,31 @@ export async function loadDockLayout(): Promise<DockLayout> {
   }
 }
 
+export async function loadDockLayout(): Promise<DockLayout> {
+  const bag = await chrome.storage.local.get(DOCK_LAYOUT_KEY)
+  return readDockLayout(bag[DOCK_LAYOUT_KEY])
+}
+
 export async function saveDockLayout(layout: DockLayout): Promise<void> {
   await chrome.storage.local.set({ [DOCK_LAYOUT_KEY]: layout })
+}
+
+const SITE_DOCK_PREFIX = "veeSiteDock:"
+
+/** Floating panel open/close layout for one hostname (Domain sync). */
+export function siteDockStorageKey(hostname: string): string {
+  return `${SITE_DOCK_PREFIX}${hostname}`
+}
+
+export async function loadSiteDockLayout(hostname: string): Promise<DockLayout | null> {
+  const key = siteDockStorageKey(hostname)
+  const bag = await chrome.storage.local.get(key)
+  if (bag[key] == null) return null
+  return readDockLayout(bag[key])
+}
+
+export async function saveSiteDockLayout(hostname: string, layout: DockLayout): Promise<void> {
+  await chrome.storage.local.set({ [siteDockStorageKey(hostname)]: layout })
 }
 
 function clampNumber(value: number, min: number, max: number): number {

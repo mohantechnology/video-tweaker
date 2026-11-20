@@ -159,6 +159,7 @@ import {
   type TabMedia
 } from "~lib/tab-media"
 import {
+  DOCK_LAYOUT_KEY,
   GLOBAL_CONTROL_KEY,
   GLOBAL_ENABLED_KEY,
   GLOBAL_PRESET_KEY,
@@ -177,19 +178,23 @@ import {
   loadGlobalControl,
   loadGlobalEnabled,
   loadGlobalPreset,
+  loadSiteDockLayout,
   loadStoredSiteSettings,
   loadUserPresets,
   normalizeSettings,
   pushGlobalControl,
+  readDockLayout,
   readGlobalControl,
   readGlobalEnabled,
   readGlobalPreset,
   resizeDockBox,
   sanitizeUserPresets,
   saveDockLayout,
+  saveSiteDockLayout,
   saveSiteSettings,
   saveUserPresets,
   settingsFromGlobalPreset,
+  siteDockStorageKey,
   siteStorageKey
 } from "~lib/storage"
 import {
@@ -447,6 +452,22 @@ function stopEvent(event: { stopPropagation: () => void }): void {
 function withMode(current: DockLayout, mode: DockMode): DockLayout {
   if (current.mode === mode) return current
   return { ...current, mode }
+}
+
+function dockBoxEqual(
+  a: DockBox,
+  b: DockBox
+): boolean {
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.pinned === b.pinned
+}
+
+function dockLayoutsEqual(a: DockLayout, b: DockLayout): boolean {
+  return (
+    a.mode === b.mode &&
+    dockBoxEqual(a.max, b.max) &&
+    dockBoxEqual(a.min, b.min) &&
+    dockBoxEqual(a.closed, b.closed)
+  )
 }
 
 function viewportNow(): Viewport {
@@ -794,13 +815,25 @@ function Overlay() {
       if (!alive) return
       setProgressRows(rows)
     })
-    void loadDockLayout().then((loaded) => {
+    void Promise.all([
+      loadDockLayout(),
+      loadSiteDockLayout(hostname),
+      loadGlobalControl(),
+      loadStoredSiteSettings(hostname)
+    ]).then(([globalDock, siteDock, control, stored]) => {
       if (!alive) return
+      const domainSynced = Boolean(stored?.syncOpenTabsAudio && stored?.syncOpenTabsVideo)
+      const loaded =
+        !control.enabled && domainSynced && siteDock != null ? siteDock : globalDock
       if (pendingOpen.current) {
         pendingOpen.current = false
         const next = withMode(loaded, "max")
         setLayout(next)
-        if (next.mode !== loaded.mode) void saveDockLayout(next)
+        if (next.mode !== loaded.mode) {
+          if (control.enabled) void saveDockLayout(next)
+          else if (domainSynced) void saveSiteDockLayout(hostname, next)
+          else void saveDockLayout(next)
+        }
         return
       }
       setLayout(loaded)
@@ -985,7 +1018,13 @@ function Overlay() {
         }
         const next = withMode(current, "max")
         if (next === current) return current
-        void saveDockLayout(next)
+        if (globalControlRef.current) void saveDockLayout(next)
+        else if (
+          settingsRef.current.syncOpenTabsAudio &&
+          settingsRef.current.syncOpenTabsVideo
+        ) {
+          void saveSiteDockLayout(hostname, next)
+        } else void saveDockLayout(next)
         return next
       })
     }
@@ -1072,10 +1111,9 @@ function Overlay() {
       if (siteChange?.newValue != null) {
         settingsSynced.current = true
         siteOverrideRef.current = true
-        takeSiteSettings(
-          normalizeSettings(siteChange.newValue, hostname),
-          globalControlRef.current
-        )
+        const incoming = normalizeSettings(siteChange.newValue, hostname)
+        const domainSynced = incoming.syncOpenTabsAudio && incoming.syncOpenTabsVideo
+        takeSiteSettings(incoming, globalControlRef.current || domainSynced)
       } else if (
         Object.prototype.hasOwnProperty.call(changes, GLOBAL_PRESET_KEY) &&
         !siteOverrideRef.current
@@ -1087,6 +1125,24 @@ function Overlay() {
       }
       if (Object.prototype.hasOwnProperty.call(changes, GLOBAL_CONTROL_KEY)) {
         takeGlobalControl(readGlobalControl(changes[GLOBAL_CONTROL_KEY].newValue))
+      }
+      if (changes[DOCK_LAYOUT_KEY]?.newValue != null && globalControlRef.current) {
+        const incoming = readDockLayout(changes[DOCK_LAYOUT_KEY].newValue)
+        setLayout((current) => {
+          if (current && dockLayoutsEqual(current, incoming)) return current
+          return incoming
+        })
+      }
+      const siteDockChange = changes[siteDockStorageKey(hostname)]
+      if (siteDockChange?.newValue != null && !globalControlRef.current) {
+        const panel = settingsRef.current
+        if (panel.syncOpenTabsAudio && panel.syncOpenTabsVideo) {
+          const incoming = readDockLayout(siteDockChange.newValue)
+          setLayout((current) => {
+            if (current && dockLayoutsEqual(current, incoming)) return current
+            return incoming
+          })
+        }
       }
       if (changes[SITE_POLICY_KEY]) {
         const incoming = sanitizeSitePolicy(changes[SITE_POLICY_KEY].newValue)
@@ -1405,7 +1461,7 @@ function Overlay() {
     else videoEditedRef.current = false
   }
 
-  /** Same-site sync for already open tabs. Future tabs on this domain already use saved settings. */
+  /** Same-site sync for every panel change, including opening or closing the floating panel. */
   const toggleDomainSync = () => {
     const current = settingsRef.current
     if (current.syncOpenTabsAudio && current.syncOpenTabsVideo) {
@@ -1417,15 +1473,15 @@ function Overlay() {
     videoEditedRef.current = false
     patch(
       {
+        ...takeGroup(domain, GLOBAL_CONTROL_KEYS),
         syncOpenTabsAudio: true,
-        syncOpenTabsVideo: true,
-        presetId: domain.presetId,
-        ...takeGroup(domain, AUDIO_OPEN_TAB_KEYS),
-        ...takeGroup(domain, VIDEO_OPEN_TAB_KEYS)
+        syncOpenTabsVideo: true
       },
       false,
       "now"
     )
+    const panel = layoutRef.current
+    if (panel && !globalControlRef.current) void saveSiteDockLayout(hostname, panel)
   }
 
   const domainSyncOn = settings.syncOpenTabsAudio && settings.syncOpenTabsVideo
@@ -1665,12 +1721,25 @@ function Overlay() {
     if (settingsRef.current.presetId === id) patch({ presetId: "" })
   }
 
+  const persistDock = (next: DockLayout) => {
+    if (globalControlRef.current) {
+      void saveDockLayout(next)
+      return
+    }
+    const panel = settingsRef.current
+    if (panel.syncOpenTabsAudio && panel.syncOpenTabsVideo) {
+      void saveSiteDockLayout(hostname, next)
+      return
+    }
+    void saveDockLayout(next)
+  }
+
   const setMode = (mode: DockMode) => {
     setLayout((current) => {
       if (!current) return current
       const next = withMode(current, mode)
       if (next === current) return current
-      void saveDockLayout(next)
+      persistDock(next)
       return next
     })
   }
@@ -1680,7 +1749,7 @@ function Overlay() {
       if (!current) return current
       const next: DockLayout = { ...current, [slot]: box }
       layoutRef.current = next
-      void saveDockLayout(next)
+      persistDock(next)
       return next
     })
   }
@@ -2536,14 +2605,14 @@ function Overlay() {
                   <SwitchRow
                     icon={Layers}
                     label="Domain sync"
-                    detail="On: closing or changing effects updates every open tab on this site. New tabs and refreshes already use the saved site settings. For every site at once, use Global sync in the extension popup."
+                    detail="On: every panel change on this site — effects, settings, and opening or closing the panel — updates every open tab here. New tabs on this site use the saved settings. For every site at once, use Global sync in the extension popup."
                     checked={domainSyncOn}
                     onClick={toggleDomainSync}
                   />
                   <p className="vee-hint">
                     {globalControlOn
-                      ? "Global sync is on in the extension popup, so effect changes also apply to every other site."
-                      : "Domain sync turns audio and video on together. Use Audio or Video alone to sync only that group. Off leaves tabs that are already open unchanged for that group."}
+                      ? "Global sync is on in the extension popup, so the same changes also apply to every other site."
+                      : "Domain sync shares everything on this site. Use Audio or Video alone to sync only that group. Off leaves tabs that are already open unchanged for that group."}
                   </p>
                   <SwitchRow
                     icon={AudioLines}

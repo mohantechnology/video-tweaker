@@ -19,6 +19,7 @@ import {
   GLOBAL_PRESET_KEY,
   OPEN_MESSAGE,
   USER_PRESETS_KEY,
+  loadDockLayout,
   loadEffectiveSiteSettings,
   loadGlobalControl,
   loadGlobalEnabled,
@@ -30,6 +31,7 @@ import {
   readGlobalPreset,
   requestOpenPanel,
   sanitizeUserPresets,
+  saveDockLayout,
   saveGlobalControlEnabled,
   saveGlobalEnabled,
   saveGlobalPreset,
@@ -192,6 +194,7 @@ function Popup() {
       return
     }
     setGlobalSyncOn(true)
+    await saveDockLayout(await loadDockLayout())
     if (state.kind === "ready") {
       const settings = await loadEffectiveSiteSettings(state.hostname)
       await pushGlobalControl(settings, state.hostname)
@@ -307,7 +310,7 @@ function Popup() {
                 role="switch"
                 aria-checked={globalSyncOn === true}
                 aria-label="Toggle global sync"
-                title="On: closing or changing effects in any tab updates every tab on every site. Off: each site keeps its own settings."
+                title="On: every panel change — effects, settings, and opening or closing the panel — updates every tab on every site. Off: each site keeps its own settings."
                 data-on={String(globalSyncOn === true)}
                 disabled={globalSyncOn == null}
                 onClick={() => void toggleGlobalSync()}>
