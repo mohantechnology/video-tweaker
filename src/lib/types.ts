@@ -9,6 +9,8 @@ export type ColorSettings = {
   sepia: number
   invert: number
   blur: number
+  /** 0 is unchanged, 200 is strongest edge sharpen. */
+  sharpness: number
   opacity: number
 }
 
@@ -397,6 +399,7 @@ export const COLOR_KEYS: (keyof ColorSettings)[] = [
   "sepia",
   "invert",
   "blur",
+  "sharpness",
   "opacity"
 ]
 
@@ -411,6 +414,7 @@ export function defaultColor(): ColorSettings {
     sepia: 0,
     invert: 0,
     blur: 0,
+    sharpness: 0,
     opacity: 1
   }
 }

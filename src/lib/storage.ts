@@ -10,6 +10,7 @@ import {
   ZOOM_MAX,
   ZOOM_MIN,
   clamp,
+  clampSharpness,
   clampTemperature
 } from "./effects"
 import {
@@ -93,6 +94,7 @@ export function normalizeSettings(value: unknown, hostname = ""): EffectSettings
   next.cropTop = clamp(next.cropTop, 0, CROP_MAX)
   next.cropBottom = clamp(next.cropBottom, 0, CROP_MAX)
   next.blur = Math.round(clamp(next.blur, 0, BLUR_MAX) * 10) / 10
+  next.sharpness = clampSharpness(next.sharpness)
   next.opacity = clamp(next.opacity, OPACITY_MIN, OPACITY_MAX)
   next.temperature = clampTemperature(next.temperature)
   next.holdPlaybackRate = clampHoldPlaybackRate(next.holdPlaybackRate)

@@ -10,6 +10,7 @@ export const PRESET_SNAPSHOT_KEYS = [
   "sepia",
   "invert",
   "blur",
+  "sharpness",
   "opacity",
   "flipH",
   "flipV",
@@ -83,6 +84,7 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -99,6 +101,7 @@ export const PRESETS: Preset[] = [
       sepia: 0.12,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -115,6 +118,7 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -131,6 +135,7 @@ export const PRESETS: Preset[] = [
       sepia: 0.05,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -147,6 +152,7 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -163,6 +169,7 @@ export const PRESETS: Preset[] = [
       sepia: 0.28,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }
@@ -179,6 +186,7 @@ export const PRESETS: Preset[] = [
       sepia: 0,
       invert: 0,
       blur: 0,
+      sharpness: 0,
       opacity: 1,
       temperature: 0
     }

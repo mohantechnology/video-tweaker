@@ -35,6 +35,9 @@ export const PAN_MAX = 200
 export const BLUR_MAX = 20
 export const OPACITY_MIN = 0.02
 export const OPACITY_MAX = 1
+/** Edge sharpen amount. 0 is unchanged, 200 is strongest. */
+export const SHARPNESS_MIN = 0
+export const SHARPNESS_MAX = 200
 /** Picture temperature. −100 is cool, 0 is unchanged, 100 is warm. */
 export const TEMPERATURE_MIN = -100
 export const TEMPERATURE_MAX = 100
@@ -55,7 +58,7 @@ export const SECTION_FIELDS = {
     "flipH",
     "flipV"
   ],
-  advancedVideoOn: ["hueRotate", "grayscale", "sepia", "invert", "blur", "opacity"],
+  advancedVideoOn: ["hueRotate", "grayscale", "sepia", "invert", "blur", "sharpness", "opacity"],
   basicAudioOn: ["volume", "muted"],
   basicPlaybackOn: ["playbackRate", "preservePitch", "loop"]
 } as const satisfies Record<string, readonly (keyof EffectSettings)[]>
@@ -144,7 +147,13 @@ export function clampTemperature(value: number): number {
   return Math.round(clamp(value, TEMPERATURE_MIN, TEMPERATURE_MAX))
 }
 
+export function clampSharpness(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(clamp(value, SHARPNESS_MIN, SHARPNESS_MAX))
+}
+
 const TEMPERATURE_FILTER_ID = "vee-color-temperature"
+const SHARPNESS_FILTER_ID = "vee-sharpness"
 const SVG_NS = "http://www.w3.org/2000/svg"
 
 /**
@@ -205,18 +214,79 @@ function syncTemperatureFilter(video: HTMLVideoElement, temperature: number): bo
   return true
 }
 
-export function buildFilter(settings: EffectSettings, temperatureReady = false): string {
-  const filter = [
+/**
+ * Classic 3×3 sharpen kernel. Neighbors are −a, center is 1 + 4a.
+ * a scales with the 0–100 slider so low values stay gentle.
+ */
+export function sharpnessKernel(value: number): string | null {
+  const amount = clampSharpness(value) / 100
+  if (amount < 0.001) return null
+  const a = round(amount, 3)
+  const center = round(1 + 4 * a, 3)
+  const n = round(-a, 3)
+  return `0 ${n} 0 ${n} ${center} ${n} 0 ${n} 0`
+}
+
+function sharpnessFilterNode(parent: ParentNode): SVGFilterElement | null {
+  const found =
+    parent instanceof ShadowRoot
+      ? parent.querySelector(`#${SHARPNESS_FILTER_ID}`)
+      : document.getElementById(SHARPNESS_FILTER_ID)
+  return found instanceof SVGFilterElement ? found : null
+}
+
+function syncSharpnessFilter(video: HTMLVideoElement, sharpness: number): boolean {
+  const kernel = sharpnessKernel(sharpness)
+  if (!kernel) return false
+  const parent = temperatureParent(video)
+  let filter = sharpnessFilterNode(parent)
+  if (!filter) {
+    const svg = document.createElementNS(SVG_NS, "svg")
+    svg.setAttribute("aria-hidden", "true")
+    svg.setAttribute("width", "0")
+    svg.setAttribute("height", "0")
+    svg.style.position = "absolute"
+    svg.style.width = "0"
+    svg.style.height = "0"
+    svg.style.overflow = "hidden"
+    svg.style.pointerEvents = "none"
+    filter = document.createElementNS(SVG_NS, "filter")
+    filter.id = SHARPNESS_FILTER_ID
+    filter.setAttribute("color-interpolation-filters", "sRGB")
+    const convolve = document.createElementNS(SVG_NS, "feConvolveMatrix")
+    convolve.setAttribute("order", "3")
+    convolve.setAttribute("preserveAlpha", "true")
+    filter.append(convolve)
+    svg.append(filter)
+    parent.append(svg)
+  }
+  const convolve = filter.querySelector("feConvolveMatrix")
+  if (!(convolve instanceof SVGElement)) return false
+  if (convolve.getAttribute("kernelMatrix") !== kernel) {
+    convolve.setAttribute("kernelMatrix", kernel)
+  }
+  return true
+}
+
+export function buildFilter(
+  settings: EffectSettings,
+  temperatureReady = false,
+  sharpnessReady = false
+): string {
+  const parts = [
     `brightness(${round(settings.brightness)})`,
     `contrast(${round(settings.contrast)})`,
     `saturate(${round(settings.saturate)})`,
     `hue-rotate(${round(settings.hueRotate, 2)}deg)`,
     `grayscale(${round(settings.grayscale)})`,
     `sepia(${round(settings.sepia)})`,
-    `invert(${round(settings.invert)})`,
-    `blur(${round(settings.blur, 2)}px)`,
-    `opacity(${round(settings.opacity)})`
-  ].join(" ")
+    `invert(${round(settings.invert)})`
+  ]
+  if (sharpnessReady && sharpnessKernel(settings.sharpness)) {
+    parts.push(`url(#${SHARPNESS_FILTER_ID})`)
+  }
+  parts.push(`blur(${round(settings.blur, 2)}px)`, `opacity(${round(settings.opacity)})`)
+  const filter = parts.join(" ")
   if (!temperatureReady || !temperatureMatrix(settings.temperature)) return filter
   return `${filter} url(#${TEMPERATURE_FILTER_ID})`
 }
@@ -317,7 +387,8 @@ export function applyVisual(
     delete video.dataset.veeFilter
   } else {
     const temperatureReady = syncTemperatureFilter(video, visual.temperature)
-    writeVisual(video, "filter", buildFilter(visual, temperatureReady))
+    const sharpnessReady = syncSharpnessFilter(video, visual.sharpness)
+    writeVisual(video, "filter", buildFilter(visual, temperatureReady, sharpnessReady))
   }
 
   if (isTransformIdentity(visual)) {

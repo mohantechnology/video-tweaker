@@ -82,6 +82,8 @@ import {
   PAN_MAX,
   PAN_MIN,
   SECTION_FIELDS,
+  SHARPNESS_MAX,
+  SHARPNESS_MIN,
   STRETCH_MAX,
   STRETCH_MIN,
   TEMPERATURE_MAX,
@@ -267,6 +269,17 @@ const COLOR_CONTROLS: {
     digits: 1,
     format: (value) => `${(Math.round(value * 10) / 10).toFixed(1)} px`,
     advanced: true
+  },
+  {
+    key: "sharpness",
+    label: "Sharpness",
+    min: SHARPNESS_MIN,
+    max: SHARPNESS_MAX,
+    step: 1,
+    digits: 0,
+    format: (value) => `${Math.round(value)}`,
+    advanced: true,
+    title: "Edge sharpen. 0 is off, 200 is strongest"
   },
   {
     key: "opacity",
