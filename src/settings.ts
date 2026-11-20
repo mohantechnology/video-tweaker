@@ -39,3 +39,9 @@ export const AUTO_BRIGHTNESS_SAMPLE_MS = 1200
  * A short preview, such as a search thumbnail, can come and go inside this window.
  */
 export const NO_VIDEO_NOTICE_DELAY_MS = 5000
+
+/**
+ * Full opacity cycle for the YouTube New tag blink:
+ * solid → transparent → solid. Change this when the pulse feels too fast or slow.
+ */
+export const NEW_BADGE_BLINK_MS =3200

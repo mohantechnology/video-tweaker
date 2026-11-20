@@ -205,6 +205,11 @@ export type EffectSettings = ColorSettings & {
    * Default keeps YouTube's own corner. Only YouTube reads it.
    */
   newBadgePlace: NewBadgePlace
+  /**
+   * Pulse the New label between full and transparent opacity.
+   * Only YouTube reads it. Ignored when the tag is hidden.
+   */
+  newBadgeBlink: boolean
 }
 
 export const NEW_BADGE_PLACES = ["default", "top-right", "bottom-right", "bottom-left", "hide"] as const
@@ -481,7 +486,8 @@ export function defaultSettings(): EffectSettings {
     skipAdsSpeed: false,
     skipAdsSeek: false,
     skipAdsBlock: false,
-    newBadgePlace: "default"
+    newBadgePlace: "default",
+    newBadgeBlink: false
   }
 }
 

@@ -136,6 +136,7 @@ import {
   HEAVY_APPLY_DELAY_MS,
   LIGHT_APPLY_DELAY_MS,
   MINIBAR_HIDE_DELAY_MS,
+  NEW_BADGE_BLINK_MS,
   NO_VIDEO_NOTICE_DELAY_MS
 } from "~settings"
 import {
@@ -506,6 +507,7 @@ const PLAYBACK_RESET_KEYS = [
   "skipAdsSeek",
   "skipAdsBlock",
   "newBadgePlace",
+  "newBadgeBlink",
   "playbackEnabled"
 ] as const satisfies readonly (keyof EffectSettings)[]
 
@@ -758,18 +760,26 @@ function Overlay() {
   }, [hostname])
 
   useEffect(() => {
-    const place: NewBadgePlace =
+    const onYoutube =
       globallyEnabled === true &&
       policyReady &&
       siteAllowed(hostname, policy) &&
       isYoutubePage(hostname)
-        ? settings.newBadgePlace
-        : "default"
-    applyYoutubeNewBadge(place)
-  }, [globallyEnabled, policyReady, policy, hostname, settings.newBadgePlace])
+    const place: NewBadgePlace = onYoutube ? settings.newBadgePlace : "default"
+    const blink = onYoutube && settings.newBadgeBlink
+    applyYoutubeNewBadge(place, blink)
+  }, [
+    globallyEnabled,
+    policyReady,
+    policy,
+    hostname,
+    settings.newBadgePlace,
+    settings.newBadgeBlink,
+    NEW_BADGE_BLINK_MS
+  ])
 
   useEffect(() => {
-    return () => applyYoutubeNewBadge("default")
+    return () => applyYoutubeNewBadge("default", false)
   }, [])
 
   useEffect(() => {
@@ -2349,26 +2359,49 @@ function Overlay() {
                   </div>
                 </Group>
                 {isYoutubePage(hostname) ? (
-                  <div className="vee-switch-row vee-switch-solo">
-                    <div>
-                      <span>New tag</span>
-                      <small>Where the New label sits on thumbnails, including Shorts.</small>
+                  <>
+                    <div className="vee-switch-row vee-switch-solo">
+                      <div>
+                        <span>New tag</span>
+                        <small>Where the New label sits on thumbnails, including Shorts.</small>
+                      </div>
+                      <select
+                        className="vee-select"
+                        aria-label="New tag"
+                        title="Where the New label sits on thumbnails, including Shorts"
+                        value={settings.newBadgePlace}
+                        onChange={(event) =>
+                          patch({ newBadgePlace: readNewBadgePlace(event.target.value) })
+                        }>
+                        <option value="default">Default</option>
+                        <option value="top-right">Top right</option>
+                        <option value="bottom-right">Bottom right</option>
+                        <option value="bottom-left">Bottom left</option>
+                        <option value="hide">Hide</option>
+                      </select>
                     </div>
-                    <select
-                      className="vee-select"
-                      aria-label="New tag"
-                      title="Where the New label sits on thumbnails, including Shorts"
-                      value={settings.newBadgePlace}
-                      onChange={(event) =>
-                        patch({ newBadgePlace: readNewBadgePlace(event.target.value) })
-                      }>
-                      <option value="default">Default</option>
-                      <option value="top-right">Top right</option>
-                      <option value="bottom-right">Bottom right</option>
-                      <option value="bottom-left">Bottom left</option>
-                      <option value="hide">Hide</option>
-                    </select>
-                  </div>
+                    <div className="vee-switch-row vee-switch-solo">
+                      <div>
+                        <span>Blink New tag</span>
+                        <small>
+                          Fade the New label from solid to transparent and back over one blink
+                          cycle.
+                        </small>
+                      </div>
+                      <button
+                        className="vee-switch"
+                        type="button"
+                        role="switch"
+                        aria-checked={settings.newBadgeBlink}
+                        aria-label="Blink New tag"
+                        title="Fade the New label from solid to transparent and back over one blink cycle"
+                        data-on={String(settings.newBadgeBlink)}
+                        disabled={settings.newBadgePlace === "hide"}
+                        onClick={() => patch({ newBadgeBlink: !settings.newBadgeBlink })}>
+                        <i />
+                      </button>
+                    </div>
+                  </>
                 ) : null}
                 <div className="vee-switch-row vee-switch-solo">
                   <div>

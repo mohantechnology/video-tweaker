@@ -435,6 +435,11 @@
   transform: translateX(18px);
 }
 
+.vee-switch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .vee-tabs {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

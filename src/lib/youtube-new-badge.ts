@@ -1,3 +1,4 @@
+import { NEW_BADGE_BLINK_MS } from "../settings"
 import { type NewBadgePlace } from "./types"
 
 const STYLE_ID = "vee-youtube-new-badge"
@@ -25,12 +26,25 @@ const CORNER: Record<Exclude<NewBadgePlace, "default" | "hide">, string> = {
   "bottom-left": "top:auto!important;right:auto!important;bottom:0!important;left:0!important;"
 }
 
-function cssFor(place: NewBadgePlace): string {
-  if (place === "default") return ""
+function cssFor(place: NewBadgePlace, blink: boolean): string {
   if (place === "hide") return `${NEW_BADGE}{display:none!important;}`
-  const rules = [`${NEW_BADGE}{${CORNER[place]}z-index:3!important;}`]
-  if (place === "bottom-right") {
-    rules.push(`${WATCH_BADGE}{bottom:28px!important;}`)
+
+  const rules: string[] = []
+  if (place !== "default") {
+    rules.push(`${NEW_BADGE}{${CORNER[place]}z-index:3!important;}`)
+    if (place === "bottom-right") {
+      rules.push(`${WATCH_BADGE}{bottom:28px!important;}`)
+    }
+  }
+  if (blink) {
+    // Name includes the duration so a settings.ts change starts a fresh animation
+    // instead of leaving the previous cycle running.
+    const ms = Math.max(200, Math.round(NEW_BADGE_BLINK_MS))
+    const name = `vee-new-badge-blink-${ms}`
+    rules.push(`@keyframes ${name}{0%,100%{opacity:1}50%{opacity:0}}`)
+    rules.push(
+      `${NEW_BADGE}{animation:${name} ${ms}ms ease-in-out infinite!important;}`
+    )
   }
   return rules.join("\n")
 }
@@ -45,16 +59,15 @@ export function isYoutubePage(hostname: string): boolean {
   )
 }
 
-/** Move or hide the New label. Default removes the override. */
-export function applyYoutubeNewBadge(place: NewBadgePlace): void {
-  const css = cssFor(place)
+/** Move, hide, or pulse the New label. Default with blink off removes the override. */
+export function applyYoutubeNewBadge(place: NewBadgePlace, blink = false): void {
+  const css = cssFor(place, blink)
   const existing = document.getElementById(STYLE_ID)
-  if (!css) {
-    existing?.remove()
-    return
-  }
-  const style = existing ?? document.createElement("style")
+  // Drop the old node so Chrome does not keep the previous animation duration.
+  existing?.remove()
+  if (!css) return
+  const style = document.createElement("style")
   style.id = STYLE_ID
   style.textContent = css
-  if (!style.parentNode) (document.head || document.documentElement).appendChild(style)
+  ;(document.head || document.documentElement).appendChild(style)
 }
